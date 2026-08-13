@@ -389,6 +389,7 @@ services:
     environment:
       WORKER_DATABASE_URL: postgres://${POSTGRES_WORKER_USER:-report_worker}:${POSTGRES_WORKER_PASSWORD:-local_worker_password}@postgres:5432/${POSTGRES_DB:-intelligent_report_control}?sslmode=disable
       WAREHOUSE_WORKER_DATABASE_URL: postgres://${WAREHOUSE_WORKER_USER:-report_warehouse_worker}:${WAREHOUSE_WORKER_PASSWORD:-local_warehouse_worker_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
+      WAREHOUSE_QUERY_DATABASE_URL: postgres://${WAREHOUSE_READER_USER:-report_warehouse_reader}:${WAREHOUSE_READER_PASSWORD:-local_warehouse_reader_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
       WORKER_TASK_TYPES: ${WORKER_TASK_TYPES:-}
       MINIO_ENDPOINT: minio:9000
       CONNECTOR_SERVICE_URL: http://connector-service:8090
@@ -432,6 +433,7 @@ services:
       WORKER_TASK_TYPES: EMBEDDING
       WORKER_DATABASE_URL: postgres://${POSTGRES_WORKER_USER:-report_worker}:${POSTGRES_WORKER_PASSWORD:-local_worker_password}@postgres:5432/${POSTGRES_DB:-intelligent_report_control}?sslmode=disable
       WAREHOUSE_WORKER_DATABASE_URL: postgres://${WAREHOUSE_WORKER_USER:-report_warehouse_worker}:${WAREHOUSE_WORKER_PASSWORD:-local_warehouse_worker_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
+      WAREHOUSE_QUERY_DATABASE_URL: postgres://${WAREHOUSE_READER_USER:-report_warehouse_reader}:${WAREHOUSE_READER_PASSWORD:-local_warehouse_reader_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
       ASKDATA_NEBULA_USERNAME: ${ASKDATA_NEBULA_WORKER_USER:-askdata_worker}
       ASKDATA_NEBULA_PASSWORD: ${ASKDATA_NEBULA_WORKER_PASSWORD:?ASKDATA_NEBULA_WORKER_PASSWORD is required}
       ASKDATA_NEBULA_ROOT_PASSWORD: ""
@@ -459,6 +461,7 @@ services:
       WORKER_TASK_TYPES: PROFILE
       WORKER_DATABASE_URL: postgres://${POSTGRES_WORKER_USER:-report_worker}:${POSTGRES_WORKER_PASSWORD:-local_worker_password}@postgres:5432/${POSTGRES_DB:-intelligent_report_control}?sslmode=disable
       WAREHOUSE_WORKER_DATABASE_URL: postgres://${WAREHOUSE_WORKER_USER:-report_warehouse_worker}:${WAREHOUSE_WORKER_PASSWORD:-local_warehouse_worker_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
+      WAREHOUSE_QUERY_DATABASE_URL: postgres://${WAREHOUSE_READER_USER:-report_warehouse_reader}:${WAREHOUSE_READER_PASSWORD:-local_warehouse_reader_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
       ASKDATA_NEBULA_USERNAME: ${ASKDATA_NEBULA_WORKER_USER:-askdata_worker}
       ASKDATA_NEBULA_PASSWORD: ${ASKDATA_NEBULA_WORKER_PASSWORD:?ASKDATA_NEBULA_WORKER_PASSWORD is required}
       ASKDATA_NEBULA_ROOT_PASSWORD: ""
@@ -488,6 +491,7 @@ services:
       WORKER_TASK_TYPES: PROJECTOR
       WORKER_DATABASE_URL: postgres://${POSTGRES_WORKER_USER:-report_worker}:${POSTGRES_WORKER_PASSWORD:-local_worker_password}@postgres:5432/${POSTGRES_DB:-intelligent_report_control}?sslmode=disable
       WAREHOUSE_WORKER_DATABASE_URL: postgres://${WAREHOUSE_WORKER_USER:-report_warehouse_worker}:${WAREHOUSE_WORKER_PASSWORD:-local_warehouse_worker_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
+      WAREHOUSE_QUERY_DATABASE_URL: postgres://${WAREHOUSE_READER_USER:-report_warehouse_reader}:${WAREHOUSE_READER_PASSWORD:-local_warehouse_reader_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
       ASKDATA_NEBULA_ADDRESSES: nebula-graphd-client:9669
       ASKDATA_NEBULA_SPACE: ${ASKDATA_NEBULA_SPACE:-askdata_semantic}
       ASKDATA_NEBULA_USERNAME: ${ASKDATA_NEBULA_WORKER_USER:-askdata_worker}
@@ -520,6 +524,7 @@ services:
       WORKER_TASK_TYPES: EVALUATOR
       WORKER_DATABASE_URL: postgres://${POSTGRES_WORKER_USER:-report_worker}:${POSTGRES_WORKER_PASSWORD:-local_worker_password}@postgres:5432/${POSTGRES_DB:-intelligent_report_control}?sslmode=disable
       WAREHOUSE_WORKER_DATABASE_URL: postgres://${WAREHOUSE_WORKER_USER:-report_warehouse_worker}:${WAREHOUSE_WORKER_PASSWORD:-local_warehouse_worker_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
+      WAREHOUSE_QUERY_DATABASE_URL: postgres://${WAREHOUSE_READER_USER:-report_warehouse_reader}:${WAREHOUSE_READER_PASSWORD:-local_warehouse_reader_password}@postgres-warehouse:5432/${WAREHOUSE_POSTGRES_DB:-intelligent_report_warehouse}?sslmode=disable
       ASKDATA_NEBULA_USERNAME: ${ASKDATA_NEBULA_WORKER_USER:-askdata_worker}
       ASKDATA_NEBULA_PASSWORD: ${ASKDATA_NEBULA_WORKER_PASSWORD:?ASKDATA_NEBULA_WORKER_PASSWORD is required}
       ASKDATA_NEBULA_ROOT_PASSWORD: ""

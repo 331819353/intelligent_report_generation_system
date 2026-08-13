@@ -1,4 +1,4 @@
-.PHONY: fmt lint build ci-check run-api run-worker run-connection-test-worker dev-up dev-stop dev-restart dev-status dev-logs seed-dev frontend-lint frontend-build infra-config infra-up connector-up connector-status mysql-e2e-up mysql-e2e-reset mysql-e2e-shell mysql-e2e-verify infra-down infra-reset infra-status infra-logs db-migrate db-seed-report-components db-verify warehouse-verify db-shell warehouse-shell clean
+.PHONY: fmt lint test build backend-check check ci-check run-api run-worker run-connection-test-worker dev-up dev-stop dev-restart dev-status dev-logs seed-dev frontend-lint frontend-test frontend-build frontend-check infra-config infra-up connector-up connector-status mysql-e2e-up mysql-e2e-reset mysql-e2e-shell mysql-e2e-verify infra-down infra-reset infra-status infra-logs db-migrate db-seed-report-components db-verify warehouse-verify db-shell warehouse-shell clean
 
 export GOCACHE ?= $(CURDIR)/.cache/go-build
 
@@ -8,6 +8,9 @@ fmt:
 
 lint:
 	@go vet ./cmd/... ./internal/...
+
+test:
+	@go test ./... -count=1
 
 build:
 	@mkdir -p bin
@@ -22,8 +25,18 @@ ci-check:
 frontend-lint:
 	@npm --prefix web run lint
 
+frontend-test:
+	@npm --prefix web run test
+
 frontend-build:
 	@npm --prefix web run build
+
+backend-check: test lint build
+
+frontend-check: frontend-lint frontend-test frontend-build
+
+# 与 CI 一致的单一仓库级验证入口，覆盖迁移/格式、后端和前端。
+check: ci-check backend-check frontend-check
 
 # 本地基础设施。常规运行不启动验收源；真实 MySQL 只在 verification profile 中启用。
 infra-config:

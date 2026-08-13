@@ -5,6 +5,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
+import '../styles/report.css'
 import { CreateDecisionDialog } from '../components/decision/CreateDecisionDialog'
 import { ReportScheduleDialog } from '../components/report/ReportScheduleDialog'
 import { administrationAPI, type ShareTarget } from '../lib/administration'

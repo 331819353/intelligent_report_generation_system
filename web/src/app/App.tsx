@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react'
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { RequireAuth } from '../components/RequireAuth'
 import { RequirePlatformAdministrator } from '../components/RequirePlatformAdministrator'
@@ -36,6 +36,18 @@ function RouteLoading() {
   </main>
 }
 
+function AuthenticatedRoute({ children }: { children: ReactNode }) {
+  return <RequireAuth>{children}</RequireAuth>
+}
+
+function BusinessRoute({ children }: { children: ReactNode }) {
+  return <AuthenticatedRoute><RequireBusinessDomain>{children}</RequireBusinessDomain></AuthenticatedRoute>
+}
+
+function AdministrationRoute({ children }: { children: ReactNode }) {
+  return <AuthenticatedRoute><RequirePlatformAdministrator>{children}</RequirePlatformAdministrator></AuthenticatedRoute>
+}
+
 /** 定义公开登录页、受保护业务页和兜底跳转。 */
 export function App() {
   const location = useLocation()
@@ -57,33 +69,34 @@ export function App() {
       <Suspense fallback={<RouteLoading />}>
         <Routes key={domainRevision}>
         <Route path="/login" element={<LoginPage />} />
-        <Route path="/domain-access" element={<RequireAuth><DomainAccessPage /></RequireAuth>} />
-        <Route path="/home" element={<RequireAuth><RequireBusinessDomain><HomePage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/profile" element={<RequireAuth><RequireBusinessDomain><ProfilePage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/help" element={<RequireAuth><RequireBusinessDomain><HelpPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/approvals" element={<RequireAuth><RequireBusinessDomain><ApprovalsPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/tasks" element={<RequireAuth><RequireBusinessDomain><TasksPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/decisions" element={<RequireAuth><RequireBusinessDomain><DecisionsPage /></RequireBusinessDomain></RequireAuth>} />
+        <Route path="/domain-access" element={<AuthenticatedRoute><DomainAccessPage /></AuthenticatedRoute>} />
+        <Route path="/home" element={<BusinessRoute><HomePage /></BusinessRoute>} />
+        <Route path="/profile" element={<BusinessRoute><ProfilePage /></BusinessRoute>} />
+        <Route path="/help" element={<BusinessRoute><HelpPage /></BusinessRoute>} />
+        <Route path="/approvals" element={<BusinessRoute><ApprovalsPage /></BusinessRoute>} />
+        <Route path="/tasks" element={<BusinessRoute><TasksPage /></BusinessRoute>} />
+        <Route path="/decisions" element={<BusinessRoute><DecisionsPage /></BusinessRoute>} />
         <Route path="/platform-management" element={<Navigate to="/platform-management/domains" replace />} />
-        <Route path="/platform-management/users" element={<RequireAuth><RequirePlatformAdministrator><UserPermissionsPage /></RequirePlatformAdministrator></RequireAuth>} />
-        <Route path="/platform-management/runtime-config" element={<RequireAuth><RequirePlatformAdministrator><RuntimeConfigPage /></RequirePlatformAdministrator></RequireAuth>} />
-        <Route path="/platform-management/:section" element={<RequireAuth><RequirePlatformAdministrator><ManagementCenterPage /></RequirePlatformAdministrator></RequireAuth>} />
+        <Route path="/platform-management/users" element={<AdministrationRoute><UserPermissionsPage /></AdministrationRoute>} />
+        <Route path="/platform-management/runtime-config" element={<AdministrationRoute><RuntimeConfigPage /></AdministrationRoute>} />
+        <Route path="/platform-management/:section" element={<AdministrationRoute><ManagementCenterPage /></AdministrationRoute>} />
         <Route path="/platform-settings" element={<Navigate to="/platform-management/domains" replace />} />
         <Route path="/permissions" element={<Navigate to="/platform-management/permissions" replace />} />
-        <Route path="/data-sources" element={<RequireAuth><RequireBusinessDomain><DataSourceCenterPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/data-sources/:sourceId/assets" element={<RequireAuth><RequireBusinessDomain><DataSourceAssetsPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/data-sources/:sourceId/assets/discover" element={<RequireAuth><RequireBusinessDomain><DataSourceAssetsPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/data-sources/:sourceId/assets/:tableId" element={<RequireAuth><RequireBusinessDomain><DataSourceAssetsPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/datasets" element={<RequireAuth><RequireBusinessDomain><DatasetCenterPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/datasets/:datasetId/edit" element={<RequireAuth><RequireBusinessDomain><DatasetCenterPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/semantic" element={<RequireAuth><RequireBusinessDomain><SemanticCenterPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/ask-data" element={<RequireAuth><RequireBusinessDomain><AskDataPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/ask-data/conversations/:conversationId" element={<RequireAuth><RequireBusinessDomain><AskDataPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/reports" element={<RequireAuth><RequireBusinessDomain><ReportAssetsPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/report-shares/:shareToken" element={<RequireAuth><RequireBusinessDomain><ReportShareAccessPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/reports/new" element={<RequireAuth><RequireBusinessDomain><ReportEditorPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/reports/:reportId/publish-review" element={<RequireAuth><RequireBusinessDomain><ReportPublishReviewPage /></RequireBusinessDomain></RequireAuth>} />
-        <Route path="/reports/:reportId" element={<RequireAuth><RequireBusinessDomain><ReportPage /></RequireBusinessDomain></RequireAuth>} />
+        <Route path="/data-sources" element={<BusinessRoute><DataSourceCenterPage /></BusinessRoute>} />
+        <Route path="/data-sources/:sourceId/assets" element={<BusinessRoute><DataSourceAssetsPage /></BusinessRoute>} />
+        <Route path="/data-sources/:sourceId/assets/discover" element={<BusinessRoute><DataSourceAssetsPage /></BusinessRoute>} />
+        <Route path="/data-sources/:sourceId/assets/:tableId" element={<BusinessRoute><DataSourceAssetsPage /></BusinessRoute>} />
+        <Route path="/datasets" element={<BusinessRoute><DatasetCenterPage /></BusinessRoute>} />
+        <Route path="/datasets/:datasetId/edit" element={<BusinessRoute><DatasetCenterPage /></BusinessRoute>} />
+        <Route path="/semantic" element={<BusinessRoute><SemanticCenterPage /></BusinessRoute>} />
+        <Route path="/semantic/:section" element={<BusinessRoute><SemanticCenterPage /></BusinessRoute>} />
+        <Route path="/ask-data" element={<BusinessRoute><AskDataPage /></BusinessRoute>} />
+        <Route path="/ask-data/conversations/:conversationId" element={<BusinessRoute><AskDataPage /></BusinessRoute>} />
+        <Route path="/reports" element={<BusinessRoute><ReportAssetsPage /></BusinessRoute>} />
+        <Route path="/report-shares/:shareToken" element={<BusinessRoute><ReportShareAccessPage /></BusinessRoute>} />
+        <Route path="/reports/new" element={<BusinessRoute><ReportEditorPage /></BusinessRoute>} />
+        <Route path="/reports/:reportId/publish-review" element={<BusinessRoute><ReportPublishReviewPage /></BusinessRoute>} />
+        <Route path="/reports/:reportId" element={<BusinessRoute><ReportPage /></BusinessRoute>} />
         <Route path="*" element={<Navigate to="/home" replace />} />
         </Routes>
       </Suspense>

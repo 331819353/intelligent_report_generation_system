@@ -20,6 +20,7 @@ import {
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
+import '../styles/decisions.css'
 import { RequestError } from '../lib/api'
 import { currentSubject } from '../lib/auth'
 import {

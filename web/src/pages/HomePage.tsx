@@ -5,16 +5,17 @@ import {
   ChatCircleDots,
   CheckCircle,
   FileText,
-  MagnifyingGlass,
+  Paperclip,
   PaperPlaneTilt,
   ShieldCheck,
   WarningCircle,
   X,
 } from '@phosphor-icons/react'
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AppButton } from '../components/AppButton'
 import { AppShell } from '../components/AppShell'
+import '../styles/home.css'
 import { currentDomain, subscribeDomainChange } from '../lib/domain-context'
 import {
   conversationToHomeWork,
@@ -27,6 +28,14 @@ import {
 } from '../lib/home-data'
 import { homeAPI, type SavedQuestionSummary, type WorkInboxItem } from '../lib/home-api'
 import { reportAssetsAPI } from '../report/api/assets'
+import {
+  askDataAttachmentAccept,
+  askDataAttachmentLimit,
+  askDataAttachmentMaxBytes,
+  clearAskDataAttachmentDraft,
+  saveAskDataAttachmentDraft,
+  type AskDataAttachmentDraftItem,
+} from '../lib/ask-data-attachments'
 
 type LoadState<T> = {
   status: 'loading' | 'ready' | 'error'
@@ -92,10 +101,6 @@ function resourceError(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback
 }
 
-function formatPageDate(value: Date) {
-  return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' }).format(value)
-}
-
 function combinedRecentWork(work: Record<HomeWorkKind, LoadState<HomeWorkItem>>) {
   return [
     work.question.items[1],
@@ -121,10 +126,11 @@ export function HomePage() {
     : { status: 'loading', items: [] }
   const [question, setQuestion] = useState('')
   const [questionError, setQuestionError] = useState('')
+  const [attachments, setAttachments] = useState<AskDataAttachmentDraftItem[]>([])
+  const attachmentInputRef = useRef<HTMLInputElement>(null)
   const [activeFilter, setActiveFilter] = useState<HomeWorkFilter>('all')
   const [notice, setNotice] = useState('')
   const [reloadRevision, setReloadRevision] = useState(0)
-  const [pageDomainName, setPageDomainName] = useState(() => snapshot ? '企业经营' : currentDomain()?.name ?? '当前领域')
   const [suggestions, setSuggestions] = useState<SavedQuestionSummary[]>(snapshot ? snapshotSuggestions : [])
   const [work, setWork] = useState<Record<HomeWorkKind, LoadState<HomeWorkItem>>>(() => ({
     question: initialWorkState('question'),
@@ -136,7 +142,6 @@ export function HomePage() {
     : { status: 'loading', items: [] })
 
   useEffect(() => subscribeDomainChange(() => {
-    setPageDomainName(currentDomain()?.name ?? '当前领域')
     if (snapshot) return
     setWork({ question: { status: 'loading', items: [] }, report: { status: 'loading', items: [] }, decision: { status: 'loading', items: [] } })
     setTaskState({ status: 'loading', items: [] })
@@ -188,7 +193,7 @@ export function HomePage() {
           : { status: 'ready' as const, error: undefined }
     : work[activeFilter]
   const continueItem = work.question.items[0]
-  const pageDate = snapshot ? '2026 年 8 月 11 日' : formatPageDate(new Date())
+  const showResumePanel = work.question.status !== 'ready' || Boolean(continueItem)
 
   const reloadHome = () => {
     if (snapshot) return
@@ -199,14 +204,60 @@ export function HomePage() {
 
   const startQuestion = (event?: FormEvent) => {
     event?.preventDefault()
-    const value = question.trim()
+    const value = question.trim() || (attachments.length > 0 ? '请分析附件中的关键信息、异常与趋势' : '')
     if (!value) {
       setQuestionError('请输入需要分析的问题')
       return
     }
     setQuestionError('')
-    navigate(`/ask-data?q=${encodeURIComponent(value)}${snapshot ? '&snapshot=home-question' : ''}`)
+    if (attachments.length > 0) saveAskDataAttachmentDraft(attachments)
+    else clearAskDataAttachmentDraft()
+    navigate(`/ask-data?q=${encodeURIComponent(value)}${attachments.length > 0 ? '&attachments=1' : ''}${snapshot ? '&snapshot=home-question' : ''}`)
   }
+
+  const chooseAttachments = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.currentTarget.files ?? [])
+    event.currentTarget.value = ''
+    if (files.length === 0) return
+    const remaining = Math.max(0, askDataAttachmentLimit - attachments.length)
+    if (remaining === 0) {
+      setNotice(`最多添加 ${askDataAttachmentLimit} 个附件`)
+      return
+    }
+    const existing = new Set(attachments.map(item => item.id))
+    const accepted: AskDataAttachmentDraftItem[] = []
+    const rejected: string[] = []
+    for (const file of files.slice(0, remaining)) {
+      const id = `${file.name}:${file.size}:${file.lastModified}`
+      if (existing.has(id)) continue
+      if (!/\.(txt|csv|json|md)$/i.test(file.name)) {
+        rejected.push(`${file.name}：格式不支持`)
+        continue
+      }
+      if (file.size > askDataAttachmentMaxBytes) {
+        rejected.push(`${file.name}：超过 1MB`)
+        continue
+      }
+      const excerpt = (await file.text()).replaceAll('\u0000', '').trim().slice(0, 900)
+      if (!excerpt) {
+        rejected.push(`${file.name}：文件为空`)
+        continue
+      }
+      accepted.push({ id, name: file.name, size: file.size, type: file.type, excerpt })
+      existing.add(id)
+    }
+    if (accepted.length > 0) setAttachments(current => [...current, ...accepted].slice(0, askDataAttachmentLimit))
+    const omitted = Math.max(0, files.length - remaining)
+    if (rejected.length > 0 || omitted > 0) {
+      setNotice([rejected.join('；'), omitted > 0 ? `另有 ${omitted} 个文件超出数量限制` : ''].filter(Boolean).join('；'))
+    }
+  }
+
+  const removeAttachment = (id: string) => {
+    setAttachments(current => current.filter(item => item.id !== id))
+  }
+
+  const formatAttachmentSize = (size: number) => size < 1024 ? `${size} B` : `${Math.ceil(size / 1024)} KB`
 
   const chooseSuggestion = async (item: SavedQuestionSummary) => {
     if (snapshot) {
@@ -263,12 +314,10 @@ export function HomePage() {
 
   return <AppShell
     className="home-shell"
-    title="分析首页"
-    titleMeta={<span className="home-title-meta">{pageDomainName} · {pageDate}</span>}
-    eyebrow=""
+    hidePageHeader
   >
     <div className="home-layout">
-      <section className="home-resume-panel" aria-labelledby="home-resume-title" aria-busy={work.question.status === 'loading'}>
+      {showResumePanel && <section className="home-resume-panel" aria-labelledby="home-resume-title" aria-busy={work.question.status === 'loading'}>
         <header><h2 id="home-resume-title">继续上次分析</h2></header>
         {continueItem && <div className="home-resume-content">
           <span className="home-resume-icon" aria-hidden="true"><ChatCircleDots size={29} weight="duotone" /></span>
@@ -281,21 +330,28 @@ export function HomePage() {
         </div>}
         {work.question.status === 'loading' && <div className="home-resume-state"><span className="home-loading-dot" />正在加载上次分析…</div>}
         {work.question.status === 'error' && <div className="home-resume-state is-error"><WarningCircle size={18} /><span>{work.question.error}</span><AppButton plain size="small" type="button" onClick={reloadHome}><ArrowClockwise size={13} />重新加载</AppButton></div>}
-        {work.question.status === 'ready' && !continueItem && <div className="home-resume-state"><ChatCircleDots size={20} /><span>暂无可继续的分析，从下方发起一个新问题吧</span></div>}
-      </section>
+      </section>}
 
       <section className="home-question-launcher" aria-labelledby="home-question-title">
-        <h2 id="home-question-title">或者，开始一个新问题</h2>
-        <form onSubmit={startQuestion}>
-          <div className="home-question-input-row">
-            <label>
-              <MagnifyingGlass size={19} aria-hidden="true" />
-              <span className="sr-only">输入分析问题</span>
-              <input value={question} maxLength={500} aria-invalid={Boolean(questionError)} aria-describedby={questionError ? 'home-question-error' : undefined} onChange={event => { setQuestion(event.target.value); setQuestionError('') }} placeholder="输入您想分析的业务问题" />
-            </label>
-            <AppButton className="home-ask-button" variant="primary" type="submit"><PaperPlaneTilt size={18} weight="fill" aria-hidden="true" />开始问数</AppButton>
-          </div>
+        <header className="home-question-heading"><div><h2 id="home-question-title">开始一个新问题</h2><p>描述分析目标，或上传文本数据作为本次分析的补充上下文</p></div></header>
+        <form className="home-chat-composer" onSubmit={startQuestion}>
+          <label className="home-chat-field">
+            <span className="sr-only">输入分析问题</span>
+            <textarea rows={3} value={question} maxLength={500} aria-invalid={Boolean(questionError)} aria-describedby={questionError ? 'home-question-error' : undefined} onChange={event => { setQuestion(event.target.value); setQuestionError('') }} placeholder="例如：请分析本月销售额下降的主要原因，并指出影响最大的区域和渠道" />
+            <small>{question.length}/500</small>
+          </label>
+          {attachments.length > 0 && <div className="home-attachment-list" aria-label="已添加附件">
+            {attachments.map(item => <span className="home-attachment-chip" key={item.id}><FileText size={15} /><span><strong>{item.name}</strong><small>{formatAttachmentSize(item.size)}</small></span><AppButton text circle size="small" type="button" aria-label={`移除附件 ${item.name}`} onClick={() => removeAttachment(item.id)}><X size={13} /></AppButton></span>)}
+          </div>}
           {questionError && <p className="home-question-error" id="home-question-error" role="alert"><WarningCircle size={14} />{questionError}</p>}
+          <footer className="home-chat-toolbar">
+            <div className="home-upload-control">
+              <input ref={attachmentInputRef} className="sr-only" type="file" multiple accept={askDataAttachmentAccept} onChange={event => void chooseAttachments(event)} />
+              <AppButton plain type="button" onClick={() => attachmentInputRef.current?.click()}><Paperclip size={17} />添加附件</AppButton>
+              <small>TXT、CSV、JSON、MD，最多 3 个，单个不超过 1MB</small>
+            </div>
+            <AppButton className="home-ask-button" variant="primary" type="submit"><PaperPlaneTilt size={18} weight="fill" aria-hidden="true" />发送问题</AppButton>
+          </footer>
           <div className="home-suggestions">
             <span>{suggestions.length > 0 ? '常用问题：' : '暂无保存问题，可直接输入新问题'}</span>
             {suggestions.map(item => <AppButton plain size="small" type="button" key={item.id} title={item.questionText} onClick={() => void chooseSuggestion(item)}>{item.name}</AppButton>)}

@@ -21,6 +21,7 @@ import {
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppButton } from '../components/AppButton'
 import { AppShell } from '../components/AppShell'
+import '../styles/data-source-assets.css'
 import {
   dataSourceAPI,
   type DataSourceColumnRecord,

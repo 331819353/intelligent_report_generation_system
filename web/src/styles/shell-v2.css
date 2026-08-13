@@ -209,13 +209,12 @@ body:has(.app-shell-v2.qa-viewport-1920) { min-width: 1920px; min-height: 1080px
   display: block;
   overflow-y: auto;
   margin: 0;
-  scrollbar-width: thin;
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
+.app-shell-v2 .sidebar nav::-webkit-scrollbar { display: none; }
 
-.sidebar-nav-group { display: grid; gap: 4px; padding: 4px 0 14px; border-bottom: 1px solid #edf0f4; }
-.sidebar-nav-group + .sidebar-nav-group { padding-top: 14px; }
-.sidebar-nav-group:last-child { border-bottom: 0; }
-.sidebar-nav-group h2 { margin: 0 10px 7px; color: #98a2b3; font-size: 12px; font-weight: 720; letter-spacing: .03em; }
+.sidebar-navigation-tree { display: grid; gap: 4px; }
 
 .app-shell-v2 .sidebar nav a,
 .sidebar-planned-link {
@@ -238,6 +237,12 @@ body:has(.app-shell-v2.qa-viewport-1920) { min-width: 1920px; min-height: 1080px
 }
 .app-shell-v2 .sidebar nav a svg,
 .sidebar-planned-link svg { flex: none; color: #788596; }
+.app-shell-v2 .sidebar nav a > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .app-shell-v2 .sidebar nav a:hover { background: #f5f7fa; color: #252d3a; }
 .app-shell-v2 .sidebar nav a.active { background: #edf3ff; color: #2059c7; }
 .app-shell-v2 .sidebar nav a.active svg { color: #2864dc; }
@@ -262,7 +267,7 @@ body:has(.app-shell-v2.qa-viewport-1920) { min-width: 1920px; min-height: 1080px
 .sidebar-nav-branch.is-active > .sidebar-nav-parent.app-button { background: #f5f8fd; color: #2059c7; }
 .sidebar-nav-parent > svg:first-child { flex: none; color: #788596; }
 .sidebar-nav-branch.is-active > .sidebar-nav-parent svg:first-child { color: #2864dc; }
-.sidebar-nav-parent > span { flex: 1; text-align: left; }
+.sidebar-nav-parent > span { min-width: 0; flex: 1; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-nav-caret { transition: transform .16s ease; }
 .sidebar-nav-parent[aria-expanded="false"] .sidebar-nav-caret { transform: rotate(-90deg); }
 .sidebar-nav-children { display: grid; gap: 2px; padding-left: 25px; }
@@ -298,17 +303,17 @@ body:has(.app-shell-v2.qa-viewport-1920) { min-width: 1920px; min-height: 1080px
 .domain-menu-section-label { padding: 9px 14px 6px; color: #7d899b; font-size: 13px; font-weight: 620; }
 .sidebar-domain-menu > .domain-option.app-button {
   width: 100%;
-  min-height: 116px;
+  min-height: 92px;
   height: auto;
   display: grid;
-  grid-template-columns: 46px minmax(0, 1fr) 18px;
-  align-items: start;
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 4fr);
+  align-items: stretch;
+  column-gap: 10px;
   margin: 0;
   border: 0;
   border-bottom: 1px solid #e8edf3;
   border-radius: 0;
-  padding: 12px 14px;
+  padding: 11px 14px;
   background: #fff;
   color: #52647c;
   text-align: left;
@@ -319,29 +324,33 @@ body:has(.app-shell-v2.qa-viewport-1920) { min-width: 1920px; min-height: 1080px
 .sidebar-domain-menu > .domain-option.app-button[aria-checked="true"] { background: #edf5ff; box-shadow: inset 3px 0 #1677ff; }
 .sidebar-domain-menu > .domain-option.app-button:disabled { color: #8793a5; opacity: .58; }
 .sidebar-domain-menu .domain-option-icon {
-  width: 46px;
-  height: 46px;
+  width: 40px;
+  height: 40px;
+  align-self: center;
+  justify-self: center;
   border-radius: 7px;
   background: #e9f8f7;
   color: #17a6a0;
 }
 .sidebar-domain-menu .domain-option.is-violet .domain-option-icon { background: #f0efff; color: #7467e8; }
 .sidebar-domain-menu .domain-option.is-green .domain-option-icon { background: #eaf8f1; color: #20a369; }
-.domain-option-copy { min-width: 0; display: grid; gap: 4px; }
-.domain-option-title { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.domain-option-copy { min-width: 0; display: grid; grid-template-rows: repeat(3, minmax(0, 1fr)); }
+.domain-option-title { min-width: 0; display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 1fr); align-items: center; column-gap: 8px; }
 .sidebar-domain-menu .domain-option-title strong { overflow: hidden; color: #2f4058; font-size: 17px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
-.domain-option-title em { flex: none; border-radius: 4px; padding: 2px 6px; background: #1677ff; color: #fff; font-size: 14px; font-style: normal; font-weight: 700; line-height: 1.35; }
-.sidebar-domain-menu > .domain-option.app-button .domain-option-copy > small { color: #738198; font-size: 13px; line-height: 1.45; }
+.domain-option-status { min-width: 0; display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.domain-option-status em { flex: none; border-radius: 4px; padding: 2px 6px; background: #1677ff; color: #fff; font-size: 13px; font-style: normal; font-weight: 700; line-height: 1.35; }
+.sidebar-domain-menu > .domain-option.app-button .domain-option-copy > small { align-self: center; color: #738198; font-size: 13px; line-height: 1.45; }
 .domain-option-description {
-  display: -webkit-box;
+  align-self: center;
+  display: block;
   overflow: hidden;
   color: #7b899c;
   font-size: 14px;
-  line-height: 1.5;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.domain-option-spinner { align-self: center; color: #1677ff; animation: domain-option-spin .8s linear infinite; }
+.domain-option-spinner { flex: none; color: #1677ff; animation: domain-option-spin .8s linear infinite; }
 .sidebar-domain-menu > footer {
   min-height: 46px;
   display: flex;
@@ -402,7 +411,7 @@ body:has(.app-shell-v2.qa-viewport-1920) { min-width: 1920px; min-height: 1080px
 
 @media (max-width: 1360px) {
   .sidebar-domain-menu { bottom: -38px; left: calc(100% - 58px); }
-  .sidebar-domain-menu > .domain-option.app-button { min-height: 110px; }
+  .sidebar-domain-menu > .domain-option.app-button { min-height: 90px; }
 }
 
 .app-shell-v2 > .main-stage {
@@ -419,7 +428,6 @@ body:has(.app-shell-v2.qa-viewport-1920) { min-width: 1920px; min-height: 1080px
 .app-shell-v2.is-sidebar-collapsed .global-brand { justify-content: center; padding: 0 10px; }
 .app-shell-v2.is-sidebar-collapsed .global-brand .brand-logo { width: 56px; }
 .app-shell-v2.is-sidebar-collapsed .global-brand strong,
-.app-shell-v2.is-sidebar-collapsed .sidebar-nav-group h2,
 .app-shell-v2.is-sidebar-collapsed .sidebar nav a span,
 .app-shell-v2.is-sidebar-collapsed .sidebar-planned-link span,
 .app-shell-v2.is-sidebar-collapsed .sidebar-domain-selector span,
@@ -441,7 +449,6 @@ body:has(.app-shell-v2.qa-viewport-1920) { min-width: 1920px; min-height: 1080px
   .app-shell-v2 .global-brand { justify-content: center; padding: 0 10px; }
   .app-shell-v2 .global-brand .brand-logo { width: 56px; }
   .app-shell-v2 .global-brand strong,
-  .app-shell-v2 .sidebar-nav-group h2,
   .app-shell-v2 .sidebar nav a span,
   .app-shell-v2 .sidebar-planned-link span,
   .app-shell-v2 .sidebar-domain-selector span,
@@ -473,6 +480,6 @@ body:has(.app-shell-v2.qa-viewport-1920) { min-width: 1920px; min-height: 1080px
   .app-shell-v2 .topbar h1 { font-size: 23px; }
   .utility-popover { right: 8px; width: min(340px, calc(100vw - 82px)); }
   .app-shell-v2 .sidebar-domain-menu { left: 46px; width: min(344px, calc(100vw - 70px)); }
-  .sidebar-domain-menu > .domain-option.app-button { min-height: 100px; }
+  .sidebar-domain-menu > .domain-option.app-button { min-height: 88px; }
   .domain-switch-feedback { right: 12px; bottom: 12px; max-width: calc(100vw - 88px); }
 }

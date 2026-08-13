@@ -1592,6 +1592,30 @@ SELECT (
     'public','askdata.active_learning_data_request_signals(uuid)','EXECUTE'
   )
   AND has_function_privilege(
+    :'app_user','askdata.resolve_subject_attributes(uuid,uuid)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'worker_user','askdata.resolve_subject_attributes(uuid,uuid)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user','askdata.resolve_subject_attributes(uuid,uuid)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    'public','askdata.resolve_subject_attributes(uuid,uuid)','EXECUTE'
+  )
+  AND has_function_privilege(
+    :'app_user','askdata.row_access_policy_coverage(uuid,uuid)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'worker_user','askdata.row_access_policy_coverage(uuid,uuid)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    :'connection_test_user','askdata.row_access_policy_coverage(uuid,uuid)','EXECUTE'
+  )
+  AND NOT has_function_privilege(
+    'public','askdata.row_access_policy_coverage(uuid,uuid)','EXECUTE'
+  )
+  AND has_function_privilege(
     :'worker_user','askdata.load_quota_usage_snapshots(uuid,uuid,uuid,timestamptz)','EXECUTE'
   )
   AND NOT has_function_privilege(

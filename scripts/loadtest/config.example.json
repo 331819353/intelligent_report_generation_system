@@ -1,6 +1,7 @@
 {
   "baseUrl": "http://127.0.0.1:8080",
   "seed": 42,
+  "scopeProfile": "P1_REPORT_ASKDATA",
   "databaseLabel": "postgres-16-pgvector-hnsw",
   "graphLabel": "nebula-3.8.0-three-hop",
   "llmLabel": "governed-provider-fault-proxy",
@@ -23,6 +24,10 @@
     {"scenario":"VECTOR_RECALL","method":"POST","path":"/api/v1/askdata/evaluation/retrieval","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"fixtureSet":"sealed-retrieval-capacity"},"concurrency":20,"requests":1000,"timeoutMs":10000,"thresholds":{"maxP95Ms":1000,"maxP99Ms":3000,"minSuccessRate":0.99,"minRecallAtK":0.99}},
     {"scenario":"GRAPH_3_HOPS","method":"POST","path":"/api/v1/askdata/evaluation/graph","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"fixtureSet":"three-hop-capacity"},"concurrency":20,"requests":1000,"timeoutMs":5000,"thresholds":{"maxP95Ms":500,"maxP99Ms":2000,"minSuccessRate":0.99}},
     {"scenario":"LLM_DEGRADATION","method":"POST","path":"/api/v1/askdata/evaluation/faults","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"fault":"PROVIDER_RATE_LIMIT","fixtureMode":true},"concurrency":20,"requests":500,"timeoutMs":30000,"thresholds":{"maxP95Ms":18000,"maxP99Ms":30000,"minSuccessRate":0.99}},
-    {"scenario":"KPI_BUNDLE","method":"POST","path":"/api/v1/questions","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"question":"replace-with-kpi-bundle-question"},"concurrency":16,"requests":500,"timeoutMs":30000,"thresholds":{"maxP95Ms":25000,"maxP99Ms":30000,"minSuccessRate":0.99}}
+    {"scenario":"KPI_BUNDLE","method":"POST","path":"/api/v1/questions","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"question":"replace-with-kpi-bundle-question"},"concurrency":16,"requests":500,"timeoutMs":30000,"thresholds":{"maxP95Ms":25000,"maxP99Ms":30000,"minSuccessRate":0.99}},
+    {"scenario":"PLATFORM_ACCESS","method":"GET","path":"/api/v1/business-domains","concurrency":32,"requests":2000,"timeoutMs":5000,"thresholds":{"maxP95Ms":500,"maxP99Ms":2000,"minSuccessRate":0.999}},
+    {"scenario":"REPORT_RUNTIME","method":"POST","path":"/api/v1/reports/replace-with-report-uuid/runtime/execute","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"selections":[]},"concurrency":32,"requests":2000,"timeoutMs":30000,"thresholds":{"maxP95Ms":6000,"maxP99Ms":20000,"minSuccessRate":0.99}},
+    {"scenario":"REPORT_PUBLISH","method":"POST","path":"/api/v1/reports/replace-with-report-uuid/publish-review","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"previewedDesktop":true,"previewedMobile":true},"concurrency":8,"requests":200,"timeoutMs":60000,"thresholds":{"maxP95Ms":30000,"maxP99Ms":60000,"minSuccessRate":0.99}},
+    {"scenario":"REPORT_EXPORT","method":"POST","path":"/api/v1/reports/replace-with-report-uuid/exports","headers":{"X-Business-Domain-Id":"replace-with-domain-uuid"},"body":{"format":"PDF"},"concurrency":8,"requests":400,"timeoutMs":60000,"thresholds":{"maxP95Ms":20000,"maxP99Ms":60000,"minSuccessRate":0.99}}
   ]
 }

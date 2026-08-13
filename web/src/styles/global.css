@@ -19,6 +19,16 @@
 
 * { box-sizing: border-box; }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
 html { min-height: 100%; background: var(--canvas); }
 
 body {
@@ -476,6 +486,21 @@ textarea:focus-visible {
 }
 
 .login-input input::placeholder { color: #9aa4b4; }
+
+/* 浏览器自动填充会只给原生 input 绘制浅蓝背景，导致图标区和密码按钮区
+   像是没有被输入框背景覆盖。用内阴影覆盖 UA autofill 层，让整个组合控件
+   始终保持同一块白色表面，同时保留浏览器的自动填充能力。 */
+.login-input input:autofill,
+.login-input input:-webkit-autofill,
+.login-input input:-webkit-autofill:hover,
+.login-input input:-webkit-autofill:focus,
+.login-input input:-webkit-autofill:active {
+  box-shadow: 0 0 0 1000px #fff inset;
+  -webkit-box-shadow: 0 0 0 1000px #fff inset;
+  -webkit-text-fill-color: var(--login-ink);
+  caret-color: var(--login-ink);
+}
+
 .login-password-toggle.app-button {
   width: 44px;
   min-height: 44px;

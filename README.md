@@ -57,7 +57,12 @@ make db-seed-report-components
 make seed-dev
 ```
 
-创建演示租户、平台管理员与三个业务领域。账号取自 `.env` 中的 `SEED_ADMIN_EMAIL`（默认 `admin@example.com`）与 `SEED_ADMIN_PASSWORD`。
+创建演示租户、平台管理员、默认领域负责人和三个业务领域。种子会生成两类权限层级不同的账号：
+
+- 平台管理员：`SEED_ADMIN_EMAIL`（默认 `admin@example.com`），拥有全平台最高权限，可治理平台并进入全部业务领域；
+- 业务领域负责人：`SEED_DOMAIN_OWNER_EMAIL`（默认 `biz.owner@example.com`），用于数据、问数、报告与决策主流程。
+
+两者默认都使用 `SEED_ADMIN_PASSWORD`；如需单独设置业务账号密码，可配置 `SEED_DOMAIN_OWNER_PASSWORD`。
 
 ```bash
 make run-api
@@ -73,7 +78,7 @@ make run-worker
 npm --prefix web install && npm --prefix web run dev
 ```
 
-打开 <http://127.0.0.1:5173> 并使用上面的种子账号登录。API 监听 `127.0.0.1:8080`。
+打开 <http://127.0.0.1:5173>。验收业务主流程时使用领域负责人账号；治理平台时使用平台管理员账号。API 监听 `127.0.0.1:8080`。
 
 > 也可以用 `make dev-up` 让 Docker Compose 托管全部应用与基础设施进程（含 NebulaGraph 与 Connector），`make dev-status` 查看状态，`make dev-stop` 停止。
 
@@ -116,12 +121,10 @@ curl -H "Authorization: Bearer $TOKEN" '127.0.0.1:8080/api/v1/askdata/semantic/m
 ## 5. 验证命令
 
 ```bash
-go build ./... && go test ./... -count=1 && go vet ./...
+make check
 ```
 
-```bash
-npm --prefix web run lint && npm --prefix web run test && npm --prefix web run build
-```
+该命令统一检查迁移编号与代码格式，并运行后端测试、静态检查、应用构建，以及前端 lint、测试和生产构建。
 
 ```bash
 ./scripts/ci-check.sh && ./scripts/verify-database.sh
@@ -144,7 +147,7 @@ docs/           产品、技术、前端旅程、实施规划、TODO 与交接
 
 ## 7. 常见问题
 
-**登录后页面报权限错误。** 平台管理员默认不属于任何业务领域。先在「领域访问」中进入一个领域，业务页面才会带上领域上下文。
+**平台管理员可以进入哪些业务领域？** 平台管理员拥有全平台最高权限，可以进入全部启用领域；领域管理员可查看和管理所属领域的全部信息，普通用户只能访问自己创建、领域内共享或明确分享给自己的内容。
 
 **报告中心提示没有可用数据来源。** 当前业务领域还没有 `PUBLISHED` 的数据集版本，先完成第 3 节的第 1～2 步。
 

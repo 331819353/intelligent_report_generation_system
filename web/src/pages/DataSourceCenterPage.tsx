@@ -17,6 +17,7 @@ import {
 } from '@phosphor-icons/react'
 import { AppButton } from '../components/AppButton'
 import { AppShell } from '../components/AppShell'
+import '../styles/data-source-center.css'
 import { AssetSharingSelect } from '../components/AssetSharingSelect'
 import { DataSourceAIAssistant } from '../components/DataSourceAIAssistant'
 import { RequestError } from '../lib/api'

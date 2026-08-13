@@ -2,6 +2,7 @@ import { CheckCircle, IdentificationCard, Key, ShieldCheck, UserCircle, WarningC
 import { type FormEvent, useEffect, useState } from 'react'
 import { AppButton } from '../components/AppButton'
 import { AppShell } from '../components/AppShell'
+import '../styles/profile.css'
 import { changeCurrentPassword, currentProfile, forceLogout, updateCurrentProfile, type CurrentProfile } from '../lib/auth'
 
 type Feedback = { tone: 'success' | 'error'; message: string } | null

@@ -1,13 +1,3 @@
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  clip-path: inset(50%);
-}
-
 .ask-data-shell .main-stage {
   height: 100vh;
   overflow: hidden;
@@ -309,6 +299,11 @@
 .ask-question-composer > header { display: flex; align-items: center; justify-content: space-between; }
 .ask-question-composer > header strong { color: #38404c; font-size: 14px; }
 .ask-question-composer > header small { color: #a0a7b1; font-size: 12px; }
+.ask-composer-attachments { min-width: 0; display: flex; flex-wrap: wrap; gap: 5px; }
+.ask-composer-attachments > span { min-width: 0; max-width: 240px; display: grid; grid-template-columns: 15px minmax(0, 1fr) 22px; align-items: center; gap: 5px; border: 1px solid #dce6f4; border-radius: 6px; padding: 4px 4px 4px 7px; background: #f7faff; color: #55708f; }
+.ask-composer-attachments strong { overflow: hidden; color: #42536b; font-size: 11px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.ask-composer-attachments button { width: 22px; height: 22px; display: grid; place-items: center; border: 0; border-radius: 4px; padding: 0; background: transparent; color: #748197; }
+.ask-composer-attachments button:hover { background: #e8f0fb; color: #1677ff; }
 .ask-composer-field { position: relative; min-width: 0; display: block; border: 1px solid #e0e4e9; border-radius: 8px; padding: 9px 10px 15px; background: #fff; }
 .ask-composer-field:focus-within { border-color: #9db8eb; box-shadow: 0 0 0 3px #2864dc0d; }
 .ask-question-composer textarea { width: 100%; height: 35px; display: block; resize: none; border: 0; outline: 0; padding: 0; background: transparent; color: #232a35; font-size: 12px; font-weight: 620; line-height: 1.55; }

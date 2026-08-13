@@ -15,14 +15,15 @@ import {
   ShieldCheck,
   SpinnerGap,
   Timer,
-  GearSix,
   Gauge,
   UsersThree,
   X,
 } from '@phosphor-icons/react'
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
-import { NavLink, useParams } from 'react-router-dom'
+import { useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
+import '../styles/administration.css'
+import '../styles/operational-observability.css'
 import {
   administrationAPI,
   type AdminUser,
@@ -55,9 +56,9 @@ type DialogState =
   | null
 
 const fixedCapabilities = {
-  platform: ['管理全平台配置', '维护领域与用户授权', '审计运行与治理记录'],
-  domain: ['管理领域数据配置', '审批数据源与数据集发布', '审批用户加入领域'],
-  user: ['配置数据源与数据集', '查看领域内数据资产', '提交配置等待领域发布'],
+  platform: ['进入全部业务领域', '管理全平台配置与授权', '审计运行与治理记录'],
+  domain: ['查看领域全部信息', '管理领域数据配置', '审批用户与资产发布'],
+  user: ['管理本人创建内容', '查看获分享的内容', '提交配置等待领域发布'],
   account: ['查看注册账号', '停用或恢复账号', '停用时即时撤销会话'],
 }
 
@@ -87,7 +88,7 @@ export function ManagementCenterPage() {
     setLoading(true)
     setError('')
     try {
-      const [nextDomains, nextUsers, nextApprovals, nextTasks, nextAuditLogs, nextSupportTickets, nextObservability] = await Promise.all([
+      const [domainResult, userResult, approvalResult, taskResult, auditResult, supportResult, observabilityResult] = await Promise.allSettled([
         administrationAPI.listManagedDomains(),
         administrationAPI.listUsers(),
         administrationAPI.listPlatformApprovals(),
@@ -96,13 +97,26 @@ export function ManagementCenterPage() {
         supportAPI.list('queue'),
         operationalObservabilityAPI.snapshot(operationalWindow),
       ])
-      setDomains(nextDomains)
-      setUsers(nextUsers)
-      setApprovals(nextApprovals)
-      setTasks(nextTasks.items)
-      setAuditLogs(nextAuditLogs)
-      setSupportTickets(nextSupportTickets)
-      setObservability(nextObservability)
+      if (domainResult.status === 'fulfilled') setDomains(domainResult.value)
+      if (userResult.status === 'fulfilled') setUsers(userResult.value)
+      if (approvalResult.status === 'fulfilled') setApprovals(approvalResult.value)
+      if (taskResult.status === 'fulfilled') setTasks(taskResult.value.items)
+      if (auditResult.status === 'fulfilled') setAuditLogs(auditResult.value)
+      if (supportResult.status === 'fulfilled') setSupportTickets(supportResult.value)
+      if (observabilityResult.status === 'fulfilled') setObservability(observabilityResult.value)
+
+      const unavailableModules = [
+        domainResult.status === 'rejected' ? '领域管理' : '',
+        userResult.status === 'rejected' ? '用户与权限' : '',
+        approvalResult.status === 'rejected' ? '平台审批' : '',
+        taskResult.status === 'rejected' ? '后台任务' : '',
+        auditResult.status === 'rejected' ? '平台日志' : '',
+        supportResult.status === 'rejected' ? '支持工单' : '',
+        observabilityResult.status === 'rejected' ? '运行观测' : '',
+      ].filter(Boolean)
+      if (unavailableModules.length > 0) {
+        setError(`部分平台数据暂时无法加载：${unavailableModules.join('、')}。其他已就绪的管理功能仍可正常使用。`)
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '平台管理数据加载失败')
     } finally {
@@ -474,7 +488,7 @@ export function ManagementCenterPage() {
     >
       <section className="administration-stack platform-page-stack">
         <div className="platform-management-intro">
-          <div><span className="eyebrow">PLATFORM CONTROL PLANE</span><h2>平台治理与运行控制面</h2><p>平台管理员负责租户治理与领域授权；业务数据操作需由独立领域成员身份完成。</p></div>
+          <div><span className="eyebrow">PLATFORM CONTROL PLANE</span><h2>平台治理与运行控制面</h2><p>平台管理员拥有全平台最高权限，可治理租户并进入全部业务领域；领域管理员与普通用户按领域和分享范围授权。</p></div>
           <div className="administration-metrics platform-management-metrics" aria-label="平台运行概览">
           <article><GlobeHemisphereWest size={20} weight="duotone" /><span>业务领域</span><strong>{domains.filter(item => item.status === 'ACTIVE').length}</strong><small>{domainAdministratorCount} 位领域管理员</small></article>
           <article><UsersThree size={20} weight="duotone" /><span>活跃用户</span><strong>{users.filter(item => item.status === 'ACTIVE').length}</strong><small>{platformAdministrators.length} 位平台管理员</small></article>
@@ -482,17 +496,6 @@ export function ManagementCenterPage() {
           <article className={failedTaskCount > 0 ? 'warning' : ''}><Pulse size={20} weight="duotone" /><span>运行中任务</span><strong>{activeTaskCount}</strong><small>{failedTaskCount} 个异常或部分完成</small></article>
           </div>
         </div>
-
-        <nav className="platform-top-navigation" aria-label="平台管理模块">
-          <NavLink to="/platform-management/domains"><GlobeHemisphereWest size={18} /><span><strong>领域管理</strong><small>新建与停用</small></span></NavLink>
-          <NavLink to="/platform-management/permissions"><ShieldCheck size={18} /><span><strong>权限管理</strong><small>管理员与用户</small></span></NavLink>
-          <NavLink to="/platform-management/approvals"><ListChecks size={18} /><span><strong>审批中心</strong><small>{pendingApprovalCount} 项待处理</small></span></NavLink>
-          <NavLink to="/platform-management/tasks"><Pulse size={18} /><span><strong>后台任务</strong><small>{activeTaskCount} 项运行中</small></span></NavLink>
-          <NavLink to="/platform-management/observability"><ChartLineUp size={18} /><span><strong>运行观测</strong><small>{observability?.health === 'CRITICAL' ? '存在异常' : observability?.health === 'ATTENTION' ? '需要关注' : '运行健康'}</small></span></NavLink>
-          <NavLink to="/platform-management/support"><Lifebuoy size={18} /><span><strong>支持工单</strong><small>{supportTickets.filter(item => item.status === 'OPEN' || item.status === 'IN_PROGRESS').length} 项待跟进</small></span></NavLink>
-          <NavLink to="/platform-management/logs"><Scroll size={18} /><span><strong>平台日志</strong><small>不可变轨迹</small></span></NavLink>
-          <NavLink to="/platform-management/runtime-config"><GearSix size={18} /><span><strong>运行配置</strong><small>版本与回滚</small></span></NavLink>
-        </nav>
 
         {(error || notice) && <div className={`administration-feedback ${error ? 'error' : 'success'}`} role={error ? 'alert' : 'status'}>
           {error || notice}
@@ -736,7 +739,7 @@ function PermissionGovernance({
   const ordinaryUsers = users.filter(user => !user.platformAdministrator && !user.domains.some(domain => domain.memberRole === 'DOMAIN_ADMIN'))
   return <div className="administration-view permission-management-view">
     <header className="administration-view-heading platform-section-heading">
-      <div><span className="eyebrow">SERVICE ADMINISTRATION</span><h2>权限管理</h2><p>在这里统一维护平台管理员、领域管理员和普通用户。</p></div>
+      <div><span className="eyebrow">SERVICE ADMINISTRATION</span><h2>角色配置</h2><p>在这里统一维护平台管理员、领域管理员和普通用户。</p></div>
       <div className="permission-view-switch" role="tablist" aria-label="权限管理对象">
         <button type="button" role="tab" aria-selected={permissionView === 'platform'} className={permissionView === 'platform' ? 'active' : ''} onClick={() => onPermissionViewChange('platform')}>平台管理员</button>
         <button type="button" role="tab" aria-selected={permissionView === 'domains'} className={permissionView === 'domains' ? 'active' : ''} onClick={() => onPermissionViewChange('domains')}>领域管理员</button>
@@ -745,7 +748,7 @@ function PermissionGovernance({
     </header>
 
     {permissionView === 'platform' && <section className="permission-management-section permission-switch-panel">
-      <FixedScope level="PLATFORM" title="平台管理员" description="拥有平台治理控制面权限，不保存领域归属，也不代表业务数据操作权；可在列表中新增或移除平台管理员。" capabilities={fixedCapabilities.platform} />
+      <FixedScope level="PLATFORM" title="平台管理员" description="拥有全平台最高权限，可查看并管理全部领域及平台治理能力；可在列表中新增或移除平台管理员。" capabilities={fixedCapabilities.platform} />
       <div className="governance-user-list">
         <AddManagementSlot title="新增平台管理员" description="从已注册且未担任其他管理员的用户中选择" onClick={onAddPlatform} />
         {platformAdministrators.map(user => <article key={user.id}>
@@ -766,7 +769,7 @@ function PermissionGovernance({
     </section>}
 
     {permissionView === 'domains' && <section className="permission-management-section permission-switch-panel">
-      <FixedScope level="DOMAIN" title="领域管理员" description="领域管理员只管理被分配的领域；可新增管理员、调整管理领域或移除身份。" capabilities={fixedCapabilities.domain} />
+      <FixedScope level="DOMAIN" title="领域管理员" description="可查看和管理被分配领域内的全部信息；可新增管理员、调整管理领域或移除身份。" capabilities={fixedCapabilities.domain} />
       <div className="governance-user-list domain-administrator-list">
         <AddManagementSlot title="新增领域管理员" description="选择用户并分配一个或多个管理领域" onClick={onAddDomain} />
         {domainAdministrators.map(user => {

@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgtype"
+
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/queryruntime"
 	"intelligent-report-generation-system/internal/report"
@@ -285,6 +287,20 @@ func decimalOf(value any) (*big.Float, bool) {
 		return big.NewFloat(float64(typed)), true
 	case float64:
 		return big.NewFloat(typed), true
+	case pgtype.Numeric:
+		// PostgreSQL NUMERIC columns are decoded by pgx as pgtype.Numeric. Keep
+		// their exact decimal representation instead of coercing through
+		// float64; otherwise every warehouse-backed measure is mistaken for a
+		// non-numeric cell and a valid aggregate is rendered as NULL.
+		driverValue, err := typed.Value()
+		if err != nil || driverValue == nil {
+			return nil, false
+		}
+		raw, ok := driverValue.(string)
+		if !ok {
+			return nil, false
+		}
+		return parseDecimal(raw)
 	default:
 		return nil, false
 	}

@@ -5,9 +5,8 @@ import { bindBusinessDomain, switchBusinessDomain } from '../lib/auth'
 import { clearDomain, currentDomain } from '../lib/domain-context'
 
 /**
- * 数据与业务页面要求明确的领域成员身份。平台管理员的租户控制面权限不会
- * 隐式转换为业务数据访问；没有领域成员关系时进入系统管理，而不是在决策、
- * 审批等下游流程中途失败。
+ * 数据与业务页面要求明确的领域上下文。平台管理员可进入全部启用领域；
+ * 领域管理员和普通成员只能进入服务端返回的已授权领域。
  */
 export function RequireBusinessDomain({ children }: PropsWithChildren) {
   const location = useLocation()

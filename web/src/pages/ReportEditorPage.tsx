@@ -6,6 +6,7 @@ import {
 import { useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
+import '../styles/report.css'
 import { RequestError } from '../lib/api'
 import {
   reportEditorAPI, type AIPreviewResponse, type DataContextCandidate, type DataContextField,

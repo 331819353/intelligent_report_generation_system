@@ -18,6 +18,7 @@ import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AppButton } from '../components/AppButton'
 import { AppShell } from '../components/AppShell'
+import '../styles/help.css'
 import { supportAPI, type SupportTicket } from '../lib/support'
 
 const guides = [

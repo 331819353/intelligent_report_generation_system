@@ -18,6 +18,7 @@ import {
 } from '@phosphor-icons/react'
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
 import { AppShell } from '../components/AppShell'
+import '../styles/administration.css'
 import { AppButton } from '../components/AppButton'
 import {
   administrationAPI,
@@ -37,7 +38,7 @@ const accessLabels: Record<DomainCatalogItem['accessStatus'], string> = {
   CANCELLED: '可申请',
   MEMBER: '已加入',
   DOMAIN_ADMIN: '已加入',
-  PLATFORM_ADMIN: '需申请',
+  PLATFORM_ADMIN: '最高权限',
 }
 
 const applicationLabels: Record<DomainApplication['status'], string> = {
@@ -47,8 +48,8 @@ const applicationLabels: Record<DomainApplication['status'], string> = {
   CANCELLED: '已撤回',
 }
 
-const joinedStatuses = new Set<DomainCatalogItem['accessStatus']>(['MEMBER', 'DOMAIN_ADMIN'])
-const applyStatuses = new Set<DomainCatalogItem['accessStatus']>(['AVAILABLE', 'REJECTED', 'CANCELLED', 'PLATFORM_ADMIN'])
+const joinedStatuses = new Set<DomainCatalogItem['accessStatus']>(['MEMBER', 'DOMAIN_ADMIN', 'PLATFORM_ADMIN'])
+const applyStatuses = new Set<DomainCatalogItem['accessStatus']>(['AVAILABLE', 'REJECTED', 'CANCELLED'])
 
 const snapshotAdministrator = {
   id: 'snapshot-admin-wang',
@@ -149,12 +150,12 @@ function formatDate(value: string) {
 function domainRole(domain: DomainCatalogItem, snapshot: boolean) {
   if (snapshot && snapshotRoleLabels[domain.code]) return snapshotRoleLabels[domain.code]
   if (domain.accessStatus === 'DOMAIN_ADMIN') return '领域管理员'
-  if (domain.accessStatus === 'PLATFORM_ADMIN') return '平台管理员（未入域）'
+  if (domain.accessStatus === 'PLATFORM_ADMIN') return '平台管理员'
   if (domain.accessStatus === 'MEMBER') return '领域成员'
   return '—'
 }
 
-/** 领域访问归属于权限管理，承担目录浏览、进入领域和自助申请。 */
+/** 领域权限归属于权限管理，承担目录浏览、进入领域和自助申请。 */
 export function DomainAccessPage() {
   const designSnapshot = import.meta.env.DEV && Boolean(new URLSearchParams(window.location.search).get('snapshot'))
   const [items, setItems] = useState<DomainCatalogItem[]>(designSnapshot ? snapshotItems : [])
@@ -340,7 +341,7 @@ export function DomainAccessPage() {
     <section className="domain-access-page">
       <header className="domain-access-heading">
         <div className="domain-access-heading-copy">
-          <div className="domain-access-breadcrumb"><span>权限管理</span><CaretRight size={12} /><strong>领域访问</strong></div>
+          <div className="domain-access-breadcrumb"><span>权限管理</span><CaretRight size={12} /><strong>领域权限</strong></div>
           <h1>业务领域</h1>
           <p>选择一个领域开始分析，或申请新的访问权限</p>
         </div>
@@ -454,8 +455,12 @@ export function DomainAccessPage() {
         {selected && view !== 'APPLICATIONS' && <aside className="domain-access-detail" aria-label={`${selected.name}领域详情`}>
           <header><div><h2>{selected.name}</h2><code>{selected.code}</code></div><AppButton text circle type="button" aria-label="关闭领域详情" onClick={() => setSelected(null)}><X size={20} /></AppButton></header>
           <section><h3>领域说明</h3><p>{selected.description || '暂无领域说明'}</p></section>
-          <section><h3>申请后可访问</h3><div className="domain-scope-tags">{detailScopes.map(scope => <span key={scope}>{scope}</span>)}</div></section>
-          <section><h3>访问说明</h3><p>加入后可获得该领域内的数据访问权限，具体操作范围由领域角色授权。</p></section>
+          <section><h3>{joinedStatuses.has(selected.accessStatus) ? '可访问范围' : '申请后可访问'}</h3><div className="domain-scope-tags">{detailScopes.map(scope => <span key={scope}>{scope}</span>)}</div></section>
+          <section><h3>访问说明</h3><p>{selected.accessStatus === 'PLATFORM_ADMIN'
+            ? '平台管理员拥有全平台最高权限，可直接查看和管理该领域全部信息。'
+            : selected.accessStatus === 'DOMAIN_ADMIN'
+              ? '领域管理员可查看和管理该领域内的全部信息。'
+              : '普通成员可访问本人创建、领域内共享或明确分享给本人的内容。'}</p></section>
           <section><h3>领域管理员</h3><div className="domain-administrator-summary"><UserCircle size={19} /><span>{selected.administrators.map(item => item.displayName).join('、') || '暂未配置'}</span></div></section>
           <footer>
             {joinedStatuses.has(selected.accessStatus)
@@ -463,7 +468,11 @@ export function DomainAccessPage() {
               : selected.accessStatus === 'PENDING'
                 ? <AppButton variant="primary" size="large" type="button" onClick={() => chooseView('APPLICATIONS')}>查看申请进度</AppButton>
                 : <AppButton variant="primary" size="large" type="button" disabled={busy} onClick={() => openApplication(selected)}>申请加入</AppButton>}
-            <small>{detailApplication?.status === 'REJECTED' ? `上次申请：${detailApplication.reviewComment || '已驳回'}` : '申请后由领域管理员审批'}</small>
+            <small>{selected.accessStatus === 'PLATFORM_ADMIN'
+              ? '平台管理员可直接进入全部启用领域'
+              : detailApplication?.status === 'REJECTED'
+                ? `上次申请：${detailApplication.reviewComment || '已驳回'}`
+                : '申请后由领域管理员审批'}</small>
           </footer>
         </aside>}
       </div>

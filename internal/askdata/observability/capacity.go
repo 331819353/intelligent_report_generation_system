@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-const CapacityReportSchemaVersion = "askdata-capacity-report-v1"
+const CapacityReportSchemaVersion = "askdata-capacity-report-v2"
 
 type CapacityScenario string
 
@@ -19,12 +19,49 @@ const (
 	CapacityGraphThreeHops CapacityScenario = "GRAPH_3_HOPS"
 	CapacityLLMDegradation CapacityScenario = "LLM_DEGRADATION"
 	CapacityKPIBundle      CapacityScenario = "KPI_BUNDLE"
+	// The report surface is half of the phase-one product. A profile that
+	// claimed to cover "report and AskData" while measuring only AskData would
+	// produce a capacity number for the wrong system.
+	CapacityPlatformAccess CapacityScenario = "PLATFORM_ACCESS"
+	CapacityReportRuntime  CapacityScenario = "REPORT_RUNTIME"
+	CapacityReportPublish  CapacityScenario = "REPORT_PUBLISH"
+	CapacityReportExport   CapacityScenario = "REPORT_EXPORT"
+	// Full-platform only.
+	CapacitySubscriptionDispatch CapacityScenario = "SUBSCRIPTION_DISPATCH"
+	CapacityDecisionWorkflow     CapacityScenario = "DECISION_WORKFLOW"
 )
 
-var requiredCapacityScenarios = []CapacityScenario{
+var askDataCapacityScenarios = []CapacityScenario{
 	CapacityFastPath, CapacityComplexLoop, CapacityWarehousePool,
 	CapacityVectorRecall, CapacityGraphThreeHops, CapacityLLMDegradation,
 	CapacityKPIBundle,
+}
+
+var reportCapacityScenarios = []CapacityScenario{
+	CapacityPlatformAccess, CapacityReportRuntime, CapacityReportPublish, CapacityReportExport,
+}
+
+var fullPlatformCapacityScenarios = []CapacityScenario{
+	CapacitySubscriptionDispatch, CapacityDecisionWorkflow,
+}
+
+// RequiredCapacityScenarios returns the scenarios a scope profile must cover.
+// The profile is the contract: FULL_PLATFORM is a superset, never a substitute.
+func RequiredCapacityScenarios(profile CapacityScopeProfile) []CapacityScenario {
+	required := append(append([]CapacityScenario(nil), askDataCapacityScenarios...), reportCapacityScenarios...)
+	if profile == CapacityScopeFullPlatform {
+		required = append(required, fullPlatformCapacityScenarios...)
+	}
+	return required
+}
+
+func governedCapacityScenario(value CapacityScenario) bool {
+	for _, scenario := range RequiredCapacityScenarios(CapacityScopeFullPlatform) {
+		if scenario == value {
+			return true
+		}
+	}
+	return false
 }
 
 type CapacityScale struct {
@@ -82,9 +119,20 @@ type CapacityReport struct {
 	Seed          int64                    `json:"seed"`
 	StartedAt     time.Time                `json:"startedAt"`
 	DurationMS    int64                    `json:"durationMs"`
+	ScopeProfile  CapacityScopeProfile     `json:"scopeProfile"`
 	Environment   CapacityEnvironment      `json:"environment"`
 	Scale         CapacityScale            `json:"scale"`
 	Scenarios     []CapacityScenarioResult `json:"scenarios"`
+	// The three blocks below are the signature material from 04 §6.1. They are
+	// optional in a load test and required for a signable capacity conclusion,
+	// which is exactly the difference EvaluateCapacitySignability reports.
+	ConnectionBudgets  []CapacityConnectionBudget  `json:"connectionBudgets,omitempty"`
+	FaultInjection     []CapacityFaultResult       `json:"faultInjection,omitempty"`
+	ResourceWatermarks []CapacityResourceWatermark `json:"resourceWatermarks,omitempty"`
+	Signoff            *CapacitySignoff            `json:"signoff,omitempty"`
+	// Signability is recomputed on validation and never read from the file, so
+	// an unsigned run cannot be edited into a signed one.
+	Signability CapacitySignability `json:"signability"`
 }
 
 type CapacityAlert struct {
@@ -97,6 +145,9 @@ type CapacityAlert struct {
 func ValidateCapacityReport(report CapacityReport) error {
 	if report.SchemaVersion != CapacityReportSchemaVersion || report.RunID == "" || report.StartedAt.IsZero() || report.DurationMS <= 0 {
 		return errors.New("capacity report identity is incomplete")
+	}
+	if !validCapacityScopeProfile(report.ScopeProfile) {
+		return fmt.Errorf("capacity scope profile %q is not governed", report.ScopeProfile)
 	}
 	environment := report.Environment
 	if environment.GOOS == "" || environment.GOARCH == "" || environment.LogicalCPUs <= 0 ||
@@ -114,12 +165,41 @@ func ValidateCapacityReport(report CapacityReport) error {
 		}
 		seen[result.Scenario] = struct{}{}
 	}
-	for _, scenario := range requiredCapacityScenarios {
+	for _, scenario := range RequiredCapacityScenarios(report.ScopeProfile) {
 		if _, exists := seen[scenario]; !exists {
-			return fmt.Errorf("capacity scenario %s is missing", scenario)
+			return fmt.Errorf("capacity scenario %s is missing from profile %s", scenario, report.ScopeProfile)
 		}
 	}
+	if err := validateCapacityConnectionBudgets(report.ConnectionBudgets); err != nil {
+		return err
+	}
+	if err := validateCapacityFaultResults(report.FaultInjection); err != nil {
+		return err
+	}
+	if err := validateCapacityResourceWatermarks(report.ResourceWatermarks); err != nil {
+		return err
+	}
+	// The verdict is recomputed rather than compared, so a stored report can
+	// never carry a signature its inputs do not support.
+	expected := EvaluateCapacitySignability(report)
+	if report.Signability.Verdict != expected.Verdict ||
+		report.Signability.ScopeProfile != expected.ScopeProfile ||
+		!equalStrings(report.Signability.MissingInputs, expected.MissingInputs) {
+		return fmt.Errorf("capacity signability must be %s for the declared inputs", expected.Verdict)
+	}
 	return nil
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func EvaluateCapacityAlerts(report CapacityReport) ([]CapacityAlert, error) {
@@ -127,6 +207,16 @@ func EvaluateCapacityAlerts(report CapacityReport) ([]CapacityAlert, error) {
 		return nil, err
 	}
 	alerts := architectureScaleAlerts(report.Scale)
+	// An unsigned run is surfaced at the same severity as a blown threshold.
+	// The most expensive capacity mistake is not a slow P95; it is presenting a
+	// development-machine run as a target-environment conclusion.
+	if report.Signability.Verdict != SignabilitySignable {
+		alerts = append(alerts, CapacityAlert{
+			Code: "CAPACITY_" + SignabilityNotSigned, Severity: "CRITICAL",
+			Actual: fmt.Sprintf("%s (%d missing inputs)", report.Signability.Verdict, len(report.Signability.MissingInputs)),
+			Limit:  SignabilitySignable,
+		})
+	}
 	for _, result := range report.Scenarios {
 		successRate := float64(result.Succeeded) / float64(result.Requests)
 		if successRate < result.Thresholds.MinSuccessRate {
@@ -186,11 +276,7 @@ func PercentileMilliseconds(samples []time.Duration, percentile float64) (int64,
 }
 
 func validateCapacityScenarioResult(result CapacityScenarioResult) error {
-	validScenario := false
-	for _, scenario := range requiredCapacityScenarios {
-		validScenario = validScenario || result.Scenario == scenario
-	}
-	if !validScenario || result.Requests <= 0 || result.Succeeded < 0 || result.Failed < 0 ||
+	if !governedCapacityScenario(result.Scenario) || result.Requests <= 0 || result.Succeeded < 0 || result.Failed < 0 ||
 		result.Succeeded+result.Failed != result.Requests || result.RateLimited < 0 || result.Degraded < 0 ||
 		result.PoolTimeouts < 0 || result.P50MS < 0 || result.P95MS < result.P50MS ||
 		result.P99MS < result.P95MS || result.MaxMS < result.P99MS || len(result.FailureCodeHash) != 64 ||

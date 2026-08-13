@@ -582,107 +582,49 @@ func main() {
 		},
 	)
 
-	api := http.NewServeMux()
-	api.Handle("/api/v1/auth/", auth.NewHandler(authService))
-	api.Handle("/api/v1/questions", questionHandler)
-	api.Handle("/api/v1/questions/", questionHandler)
-	api.Handle("/api/v1/conversations/", questionHandler)
-	api.Handle("/api/v1/conversations", questionHandler)
-	api.Handle("/api/v1/add-to-report-intents/", questionHandler)
-	api.Handle("/api/v1/askdata/saved-questions", savedQuestionHandler)
-	api.Handle("/api/v1/askdata/saved-questions/", savedQuestionHandler)
-	api.Handle("/api/v1/askdata/feedback-tickets", feedbackTicketHandler)
-	api.Handle("/api/v1/askdata/feedback-tickets/", feedbackTicketHandler)
-	api.Handle("/api/v1/askdata/active-learning-candidates", feedbackTicketHandler)
-	api.Handle("/api/v1/askdata/active-learning-candidates/", feedbackTicketHandler)
-	api.Handle("/api/v1/askdata/report-assets", reportAssetHandler)
-	api.Handle("/api/v1/askdata/report-assets/", reportAssetHandler)
-	api.Handle("/api/v1/reports", reportHandler)
-	api.Handle("/api/v1/reports/", reportHandler)
-	api.Handle("/api/v1/report-data-contexts", reportHandler)
-	api.Handle("/api/v1/report-component-manifests", reportHandler)
-	api.Handle("/api/v1/report-templates", reportHandler)
-	api.Handle("/api/v1/report-templates/", reportHandler)
-	api.Handle("GET /api/v1/reports/{id}/schedules", reportScheduleHandler)
-	api.Handle("POST /api/v1/reports/{id}/schedules", reportScheduleHandler)
-	api.Handle("/api/v1/report-schedules/", reportScheduleHandler)
-	api.Handle("/api/v1/report-deliveries", reportScheduleHandler)
-	api.Handle("/api/v1/report-deliveries/", reportScheduleHandler)
-	api.Handle("/api/v1/report-follows", reportFollowHandler)
-	api.Handle("POST /api/v1/reports/{id}/follow", reportFollowHandler)
-	api.Handle("DELETE /api/v1/reports/{id}/follow", reportFollowHandler)
-	api.Handle("/api/v1/report-shares/", reportHandler)
-	api.Handle("/api/v1/decisions", decisionHandler)
-	api.Handle("/api/v1/decisions/", decisionHandler)
-	api.Handle("/api/v1/work-items", workItemHandler)
-	api.Handle("/api/v1/work-items/", workItemHandler)
-	api.Handle("/api/v1/runtime-config/", runtimeConfigHandler)
-	api.Handle("/api/v1/support-tickets", supportHandler)
-	api.Handle("/api/v1/support-tickets/", supportHandler)
-	api.Handle("/api/v1/data-requests", dataRequestHandler)
-	api.Handle("/api/v1/data-requests/", dataRequestHandler)
-	api.Handle("/api/v1/askdata/semantic/", semanticAdminHandler)
-	api.Handle("POST /api/v1/permissions/evaluate", auth.RequireAccessToken(authService, access.EvaluateHandler(accessService)))
-	api.Handle("/api/v1/domain-catalog", accessAdminHandler)
-	api.Handle("/api/v1/domain-applications", accessAdminHandler)
-	api.Handle("/api/v1/domain-applications/", accessAdminHandler)
-	api.Handle("/api/v1/managed-domains", accessAdminHandler)
-	api.Handle("/api/v1/platform-management/", accessAdminHandler)
-	api.Handle("GET /api/v1/platform-management/observability", operationalObservabilityHandler)
-	api.Handle("/api/v1/domains", accessAdminHandler)
-	api.Handle("/api/v1/domains/", accessAdminHandler)
-	api.Handle("/api/v1/users", accessAdminHandler)
-	api.Handle("/api/v1/users/", accessAdminHandler)
-	api.Handle("/api/v1/share-targets", accessAdminHandler)
-	api.Handle("GET /api/v1/users/{id}/deactivation-preview", userLifecycleHandler)
-	api.Handle("POST /api/v1/users/{id}/deactivation-batches", userLifecycleHandler)
-	api.Handle("/api/v1/user-lifecycle-batches/", userLifecycleHandler)
-	api.Handle("/api/v1/asset-access/", assetScopeHandler)
-	api.Handle("/api/v1/background-tasks", backgroundtask.NewHandler(
+	backgroundTaskHandler := backgroundtask.NewHandler(
 		authService, accessService,
 		backgroundtask.NewService(backgroundtask.NewPostgresStore(pool)),
-	))
-	api.Handle("/api/v1/background-tasks/", backgroundtask.NewHandler(
-		authService, accessService,
-		backgroundtask.NewService(backgroundtask.NewPostgresStore(pool)),
-	))
-
-	api.Handle("POST /api/v1/data-sources/{id}/publish", dataSourceApprovalHandler)
-	api.Handle("POST /api/v1/data-sources/{id}/publish-requests", dataSourceApprovalHandler)
-	api.Handle("GET /api/v1/data-sources/{id}/publish-requests", dataSourceApprovalHandler)
-	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/withdraw", dataSourceApprovalHandler)
-	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/approve", dataSourceApprovalHandler)
-	api.Handle("POST /api/v1/data-sources/{id}/publish-requests/{requestId}/reject", dataSourceApprovalHandler)
-	api.Handle("POST /api/v1/data-sources/ai/turns", dataSourceAIHandler)
-	api.Handle("POST /api/v1/data-sources/{id}/ai/turns", dataSourceAIHandler)
-	api.Handle("/api/v1/data-sources", dataSourceHandler)
-	api.Handle("/api/v1/data-sources/", dataSourceHandler)
-	api.Handle("/api/v1/excel-files", datasource.NewExcelHandler(authService, accessService, excelManager))
-	api.Handle("/api/v1/excel-files/", datasource.NewExcelHandler(authService, accessService, excelManager))
-	api.Handle("/api/v1/assets/", asset.NewHandler(
-		authService, accessService, assetRepository, dataSourceService,
-	))
-	api.Handle("/api/v1/metadata-diffs", asset.NewHandler(
-		authService, accessService, assetRepository, dataSourceService,
-	))
+	)
+	excelHandler := datasource.NewExcelHandler(authService, accessService, excelManager)
+	assetHandler := asset.NewHandler(authService, accessService, assetRepository, dataSourceService)
 	metadataAIHandler := metadataai.NewHandler(authService, accessService, metadataAIService)
-	api.Handle("/api/v1/metadata-ai/", metadataAIHandler)
-
-	api.Handle("POST /api/v1/datasets/ai/proposals", datasetai.NewHandler(authService, accessService, datasetAIService))
-	api.Handle("POST /api/v1/datasets/{id}/ai/proposals", datasetai.NewHandler(authService, accessService, datasetAIService))
-	api.Handle("POST /api/v1/datasets/{id}/publish", datasetApprovalHandler)
-	api.Handle("POST /api/v1/datasets/{id}/publish-requests", datasetApprovalHandler)
-	api.Handle("GET /api/v1/datasets/{id}/publish-requests", datasetApprovalHandler)
-	api.Handle("POST /api/v1/datasets/{id}/publish-requests/{requestId}/approve", datasetApprovalHandler)
-	api.Handle("POST /api/v1/datasets/{id}/publish-requests/{requestId}/reject", datasetApprovalHandler)
-	api.Handle("/api/v1/datasets/{id}/materializations/builds", materialization.NewControlHandler(
+	datasetAIHandler := datasetai.NewHandler(authService, accessService, datasetAIService)
+	materializationControlHandler := materialization.NewControlHandler(
 		authService, accessService, materialization.NewControlService(materializationStore),
-	))
-	api.Handle("/api/v1/datasets/{id}/materializations/builds/", materialization.NewControlHandler(
-		authService, accessService, materialization.NewControlService(materializationStore),
-	))
-	api.Handle("/api/v1/datasets", datasetHandler)
-	api.Handle("/api/v1/datasets/", datasetHandler)
+	)
+	api := newAPIMux(apiHandlers{
+		auth:                     auth.NewHandler(authService),
+		question:                 questionHandler,
+		savedQuestion:            savedQuestionHandler,
+		feedbackTicket:           feedbackTicketHandler,
+		askDataReportAsset:       reportAssetHandler,
+		report:                   reportHandler,
+		reportSchedule:           reportScheduleHandler,
+		reportFollow:             reportFollowHandler,
+		decision:                 decisionHandler,
+		workItem:                 workItemHandler,
+		runtimeConfig:            runtimeConfigHandler,
+		support:                  supportHandler,
+		dataRequest:              dataRequestHandler,
+		semanticAdmin:            semanticAdminHandler,
+		permissionEvaluate:       auth.RequireAccessToken(authService, access.EvaluateHandler(accessService)),
+		accessAdmin:              accessAdminHandler,
+		operationalObservability: operationalObservabilityHandler,
+		userLifecycle:            userLifecycleHandler,
+		assetScope:               assetScopeHandler,
+		backgroundTask:           backgroundTaskHandler,
+		dataSourceApproval:       dataSourceApprovalHandler,
+		dataSourceAI:             dataSourceAIHandler,
+		dataSource:               dataSourceHandler,
+		excel:                    excelHandler,
+		asset:                    assetHandler,
+		metadataAI:               metadataAIHandler,
+		datasetAI:                datasetAIHandler,
+		datasetApproval:          datasetApprovalHandler,
+		materializationControl:   materializationControlHandler,
+		dataset:                  datasetHandler,
+	})
 
 	server := httpserver.New(cfg, logger, api)
 	serverErrors := make(chan error, 1)

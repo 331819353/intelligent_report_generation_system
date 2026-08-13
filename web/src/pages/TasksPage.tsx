@@ -22,6 +22,7 @@ import {
 import { useEffect, useMemo, useState, type ComponentType } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
+import '../styles/tasks.css'
 import { AppButton } from '../components/AppButton'
 import { currentDomain } from '../lib/domain-context'
 import { formatHomeTime, workItemDestination, workTypeLabel } from '../lib/home-data'

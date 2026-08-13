@@ -127,7 +127,6 @@ func (repository *Repository) Transition(ctx context.Context, identity Identity,
 	return result, mapError(err)
 }
 
-
 type scanner interface{ Scan(...any) error }
 
 func scanTicket(row scanner, value *Ticket) error {

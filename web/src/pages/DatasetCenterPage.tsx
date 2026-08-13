@@ -2,6 +2,8 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowDownIcon, ArrowUpIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DotsSixVerticalIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MagnifyingGlassIcon, MathOperationsIcon, PlusIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTSlashIcon, TreeStructureIcon, WarningCircleIcon, XIcon, type Icon } from '@phosphor-icons/react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
+import '../styles/dataset-designer.css'
+import '../styles/dataset-center.css'
 import { AssetSharingSelect } from '../components/AssetSharingSelect'
 import { DatasetAIDock } from '../components/dataset/DatasetAIDock'
 import { DatasetComponentToolbar } from '../components/dataset/DatasetComponentToolbar'

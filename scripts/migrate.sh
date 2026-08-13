@@ -817,13 +817,15 @@ GRANT EXECUTE ON FUNCTION
   askdata.feedback_ticket_can_access(uuid,uuid,uuid,uuid),
   askdata.saved_question_can_read(uuid,uuid,uuid,uuid,text),
   askdata.release_manifest_hash(uuid),
-  askdata.release_registry_facts_complete(uuid)
+  askdata.release_registry_facts_complete(uuid),
+  askdata.resolve_subject_attributes(uuid,uuid)
 TO :"app_user", :"worker_user";
 
 GRANT EXECUTE ON FUNCTION
   askdata.resolve_question_release(uuid,uuid,uuid),
   askdata.release_rollout_observability(uuid),
-  askdata.release_rollout_bucket(text,uuid)
+  askdata.release_rollout_bucket(text,uuid),
+  askdata.row_access_policy_coverage(uuid,uuid)
 TO :"app_user";
 SELECT format(
   'GRANT EXECUTE ON FUNCTION askdata.list_add_to_report_tenants() TO %I',

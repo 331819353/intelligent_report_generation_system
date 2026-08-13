@@ -6,6 +6,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
+import '../styles/report.css'
 import { AppButton } from '../components/AppButton'
 import { administrationAPI, type ShareTarget } from '../lib/administration'
 import { reportAssetsAPI, type AssetEvent, type PermissionGrant } from '../report/api/assets'

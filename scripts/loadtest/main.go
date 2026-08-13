@@ -26,13 +26,21 @@ import (
 const bearerTokenEnvironment = "ASKDATA_LOADTEST_BEARER_TOKEN"
 
 type loadConfig struct {
-	BaseURL       string                      `json:"baseUrl"`
-	Seed          int64                       `json:"seed"`
-	DatabaseLabel string                      `json:"databaseLabel"`
-	GraphLabel    string                      `json:"graphLabel"`
-	LLMLabel      string                      `json:"llmLabel"`
-	Scale         observability.CapacityScale `json:"scale"`
-	Scenarios     []scenarioConfig            `json:"scenarios"`
+	BaseURL       string                             `json:"baseUrl"`
+	Seed          int64                              `json:"seed"`
+	ScopeProfile  observability.CapacityScopeProfile `json:"scopeProfile"`
+	DatabaseLabel string                             `json:"databaseLabel"`
+	GraphLabel    string                             `json:"graphLabel"`
+	LLMLabel      string                             `json:"llmLabel"`
+	Scale         observability.CapacityScale        `json:"scale"`
+	Scenarios     []scenarioConfig                   `json:"scenarios"`
+	// The blocks below are declarations about the target environment, not
+	// measurements the runner can take. Omitting them is allowed and yields a
+	// POC_NOT_SIGNED report; faking them would be the only real failure.
+	ConnectionBudgets  []observability.CapacityConnectionBudget  `json:"connectionBudgets,omitempty"`
+	FaultInjection     []observability.CapacityFaultResult       `json:"faultInjection,omitempty"`
+	ResourceWatermarks []observability.CapacityResourceWatermark `json:"resourceWatermarks,omitempty"`
+	Signoff            *observability.CapacitySignoff            `json:"signoff,omitempty"`
 }
 
 type scenarioConfig struct {
@@ -88,7 +96,16 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	fmt.Printf("capacity report written: scenarios=%d alerts=%d\n", len(report.Scenarios), len(alerts))
+	fmt.Printf(
+		"capacity report written: profile=%s scenarios=%d alerts=%d signability=%s\n",
+		report.ScopeProfile, len(report.Scenarios), len(alerts), report.Signability.Verdict,
+	)
+	if report.Signability.Verdict != observability.SignabilitySignable {
+		fmt.Printf(
+			"this run is NOT a capacity conclusion; missing: %s\n",
+			strings.Join(report.Signability.MissingInputs, ", "),
+		)
+	}
 }
 
 func parseLoadConfig(raw []byte) (loadConfig, *url.URL, error) {
@@ -107,6 +124,13 @@ func parseLoadConfig(raw []byte) (loadConfig, *url.URL, error) {
 	}
 	if config.Seed == 0 || config.DatabaseLabel == "" || config.GraphLabel == "" || config.LLMLabel == "" {
 		return loadConfig{}, nil, errors.New("load-test environment metadata is incomplete")
+	}
+	if config.ScopeProfile != observability.CapacityScopeP1ReportAskData &&
+		config.ScopeProfile != observability.CapacityScopeFullPlatform {
+		return loadConfig{}, nil, fmt.Errorf(
+			"load-test scopeProfile must be %s or %s",
+			observability.CapacityScopeP1ReportAskData, observability.CapacityScopeFullPlatform,
+		)
 	}
 	seen := make(map[observability.CapacityScenario]struct{}, len(config.Scenarios))
 	for _, scenario := range config.Scenarios {
@@ -131,14 +155,11 @@ func parseLoadConfig(raw []byte) (loadConfig, *url.URL, error) {
 		}
 		seen[scenario.Scenario] = struct{}{}
 	}
-	for _, required := range []observability.CapacityScenario{
-		observability.CapacityFastPath, observability.CapacityComplexLoop,
-		observability.CapacityWarehousePool, observability.CapacityVectorRecall,
-		observability.CapacityGraphThreeHops, observability.CapacityLLMDegradation,
-		observability.CapacityKPIBundle,
-	} {
+	for _, required := range observability.RequiredCapacityScenarios(config.ScopeProfile) {
 		if _, exists := seen[required]; !exists {
-			return loadConfig{}, nil, fmt.Errorf("load-test scenario %s is missing", required)
+			return loadConfig{}, nil, fmt.Errorf(
+				"load-test scenario %s is missing from profile %s", required, config.ScopeProfile,
+			)
 		}
 	}
 	return config, base, nil
@@ -161,6 +182,11 @@ func executeLoad(
 		SchemaVersion: observability.CapacityReportSchemaVersion,
 		RunID:         startedAt.Format("20060102T150405.000000000Z") + "-" + hex.EncodeToString(configDigest[:6]),
 		Seed:          config.Seed, StartedAt: startedAt.UTC(), Scale: config.Scale,
+		ScopeProfile:       config.ScopeProfile,
+		ConnectionBudgets:  config.ConnectionBudgets,
+		FaultInjection:     config.FaultInjection,
+		ResourceWatermarks: config.ResourceWatermarks,
+		Signoff:            config.Signoff,
 		Environment: observability.CapacityEnvironment{
 			GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, LogicalCPUs: runtime.NumCPU(),
 			GoVersion: runtime.Version(), ConfigHash: hex.EncodeToString(configDigest[:]),
@@ -179,6 +205,7 @@ func executeLoad(
 	if report.DurationMS < 1 {
 		report.DurationMS = 1
 	}
+	report.Signability = observability.EvaluateCapacitySignability(report)
 	if err := observability.ValidateCapacityReport(report); err != nil {
 		return observability.CapacityReport{}, err
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 
@@ -100,6 +101,9 @@ func ExecuteBatch(ctx context.Context, plan ExecutionPlan, executor QueryExecuto
 				err = errors.New("report query executor is unavailable")
 			} else {
 				value, err = executor.ExecuteReportQuery(queryContext, item.request)
+			}
+			if err != nil {
+				slog.Warn("report component query failed", "component_ids", item.components, "error", err)
 			}
 			state, code := queryState(queryContext, value, err)
 			lock.Lock()

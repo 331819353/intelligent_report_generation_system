@@ -2,20 +2,22 @@ import {
   ArrowSquareOut,
   Bell,
   BookOpenText,
+  Books,
   Buildings,
   CaretDown,
   ChatCircleDots,
   Check,
+  CirclesThreePlus,
   ClipboardText,
   Cube,
   Database,
   Factory,
   FileText,
+  Gauge,
   GearSix,
   GlobeHemisphereWest,
   House,
   Info,
-  Path,
   Question,
   ShieldCheck,
   SidebarSimple,
@@ -47,6 +49,7 @@ import {
 import { formatHomeTime, workItemDestination, workTypeLabel } from '../lib/home-data'
 import { homeAPI, type WorkInboxItem } from '../lib/home-api'
 import { AppButton } from './AppButton'
+import '../styles/shell-v2.css'
 
 type AppShellProps = {
   title?: string
@@ -57,6 +60,7 @@ type AppShellProps = {
   className?: string
   lockBusinessDomain?: boolean
   controlPlane?: boolean
+  hidePageHeader?: boolean
 }
 
 type NavItem = {
@@ -65,11 +69,6 @@ type NavItem = {
   icon: typeof House
   adminOnly?: boolean
   children?: NavItem[]
-}
-
-type NavGroup = {
-  label: string
-  items: NavItem[]
 }
 
 const snapshotDomain: BusinessDomain = {
@@ -97,49 +96,63 @@ function domainVisual(code: string) {
   return { icon: Buildings, tone: 'cyan' }
 }
 
-function domainRoleLabel(domain: BusinessDomain, subject: string, snapshot: boolean) {
+function domainRoleLabel(domain: BusinessDomain, subject: string, snapshot: boolean, platformAdministrator: boolean) {
+  if (platformAdministrator) return '平台管理员'
   if (snapshot) return domain.code.includes('ENTERPRISE') ? '领域管理员' : '领域成员'
   if (domain.administrators.some(item => item.id === subject)) return '领域管理员'
   return '领域成员'
 }
 
-const navigation: NavGroup[] = [
+const navigation: NavItem[] = [
+  { label: '分析首页', to: '/home', icon: House },
+  { label: '智能问数', to: '/ask-data', icon: ChatCircleDots },
+  { label: '智能报告', to: '/reports', icon: FileText },
   {
-    label: '业务工作',
-    items: [
-      { label: '分析首页', to: '/home', icon: House },
-      { label: '问数工作台', to: '/ask-data', icon: ChatCircleDots },
-      { label: '报告中心', to: '/reports', icon: FileText },
-    ],
-  },
-  {
-    label: '协同与行动',
-    items: [
-      { label: '审批中心', to: '/approvals', icon: ShieldCheck },
-      { label: '任务中心', to: '/tasks', icon: ClipboardText },
-      { label: '决策与行动', to: '/decisions', icon: Path },
-    ],
-  },
-  {
-    label: '数据与治理',
-    items: [
-      // 数据集是报告数据绑定的前置资产，必须可以从导航直达。
-      { label: '数据资产', to: '/data-sources', icon: Database },
+    label: '数据资产',
+    icon: Database,
+    children: [
+      { label: '数据源', to: '/data-sources', icon: Database },
       { label: '数据集', to: '/datasets', icon: Stack },
-      { label: '语义资产', to: '/semantic', icon: Cube },
-      {
-        label: '权限管理',
-        icon: ShieldCheck,
-        children: [
-          { label: '领域访问', to: '/domain-access', icon: GlobeHemisphereWest },
-          { label: '用户权限', to: '/platform-management/users', icon: UserCircle, adminOnly: true },
-          { label: '角色配置', to: '/platform-management/permissions', icon: ShieldCheck, adminOnly: true },
-        ],
-      },
-      { label: '系统管理', to: '/platform-management/domains', icon: GearSix, adminOnly: true },
+    ],
+  },
+  {
+    label: '语义资产',
+    icon: Cube,
+    children: [
+      { label: '指标中心', to: '/semantic/metrics', icon: Gauge },
+      { label: '维度中心', to: '/semantic/dimensions', icon: CirclesThreePlus },
+      { label: '业务知识', to: '/semantic/knowledge', icon: Books },
+    ],
+  },
+  {
+    label: '权限管理',
+    icon: ShieldCheck,
+    children: [
+      { label: '领域权限', to: '/domain-access', icon: GlobeHemisphereWest },
+      { label: '角色权限', to: '/platform-management/users', icon: UserCircle, adminOnly: true },
+    ],
+  },
+  {
+    label: '平台管理',
+    icon: GearSix,
+    adminOnly: true,
+    children: [
+      { label: '领域管理', to: '/platform-management/domains', icon: Buildings },
+      { label: '角色配置', to: '/platform-management/permissions', icon: ShieldCheck },
+      { label: '审批中心', to: '/platform-management/approvals', icon: ClipboardText },
+      { label: '后台任务', to: '/platform-management/tasks', icon: SpinnerGap },
+      { label: '运行观测', to: '/platform-management/observability', icon: Info },
+      { label: '支持工单', to: '/platform-management/support', icon: ChatCircleDots },
+      { label: '运行配置', to: '/platform-management/runtime-config', icon: GearSix },
     ],
   },
 ]
+
+function navigationItemIsActive(pathname: string, to?: string) {
+  if (!to) return false
+  if (to === '/home') return pathname === to
+  return pathname === to || pathname.startsWith(`${to}/`)
+}
 
 type NotificationItem = {
   id: string
@@ -157,7 +170,7 @@ const snapshotNotifications: NotificationItem[] = [
 ]
 
 /** 为业务、协同和治理页面提供统一的全局框架。 */
-export function AppShell({ title = '智能分析决策平台', titleMeta, eyebrow = '工作台', children, actions, className = '', controlPlane = false }: AppShellProps) {
+export function AppShell({ title = '智能分析决策平台', titleMeta, eyebrow = '工作台', children, actions, className = '', controlPlane = false, hidePageHeader = false }: AppShellProps) {
   const navigate = useNavigate()
   const location = useLocation()
   const domainSwitcherRef = useRef<HTMLDivElement>(null)
@@ -174,7 +187,13 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
   const [domainSwitchFeedback, setDomainSwitchFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
   const [canManage, setCanManage] = useState<boolean | null>(designSnapshot ? true : hasRealAccessToken ? null : false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [permissionNavigationOpen, setPermissionNavigationOpen] = useState(true)
+  const [openNavigationBranches, setOpenNavigationBranches] = useState<Record<string, boolean>>(() => ({
+    数据资产: navigationItemIsActive(location.pathname, '/data-sources') || navigationItemIsActive(location.pathname, '/datasets'),
+    语义资产: navigationItemIsActive(location.pathname, '/semantic'),
+    权限管理: location.pathname === '/domain-access' || location.pathname === '/platform-management/users',
+    平台管理: location.pathname.startsWith('/platform-management') && location.pathname !== '/platform-management/users',
+  }))
+
   const [openUtility, setOpenUtility] = useState<'notifications' | 'help' | 'user' | null>(null)
   const [notifications, setNotifications] = useState<NotificationItem[]>(designSnapshot ? snapshotNotifications : [])
   const [notificationTotal, setNotificationTotal] = useState(designSnapshot ? 8 : 0)
@@ -243,10 +262,9 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
 
   useEffect(() => {
     if (designSnapshot) return undefined
-    // The global work inbox is a business-domain projection. A platform-only
-    // administrator has no selected domain, so requesting it would correctly
-    // return BUSINESS_DOMAIN_REQUIRED and the shared API recovery would then
-    // bounce the control plane to /domain-access.
+    // The global work inbox is a business-domain projection. Control-plane
+    // routes do not request it; business routes load it after an explicit
+    // domain has been selected and bound to the current session.
     if (platformRoute || !selectedDomain?.id) return undefined
     let cancelled = false
     void homeAPI.listWorkItems({ unread: true, limit: 200 })
@@ -410,26 +428,29 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
 
       <aside className="sidebar">
         <nav aria-label="主导航">
-          {navigation.map(group => <section className="sidebar-nav-group" key={group.label} aria-labelledby={`nav-${group.label}`}>
-            <h2 id={`nav-${group.label}`}>{group.label}</h2>
-            {group.items.map(item => {
+          <div className="sidebar-navigation-tree">
+            {navigation.map(item => {
               const Icon = item.icon
+              if (item.adminOnly && canManage === false) return null
               if (item.children) {
                 const visibleChildren = item.children.filter(child => !child.adminOnly || canManage !== false)
-                const branchActive = visibleChildren.some(child => child.to && location.pathname === child.to)
+                const branchActive = visibleChildren.some(child => navigationItemIsActive(location.pathname, child.to))
+                const branchOpen = Boolean(openNavigationBranches[item.label] || branchActive)
                 return <div className={`sidebar-nav-branch ${branchActive ? 'is-active' : ''}`.trim()} key={item.label}>
                   <AppButton
                     text
                     className="sidebar-nav-parent"
                     type="button"
-                    aria-expanded={permissionNavigationOpen}
-                    onClick={() => setPermissionNavigationOpen(open => !open)}
+                    aria-expanded={branchOpen}
+                    aria-label={sidebarCollapsed ? item.label : undefined}
+                    title={sidebarCollapsed ? item.label : undefined}
+                    onClick={() => setOpenNavigationBranches(current => ({ ...current, [item.label]: !branchOpen }))}
                   >
                     <Icon aria-hidden="true" size={19} />
                     <span>{item.label}</span>
                     <CaretDown className="sidebar-nav-caret" aria-hidden="true" size={14} />
                   </AppButton>
-                  {permissionNavigationOpen && <div className="sidebar-nav-children">
+                  {branchOpen && <div className="sidebar-nav-children">
                     {visibleChildren.map(child => {
                       const ChildIcon = child.icon
                       return <NavLink key={child.label} to={child.to!} title={sidebarCollapsed ? child.label : undefined}>
@@ -439,17 +460,16 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
                   </div>}
                 </div>
               }
-              if (item.adminOnly && canManage === false) return null
               return <NavLink key={item.label} to={item.to!} title={sidebarCollapsed ? item.label : undefined}><Icon aria-hidden="true" size={19} /><span>{item.label}</span></NavLink>
             })}
-          </section>)}
+          </div>
         </nav>
         <div className="sidebar-footer">
           <div className="sidebar-domain-wrap" ref={domainSwitcherRef}>
             {domainMenuOpen && <div className="domain-menu sidebar-domain-menu" role="menu" aria-label="切换业务领域">
               <header>
                 <strong>切换领域</strong>
-                <NavLink to={designSnapshot ? '/domain-access?snapshot=domain-access-v2' : '/domain-access'} onClick={() => setDomainMenuOpen(false)}>管理领域访问<ArrowSquareOut size={14} /></NavLink>
+                <NavLink to={designSnapshot ? '/domain-access?snapshot=domain-access-v2' : '/domain-access'} onClick={() => setDomainMenuOpen(false)}>管理领域权限<ArrowSquareOut size={14} /></NavLink>
               </header>
               <div className="domain-menu-section-label">当前领域</div>
               {activeDomains.length > 0
@@ -470,11 +490,16 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
                   >
                     <span className="domain-option-icon"><DomainIcon size={24} weight="duotone" /></span>
                     <span className="domain-option-copy">
-                      <span className="domain-option-title"><strong>{domain.name}</strong>{isCurrent && <em>当前</em>}</span>
-                      <small>角色：{domainRoleLabel(domain, currentSubject(), designSnapshot)}</small>
+                      <span className="domain-option-title">
+                        <strong>{domain.name}</strong>
+                        <span className="domain-option-status">
+                          {isCurrent && <em>当前</em>}
+                          {switching && <SpinnerGap className="domain-option-spinner" size={17} />}
+                        </span>
+                      </span>
+                      <small>角色：{domainRoleLabel(domain, currentSubject(), designSnapshot, canManage === true)}</small>
                       <span className="domain-option-description">{domain.description || domain.code}</span>
                     </span>
-                    {switching && <SpinnerGap className="domain-option-spinner" size={17} />}
                   </AppButton>
                 })
                 : <p>暂无可用领域</p>}
@@ -501,10 +526,10 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
       </aside>
 
       <main className="main-stage">
-        <header className="topbar">
+        {!hidePageHeader && <header className="topbar">
           <div><span className="eyebrow">{eyebrow}</span><div className="topbar-title-row"><h1>{title}</h1>{titleMeta}</div></div>
           <div className="topbar-actions">{actions}</div>
-        </header>
+        </header>}
         {children}
       </main>
       {domainSwitchFeedback && <div className={`domain-switch-feedback is-${domainSwitchFeedback.kind}`} role="status">

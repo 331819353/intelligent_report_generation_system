@@ -5,6 +5,7 @@ import {
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
+import '../styles/report.css'
 import {
   reportEditorAPI, type DraftExecution, type PublicationGate, type PublicationReviewResponse, type ReportDraft,
 } from '../report/api/editor'

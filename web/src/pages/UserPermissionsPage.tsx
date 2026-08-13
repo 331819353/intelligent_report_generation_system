@@ -25,6 +25,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { AppButton } from '../components/AppButton'
 import { SubjectAttributesPanel } from '../components/SubjectAttributesPanel'
 import { AppShell } from '../components/AppShell'
+import '../styles/user-permissions.css'
 import {
   administrationAPI,
   type AdminUser,
@@ -263,7 +264,7 @@ export function UserPermissionsPage() {
         setLoading(false)
       }).catch(cause => {
         if (cancelled) return
-        setError(cause instanceof Error ? cause.message : '用户权限加载失败')
+        setError(cause instanceof Error ? cause.message : '角色权限加载失败')
         setLoading(false)
       })
     }, 0)
@@ -509,7 +510,7 @@ export function UserPermissionsPage() {
     const csv = [header, ...rows].map(row => row.map(value => `"${String(value).replaceAll('"', '""')}"`).join(',')).join('\n')
     const link = document.createElement('a')
     link.href = URL.createObjectURL(new Blob([`\ufeff${csv}`], { type: 'text/csv;charset=utf-8' }))
-    link.download = `用户权限-${new Date().toISOString().slice(0, 10)}.csv`
+    link.download = `角色权限-${new Date().toISOString().slice(0, 10)}.csv`
     link.click()
     URL.revokeObjectURL(link.href)
   }
@@ -517,8 +518,8 @@ export function UserPermissionsPage() {
   return <AppShell className="user-permissions-shell" controlPlane>
     <section className="user-permissions-page">
       <header className="user-permissions-heading">
-        <div className="user-permissions-breadcrumb"><span>权限管理</span><CaretRight size={12} /><strong>用户权限</strong></div>
-        <h1>用户权限</h1>
+        <div className="user-permissions-breadcrumb"><span>权限管理</span><CaretRight size={12} /><strong>角色权限</strong></div>
+        <h1>角色权限</h1>
         <p>管理成员所属领域、角色与实际生效权限</p>
       </header>
 

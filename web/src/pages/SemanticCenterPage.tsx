@@ -39,8 +39,10 @@ import {
   useState,
   type ComponentType,
 } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { AppButton } from "../components/AppButton";
 import { AppShell } from "../components/AppShell";
+import "../styles/semantic-center.css";
 import { SemanticOperationsPanel } from "../components/semantic/SemanticOperationsPanel";
 import { AdditivityBacklogPanel } from "../components/semantic/AdditivityBacklogPanel";
 import { QualityRulesPanel } from "../components/semantic/QualityRulesPanel";
@@ -175,6 +177,19 @@ const tabMeta: Record<SemanticTab, SemanticTabMeta> = {
     icon: Lifebuoy,
   },
 };
+
+const semanticTabRoutes: Record<SemanticTab, string> = {
+  models: "/semantic",
+  metrics: "/semantic/metrics",
+  dimensions: "/semantic/dimensions",
+  knowledge: "/semantic/knowledge",
+  releases: "/semantic/releases",
+  operations: "/semantic/operations",
+};
+
+function semanticTabFromPath(pathname: string): SemanticTab | undefined {
+  return (Object.entries(semanticTabRoutes) as Array<[SemanticTab, string]>).find(([, route]) => route === pathname)?.[0];
+}
 
 const snapshotModels: SemanticObject[] = [
   {
@@ -912,10 +927,12 @@ function fieldSensitivity(field: SemanticDatasetField) {
 }
 
 export function SemanticCenterPage() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const params = new URLSearchParams(window.location.search);
   const designSnapshot = import.meta.env.DEV && params.has("snapshot");
   const [activeTab, setActiveTab] = useState<SemanticTab>(
-    params.get("workspace") === "feedback" ? "operations" : "models",
+    semanticTabFromPath(location.pathname) ?? (params.get("workspace") === "feedback" ? "operations" : "models"),
   );
   const [objects, setObjects] = useState<
     Record<SemanticCatalogTab, SemanticObject[]>
@@ -937,6 +954,11 @@ export function SemanticCenterPage() {
   const [evaluationSets, setEvaluationSets] = useState<
     EvaluationSetCatalogItem[]
   >([]);
+
+  useEffect(() => {
+    const routeTab = semanticTabFromPath(location.pathname);
+    if (routeTab) setActiveTab(routeTab);
+  }, [location.pathname]);
   const [qualityRules, setQualityRules] = useState<SemanticObject[]>([]);
   const [rowAccessPolicies, setRowAccessPolicies] = useState<SemanticObject[]>([]);
   const [readiness, setReadiness] = useState<AdditivityReadiness>(
@@ -1539,6 +1561,7 @@ export function SemanticCenterPage() {
       }
       setBuilderOpen(false);
       setActiveTab("models");
+      if (!designSnapshot) navigate(semanticTabRoutes.models);
       setNotice({
         tone: "success",
         message: "语义模型已保存并完成 Owner 认证，已进入 Release 候选范围。",
@@ -1627,6 +1650,7 @@ export function SemanticCenterPage() {
         message: "请先创建并认证一个绑定 DWS / ADS 发布版本的语义模型。",
       });
       setActiveTab("models");
+      if (!designSnapshot) navigate(semanticTabRoutes.models);
       return;
     }
     if (designSnapshot) {
@@ -3620,6 +3644,7 @@ export function SemanticCenterPage() {
                     setActiveTab(key);
                     setKeyword("");
                     setStatusFilter("ALL");
+                    if (!designSnapshot) navigate(semanticTabRoutes[key]);
                   }}
                 >
                   <Icon size={19} weight="duotone" />

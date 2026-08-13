@@ -17,12 +17,13 @@ import {
   ThumbsDown,
   ThumbsUp,
   WarningCircle,
+  X,
 } from '@phosphor-icons/react'
 import { BarChart } from 'echarts/charts'
 import { AriaComponent, GridComponent, TitleComponent, TooltipComponent } from 'echarts/components'
 import { init, use as registerEChartsComponents } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import { AddToReportDialog } from '../components/ask-data/AddToReportDialog'
@@ -43,6 +44,8 @@ import { renderTimeSpec } from '../askdata/format/timespec'
 import { useAskDataQuestion } from '../hooks/use-ask-data-question'
 import { MyDataRequests } from '../askdata/datarequest/MyDataRequests'
 import type { DataRequestPrefill } from '../askdata/datarequest/DataRequestDialog'
+import '../styles/ask-data.css'
+import '../styles/data-request.css'
 import {
   mapAskDataError,
   questionAPI,
@@ -55,6 +58,14 @@ import {
   type QuestionRunState,
   type ReleaseDrift,
 } from '../lib/ask-data-api'
+import { currentDomain, subscribeDomainChange } from '../lib/domain-context'
+import {
+  buildAskDataAttachmentContext,
+  clearAskDataAttachmentDraft,
+  readAskDataAttachmentDraft,
+  saveAskDataAttachmentDraft,
+  type AskDataAttachmentDraftItem,
+} from '../lib/ask-data-attachments'
 
 type WorkbenchMode = 'idle' | 'snapshot-release-drift' | 'snapshot-clarification' | 'snapshot-running' | 'snapshot-complete' | 'snapshot-result' | 'snapshot-answer-degraded' | 'snapshot-scope-detail' | 'live'
 type WorkspaceView = 'ask' | 'requests'
@@ -447,13 +458,21 @@ export function AskDataPage() {
   const snapshot = import.meta.env.DEV ? searchParams.get('snapshot') : null
   const incomingQuestion = searchParams.get('q')?.trim() || ''
   const incomingRunId = searchParams.get('runId')?.trim() || ''
+  const incomingAttachmentsEnabled = searchParams.get('attachments') === '1'
   const dataRequestSnapshot = snapshot === 'data-requests'
   const dataRequestWorkspace = dataRequestSnapshot || searchParams.get('workspace') === 'data-requests'
   const scopeDetailSnapshot = snapshot === 'scope-detail'
   const answerDegradedSnapshot = snapshot === 'answer-degraded'
   const resultSnapshot = snapshot === 'result'
   const designSnapshot = dataRequestSnapshot || scopeDetailSnapshot || answerDegradedSnapshot || resultSnapshot
+  const liveDomainName = useSyncExternalStore(
+    subscribeDomainChange,
+    () => currentDomain()?.name ?? '当前业务领域',
+    () => '企业经营',
+  )
+  const domainName = designSnapshot ? '企业经营' : liveDomainName
   const [question, setQuestion] = useState(scopeDetailSnapshot ? '导出本月订单明细' : resultSnapshot ? MARGIN_QUESTION : incomingQuestion)
+  const [incomingAttachments, setIncomingAttachments] = useState<AskDataAttachmentDraftItem[]>(() => designSnapshot || !incomingAttachmentsEnabled ? [] : readAskDataAttachmentDraft())
   const [followUp, setFollowUp] = useState('')
   const [mode, setMode] = useState<WorkbenchMode>(() => {
     if (incomingRunId) return 'live'
@@ -560,6 +579,8 @@ export function AskDataPage() {
     event.preventDefault()
     const submittedQuestion = verifiedAnswerVisible ? followUp.trim() : question.trim()
     if (!submittedQuestion || liveActive) return
+    const attachmentContext = verifiedAnswerVisible ? '' : buildAskDataAttachmentContext(incomingAttachments)
+    const submittedPayload = attachmentContext ? `${submittedQuestion}\n\n${attachmentContext}` : submittedQuestion
     setMode('live')
 		setToast('')
     setFeedback(null)
@@ -571,8 +592,12 @@ export function AskDataPage() {
     }
     if (verifiedAnswerVisible) setFollowUp('')
     else setQuestion('')
-    void createQuestion(submittedQuestion, activeConversationID || undefined).then(run => {
+    void createQuestion(submittedPayload, activeConversationID || undefined).then(run => {
       if (!run) return
+      if (attachmentContext) {
+        clearAskDataAttachmentDraft()
+        setIncomingAttachments([])
+      }
       setActiveConversationID(run.conversationId)
       setHistoryRefreshKey(value => value + 1)
       if (!designSnapshot) navigate(`/ask-data/conversations/${run.conversationId}`)
@@ -584,6 +609,8 @@ export function AskDataPage() {
 		setToast('')
     resetQuestion()
     setQuestion('')
+    setIncomingAttachments([])
+    clearAskDataAttachmentDraft()
     setFollowUp('')
     setMode('idle')
     setActiveConversationID('')
@@ -745,7 +772,7 @@ export function AskDataPage() {
 		? activeResultTime
 			? `${activeResultTime.asOfLabel} · ${activeResultTime.rangeLabel}`
 			: '已通过受控结果校验'
-		: '当前领域：企业经营 · 仅使用已发布语义口径'
+		: `当前领域：${domainName} · 仅使用已发布语义口径`
   const evidenceQuestion = activeConversationLabel || question
   const notify = (message: string) => {
     setToast(message)
@@ -782,7 +809,7 @@ export function AskDataPage() {
       className={`ask-data-shell ${workspaceView === 'requests' ? 'data-request-mode-shell' : ''} ${workspaceView === 'ask' && verifiedAnswerVisible ? 'ask-data-result-shell' : ''} ${workspaceView === 'ask' && activeReleaseDrift ? 'ask-data-drift-shell' : ''}`.trim()}
       eyebrow="可信问数"
       title="问数工作台"
-      titleMeta={<span className="ask-release-badge"><span />企业经营 · Release {designSnapshot ? '2026.08.1' : activeReleaseDrift?.active.semanticVersion ?? '2026.08'}</span>}
+      titleMeta={<span className="ask-release-badge"><span />{domainName} · Release {designSnapshot ? '2026.08.1' : activeReleaseDrift?.active.semanticVersion ?? '2026.08'}</span>}
       lockBusinessDomain
       actions={workspaceView === 'requests' ? <button className="primary-button ask-topbar-button" type="button" onClick={openManualDataRequest}><Plus size={15} aria-hidden="true" />新建取数申请</button> : undefined}
     >
@@ -884,6 +911,13 @@ export function AskDataPage() {
           </div>
 
           <form className="ask-question-composer" onSubmit={submitQuestion}>
+            {!verifiedAnswerVisible && incomingAttachments.length > 0 && <div className="ask-composer-attachments" aria-label="本次问数附件">
+              {incomingAttachments.map(item => <span key={item.id}><FileText size={14} /><strong>{item.name}</strong><button type="button" aria-label={`移除附件 ${item.name}`} onClick={() => setIncomingAttachments(current => {
+                const next = current.filter(attachment => attachment.id !== item.id)
+                saveAskDataAttachmentDraft(next)
+                return next
+              })}><X size={12} /></button></span>)}
+            </div>}
             <label className="ask-composer-field">
               <span className="sr-only">输入业务问题</span>
               <textarea value={verifiedAnswerVisible ? followUp : question} maxLength={500} rows={2} onChange={event => verifiedAnswerVisible ? setFollowUp(event.target.value) : setQuestion(event.target.value)} placeholder={verifiedAnswerVisible ? '继续追问，深入分析或对比其他维度…' : '试着问：本月哪些渠道影响了毛利率？'} />

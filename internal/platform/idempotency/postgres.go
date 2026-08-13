@@ -32,9 +32,13 @@ func (repository *PostgresRepository) Begin(
 	}
 	var result Record
 	err := database.WithTenantTx(ctx, repository.pool, identity.TenantID, func(tx pgx.Tx) error {
+		// Retention is enforced by a database-clock trigger. Bound the caller's
+		// clock with that same source so tiny host/database clock skew cannot
+		// attempt to delete a completed record a few milliseconds too early.
 		if _, err := tx.Exec(ctx, `DELETE FROM askdata.idempotency_records
 			WHERE tenant_id=$1 AND actor_id=$2 AND endpoint=$3 AND idempotency_key=$4
-				AND expires_at<=$5`, identity.TenantID, identity.ActorID, endpoint, key, now.UTC()); err != nil {
+				AND expires_at<=LEAST($5,clock_timestamp())`,
+			identity.TenantID, identity.ActorID, endpoint, key, now.UTC()); err != nil {
 			return err
 		}
 		command, err := tx.Exec(ctx, `INSERT INTO askdata.idempotency_records(
@@ -193,6 +197,9 @@ func (store *postgresCleanupStore) DeleteExpired(
 	}
 	deleted := 0
 	err := database.WithTenantTx(ctx, store.pool, tenantID, func(tx pgx.Tx) error {
+		// The lifecycle trigger compares expiry with clock_timestamp(). Use the
+		// same database clock here (while still respecting the caller's cutoff)
+		// so boundary-time cleanup never trips the 24-hour retention guard.
 		// Deliberately no FOR UPDATE SKIP LOCKED. Row locking would require the
 		// UPDATE privilege, and the cleanup worker holds only SELECT and DELETE —
 		// granting UPDATE would let it rewrite idempotency records, which it must
@@ -200,7 +207,7 @@ func (store *postgresCleanupStore) DeleteExpired(
 		// DELETE below is guarded by id and expires_at, so two workers racing the
 		// same row simply means one deletes it and the other affects no rows.
 		rows, err := tx.Query(ctx, `SELECT id::text FROM askdata.idempotency_records
-			WHERE tenant_id=$1 AND expires_at<=$2
+			WHERE tenant_id=$1 AND expires_at<=LEAST($2,clock_timestamp())
 			ORDER BY expires_at,id LIMIT $3`, tenantID, now.UTC(), limit)
 		if err != nil {
 			return err
@@ -222,7 +229,8 @@ func (store *postgresCleanupStore) DeleteExpired(
 		sort.Strings(ids)
 		for _, id := range ids {
 			command, err := tx.Exec(ctx, `DELETE FROM askdata.idempotency_records
-				WHERE tenant_id=$1 AND id=$2 AND expires_at<=$3`, tenantID, id, now.UTC())
+				WHERE tenant_id=$1 AND id=$2
+				  AND expires_at<=LEAST($3,clock_timestamp())`, tenantID, id, now.UTC())
 			if err != nil {
 				return err
 			}

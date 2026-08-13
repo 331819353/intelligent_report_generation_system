@@ -36,15 +36,24 @@ func main() {
 	if password == "" {
 		fatal("seed admin", fmt.Errorf("SEED_ADMIN_PASSWORD is required"))
 	}
+	ownerEmail := strings.ToLower(strings.TrimSpace(env("SEED_DOMAIN_OWNER_EMAIL", "biz.owner@example.com")))
+	ownerEmployeeNo := strings.ToUpper(strings.TrimSpace(env("SEED_DOMAIN_OWNER_EMPLOYEE_NO", "BIZ001")))
+	ownerDisplayName := strings.TrimSpace(env("SEED_DOMAIN_OWNER_DISPLAY_NAME", "企业经营负责人"))
+	ownerPassword := env("SEED_DOMAIN_OWNER_PASSWORD", password)
 
 	var tenantID string
 	err = pool.QueryRow(ctx, `INSERT INTO platform.tenants(code,name) VALUES ($1,$2) ON CONFLICT (code) DO UPDATE SET name=EXCLUDED.name RETURNING id`, tenantCode, tenantName).Scan(&tenantID)
 	if err != nil {
 		fatal("upsert tenant", err)
 	}
-	hash, err := auth.NewPasswordManager(cfg.AuthBcryptCost).Hash(password)
+	passwords := auth.NewPasswordManager(cfg.AuthBcryptCost)
+	hash, err := passwords.Hash(password)
 	if err != nil {
 		fatal("hash seed password", err)
+	}
+	ownerHash, err := passwords.Hash(ownerPassword)
+	if err != nil {
+		fatal("hash seed domain owner password", err)
 	}
 	err = database.WithTenantTx(ctx, pool, tenantID, func(tx pgx.Tx) error {
 		var adminID string
@@ -63,6 +72,12 @@ func main() {
 		if err := seedAccess(ctx, tx, tenantID, adminID); err != nil {
 			return err
 		}
+		if err := seedDomainOwner(
+			ctx, tx, tenantID, adminID,
+			ownerEmployeeNo, ownerEmail, ownerDisplayName, ownerHash,
+		); err != nil {
+			return err
+		}
 		if err := seedSemanticTaxonomy(ctx, tx, tenantID, adminID); err != nil {
 			return err
 		}
@@ -71,7 +86,80 @@ func main() {
 	if err != nil {
 		fatal("upsert seed admin", err)
 	}
-	fmt.Printf("seeded tenant=%s admin=%s\n", tenantCode, email)
+	fmt.Printf("seeded tenant=%s admin=%s domain_owner=%s\n", tenantCode, email, ownerEmail)
+}
+
+// seedDomainOwner creates the delegated domain-administrator account used to
+// verify domain-scoped governance workflows independently from the global
+// platform administrator.
+func seedDomainOwner(
+	ctx context.Context,
+	tx pgx.Tx,
+	tenantID, administratorID, employeeNo, email, displayName, passwordHash string,
+) error {
+	var ownerID string
+	if err := tx.QueryRow(ctx, `INSERT INTO platform.users(
+			tenant_id,employee_no,email,display_name,password_hash,status
+		) VALUES($1,$2,$3,$4,$5,'ACTIVE')
+		ON CONFLICT (tenant_id,email) DO UPDATE SET
+			employee_no=EXCLUDED.employee_no,
+			display_name=EXCLUDED.display_name,
+			password_hash=EXCLUDED.password_hash,
+			status='ACTIVE',
+			token_version=platform.users.token_version+1,
+			deleted_at=NULL
+		RETURNING id`, tenantID, employeeNo, email, displayName, passwordHash).Scan(&ownerID); err != nil {
+		return err
+	}
+
+	// The platform and business identities are mutually exclusive by design.
+	// Remove a stale platform role before restoring this dedicated seed account.
+	if _, err := tx.Exec(ctx, `DELETE FROM platform.user_roles AS assignment
+		USING platform.roles AS role
+		WHERE assignment.tenant_id=$1
+		  AND assignment.user_id=$2
+		  AND role.tenant_id=assignment.tenant_id
+		  AND role.id=assignment.role_id
+		  AND role.code='platform_admin'`, tenantID, ownerID); err != nil {
+		return err
+	}
+
+	var editorRoleID string
+	if err := tx.QueryRow(ctx, `SELECT id FROM platform.roles
+		WHERE tenant_id=$1 AND code='data_source_editor'
+		  AND status='ACTIVE' AND deleted_at IS NULL`, tenantID).Scan(&editorRoleID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO platform.user_roles(
+			tenant_id,user_id,role_id,assigned_by
+		) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+		tenantID, ownerID, editorRoleID, administratorID,
+	); err != nil {
+		return err
+	}
+
+	var defaultDomainID string
+	if err := tx.QueryRow(ctx, `SELECT id FROM platform.business_domains
+		WHERE tenant_id=$1 AND is_default AND status='ACTIVE' AND deleted_at IS NULL
+		ORDER BY created_at,id LIMIT 1`, tenantID).Scan(&defaultDomainID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM platform.domain_memberships
+		WHERE tenant_id=$1 AND user_id=$2 AND status='ACTIVE' AND member_role='MEMBER'`,
+		tenantID, ownerID,
+	); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO platform.domain_memberships(
+			tenant_id,domain_id,user_id,assigned_by,status,member_role
+		) VALUES($1,$2,$3,$4,'ACTIVE','DOMAIN_ADMIN')
+		ON CONFLICT(tenant_id,domain_id,user_id) DO UPDATE SET
+			assigned_by=EXCLUDED.assigned_by,
+			status='ACTIVE',
+			member_role='DOMAIN_ADMIN'`,
+		tenantID, defaultDomainID, ownerID, administratorID,
+	)
+	return err
 }
 
 // seedSemanticTaxonomy guarantees that intelligent DIM/DWD modeling can bind
@@ -179,7 +267,7 @@ func seedAccess(ctx context.Context, tx pgx.Tx, tenantID, adminID string) error 
 	); err != nil {
 		return err
 	}
-	// 平台管理员只负责控制面，不自动加入或管理任何业务领域。
+	// 平台管理员通过全局角色进入全部领域，不需要重复保存领域成员关系。
 	_, err := tx.Exec(ctx, `DELETE FROM platform.domain_memberships
 		WHERE tenant_id=$1 AND user_id=$2`, tenantID, adminID)
 	return err

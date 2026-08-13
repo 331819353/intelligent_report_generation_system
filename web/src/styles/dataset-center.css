@@ -1,12 +1,12 @@
-.dataset-center-shell { grid-template-columns: 248px minmax(0, 1fr); background: #f7f8fb; }
-.dataset-center-shell .sidebar { width: 248px; grid-template-columns: 68px 1fr; gap: 14px; border-right: 1px solid #e9ebf0; padding: 24px 18px; background: #fff; color: #16181d; }
-.dataset-center-shell .brand-logo { width: 68px; }
-.dataset-center-shell .brand-copy strong { color: #17191e; font-size: 15px; }
-.dataset-center-shell .brand-copy span { color: #9298a4; font-size: 13px; }
-.dataset-center-shell .sidebar nav { gap: 4px; margin-top: 22px; }
-.dataset-center-shell .sidebar nav a { border-radius: 9px; padding: 11px 13px; color: #626977; font-size: 14px; font-weight: 600; transition: background .15s ease, color .15s ease; }
-.dataset-center-shell .sidebar nav a:hover { background: #f5f7fa; color: #20242c; }
-.dataset-center-shell .sidebar nav a.active { background: #edf3ff; color: #2059c7; }
+.dataset-center-shell:not(.app-shell-v2) { grid-template-columns: 248px minmax(0, 1fr); background: #f7f8fb; }
+.dataset-center-shell:not(.app-shell-v2) .sidebar { width: 248px; grid-template-columns: 68px 1fr; gap: 14px; border-right: 1px solid #e9ebf0; padding: 24px 18px; background: #fff; color: #16181d; }
+.dataset-center-shell:not(.app-shell-v2) .brand-logo { width: 68px; }
+.dataset-center-shell:not(.app-shell-v2) .brand-copy strong { color: #17191e; font-size: 15px; }
+.dataset-center-shell:not(.app-shell-v2) .brand-copy span { color: #9298a4; font-size: 13px; }
+.dataset-center-shell:not(.app-shell-v2) .sidebar nav { gap: 4px; margin-top: 22px; }
+.dataset-center-shell:not(.app-shell-v2) .sidebar nav a { border-radius: 9px; padding: 11px 13px; color: #626977; font-size: 14px; font-weight: 600; transition: background .15s ease, color .15s ease; }
+.dataset-center-shell:not(.app-shell-v2) .sidebar nav a:hover { background: #f5f7fa; color: #20242c; }
+.dataset-center-shell:not(.app-shell-v2) .sidebar nav a.active { background: #edf3ff; color: #2059c7; }
 .dataset-center-shell .main-stage { padding: 0 34px 42px; }
 .dataset-center-shell .topbar { height: 92px; }
 .dataset-center-shell .topbar h1 { margin-top: 3px; color: #17191e; font-size: 25px; letter-spacing: -.025em; }

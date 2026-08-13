@@ -3,12 +3,8 @@ import {
   CheckCircle,
   ClockCounterClockwise,
   CloudArrowUp,
-  Code,
-  Database,
   GearSix,
-  ChartLineUp,
   ListChecks,
-  Lifebuoy,
   LockKey,
   Plus,
   RocketLaunch,
@@ -18,9 +14,11 @@ import {
   X,
 } from '@phosphor-icons/react'
 import { FormEvent, useCallback, useEffect, useRef, useState } from 'react'
-import { NavLink, useSearchParams } from 'react-router-dom'
+import { useSearchParams } from 'react-router-dom'
 import { AppButton } from '../components/AppButton'
 import { AppShell } from '../components/AppShell'
+import '../styles/administration.css'
+import '../styles/runtime-config.css'
 import { administrationAPI, type BusinessDomain } from '../lib/administration'
 import { currentSubject, currentTenantID } from '../lib/auth'
 import { RequestError } from '../lib/api'
@@ -204,17 +202,6 @@ export function RuntimeConfigPage() {
           <article className={parameterHealth < parameters.length ? 'attention' : ''}><LockKey size={20} /><span>部署参数就绪</span><strong>{parameterHealth}/{parameters.length}</strong></article>
         </div>
       </header>
-
-      <nav className="platform-top-navigation runtime-config-navigation" aria-label="平台管理模块">
-        <NavLink to="/platform-management/domains"><Database size={18} /><span><strong>领域管理</strong><small>新建与停用</small></span></NavLink>
-        <NavLink to="/platform-management/permissions"><ShieldCheck size={18} /><span><strong>权限管理</strong><small>管理员与用户</small></span></NavLink>
-        <NavLink to="/platform-management/approvals"><ListChecks size={18} /><span><strong>审批中心</strong><small>统一治理队列</small></span></NavLink>
-        <NavLink to="/platform-management/tasks"><CloudArrowUp size={18} /><span><strong>后台任务</strong><small>运行与重试</small></span></NavLink>
-        <NavLink to="/platform-management/observability"><ChartLineUp size={18} /><span><strong>运行观测</strong><small>健康与配额</small></span></NavLink>
-        <NavLink to="/platform-management/support"><Lifebuoy size={18} /><span><strong>支持工单</strong><small>问题跟进</small></span></NavLink>
-        <NavLink to="/platform-management/logs"><Code size={18} /><span><strong>平台日志</strong><small>不可变轨迹</small></span></NavLink>
-        <NavLink to="/platform-management/runtime-config"><GearSix size={18} /><span><strong>运行配置</strong><small>版本与回滚</small></span></NavLink>
-      </nav>
 
       {(error || notice) && <div className={`administration-feedback ${error ? 'error' : 'success'}`} role={error ? 'alert' : 'status'}>{error || notice}<AppButton text circle type="button" aria-label="关闭提示" onClick={() => { setError(''); setNotice('') }}><X size={15} /></AppButton></div>}
 

@@ -62,7 +62,9 @@ export function LoginPage() {
       window.location.replace(destination)
     } catch (cause) {
       setError(cause instanceof RequestError
-        ? cause.detail.message
+        ? mode === 'login' && cause.detail.code === 'INVALID_CREDENTIALS'
+          ? '账号或密码错误'
+          : cause.detail.message
         : mode === 'register' ? '注册失败，请稍后重试' : '账号或密码错误')
     } finally {
       setSubmitting(false)
