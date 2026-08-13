@@ -121,10 +121,13 @@
     清单由 `internal/askdata/evaluation/goldenset` 的合成夹具提供，**不等业务输入**
     （`suites.TimeSuiteCase` 强制 `Synthetic == true` 即为此意）；叙述套件断言人的判断，
     必须由两名具名评审提供，平台只提供通道。两条不可违反的纪律：
-    期望值由场景独立声明，绝不取自被测代码；适配器必须调用生产入口，
-    跑规则的副本等于没跑。`compiler.InspectAdditivity` 只返回聚合形态
-    （表达式、预聚合数、阻断码），不产出物理来源、SQL、参数或计划哈希，
-    不构成新的取数通道——执行仍只能由 `Adapt` 从回放校验过的绑定产生 `QueryArtifact`。
+    期望值由场景独立声明，绝不取自被测代码；套件必须走**完整生产链路**——
+    可加性套件从合成问句经 `understanding → binding → ir.Build →
+    Resolver.Resolve → Adapt`，`ContractStore` 用真实实现，
+    绝不手工拼装 `Resolution` 塞给编译器（那样断言的是一份没有任何 Resolver
+    产出过的计划）。**不得为评测导出编译入口**：链路外的 `ContractStore`
+    实现只需要 `compiler.NewFieldContract`，执行仍只能由 `Adapt`
+    从回放校验过的绑定产生 `QueryArtifact`。
 24. **容量与灾备结论必须重算，不得采信文件。** 压测报告必填 `scopeProfile`
     （必测场景随之而变，`P1_REPORT_ASKDATA` 含四个报告链路场景），
     缺任一签署输入固定 `POC_NOT_SIGNED`；灾备演练受据的十个阶段顺序即合同，

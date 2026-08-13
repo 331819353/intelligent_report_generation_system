@@ -472,12 +472,7 @@ func semanticFieldContract(field dataset.Field) (FieldContract, error) {
 		CanonicalType: field.CanonicalType, SemanticType: field.SemanticType,
 		Nullable: field.Nullable, Visible: visible,
 	}
-	var err error
-	contract.ContractHash, err = fieldContractHash(contract)
-	if err != nil {
-		return FieldContract{}, err
-	}
-	return contract, nil
+	return NewFieldContract(contract)
 }
 
 func loadMetricContract(

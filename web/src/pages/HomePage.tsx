@@ -5,18 +5,19 @@ import {
   ChatCircleDots,
   CheckCircle,
   FileText,
+  HandWaving,
   Paperclip,
   PaperPlaneTilt,
-  ShieldCheck,
   WarningCircle,
   X,
 } from '@phosphor-icons/react'
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AppButton } from '../components/AppButton'
 import { AppShell } from '../components/AppShell'
 import '../styles/home.css'
 import { currentDomain, subscribeDomainChange } from '../lib/domain-context'
+import { currentProfile } from '../lib/auth'
 import {
   conversationToHomeWork,
   decisionToHomeWork,
@@ -103,11 +104,11 @@ function resourceError(error: unknown, fallback: string) {
 
 function combinedRecentWork(work: Record<HomeWorkKind, LoadState<HomeWorkItem>>) {
   return [
-    work.question.items[1],
+    work.question.items[0],
     work.report.items[0],
-    work.question.items[2],
+    work.question.items[1],
     work.decision.items[0],
-    work.question.items[4] ?? work.question.items[3],
+    work.question.items[2] ?? work.question.items[3],
   ].filter((item): item is HomeWorkItem => Boolean(item)).slice(0, 5)
 }
 
@@ -120,14 +121,18 @@ function statusForWork(item: HomeWorkItem) {
 /** P01：分析首页。生产路径只渲染当前用户与领域的受权接口数据；快照仅供开发视觉回归。 */
 export function HomePage() {
   const navigate = useNavigate()
-  const snapshot = import.meta.env.DEV && new URLSearchParams(window.location.search).get('snapshot') === 'home'
+  const pageSearch = new URLSearchParams(window.location.search)
+  const snapshot = import.meta.env.DEV && pageSearch.get('snapshot') === 'home'
+  const snapshotEmptyTasks = snapshot && pageSearch.get('taskState') === 'empty'
   const initialWorkState = (kind: HomeWorkKind): LoadState<HomeWorkItem> => snapshot
     ? { status: 'ready', items: snapshotWorkItems[kind] }
     : { status: 'loading', items: [] }
   const [question, setQuestion] = useState('')
   const [questionError, setQuestionError] = useState('')
   const [attachments, setAttachments] = useState<AskDataAttachmentDraftItem[]>([])
+  const [attachmentDropActive, setAttachmentDropActive] = useState(false)
   const attachmentInputRef = useRef<HTMLInputElement>(null)
+  const [displayName, setDisplayName] = useState(snapshot ? '程' : '')
   const [activeFilter, setActiveFilter] = useState<HomeWorkFilter>('all')
   const [notice, setNotice] = useState('')
   const [reloadRevision, setReloadRevision] = useState(0)
@@ -138,7 +143,7 @@ export function HomePage() {
     decision: initialWorkState('decision'),
   }))
   const [taskState, setTaskState] = useState<LoadState<HomeTaskItem>>(snapshot
-    ? { status: 'ready', items: snapshotTasks }
+    ? { status: 'ready', items: snapshotEmptyTasks ? [] : snapshotTasks }
     : { status: 'loading', items: [] })
 
   useEffect(() => subscribeDomainChange(() => {
@@ -147,6 +152,15 @@ export function HomePage() {
     setTaskState({ status: 'loading', items: [] })
     setReloadRevision(value => value + 1)
   }), [snapshot])
+
+  useEffect(() => {
+    if (snapshot) return undefined
+    let cancelled = false
+    void currentProfile()
+      .then(profile => { if (!cancelled) setDisplayName(profile.displayName.trim()) })
+      .catch(() => { if (!cancelled) setDisplayName('') })
+    return () => { cancelled = true }
+  }, [snapshot])
 
   useEffect(() => {
     if (snapshot) return undefined
@@ -193,7 +207,6 @@ export function HomePage() {
           : { status: 'ready' as const, error: undefined }
     : work[activeFilter]
   const continueItem = work.question.items[0]
-  const showResumePanel = work.question.status !== 'ready' || Boolean(continueItem)
 
   const reloadHome = () => {
     if (snapshot) return
@@ -215,9 +228,7 @@ export function HomePage() {
     navigate(`/ask-data?q=${encodeURIComponent(value)}${attachments.length > 0 ? '&attachments=1' : ''}${snapshot ? '&snapshot=home-question' : ''}`)
   }
 
-  const chooseAttachments = async (event: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(event.currentTarget.files ?? [])
-    event.currentTarget.value = ''
+  const acceptAttachments = async (files: File[]) => {
     if (files.length === 0) return
     const remaining = Math.max(0, askDataAttachmentLimit - attachments.length)
     if (remaining === 0) {
@@ -253,6 +264,18 @@ export function HomePage() {
     }
   }
 
+  const chooseAttachments = async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.currentTarget.files ?? [])
+    event.currentTarget.value = ''
+    await acceptAttachments(files)
+  }
+
+  const dropAttachments = (event: DragEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setAttachmentDropActive(false)
+    void acceptAttachments(Array.from(event.dataTransfer.files ?? []))
+  }
+
   const removeAttachment = (id: string) => {
     setAttachments(current => current.filter(item => item.id !== id))
   }
@@ -283,11 +306,11 @@ export function HomePage() {
       navigate(`/ask-data?q=${encodeURIComponent(item.title)}${snapshot ? '&snapshot=home-question' : ''}`)
       return
     }
-		if (item.kind === 'report') {
-			navigate(snapshot ? '/reports?snapshot=assets' : '/reports')
-			return
-		}
-		navigate(snapshot ? '/decisions?snapshot=decisions' : `/decisions?decisionId=${encodeURIComponent(item.id)}`)
+    if (item.kind === 'report') {
+      navigate(snapshot ? '/reports?snapshot=assets' : '/reports')
+      return
+    }
+    navigate(snapshot ? '/decisions?snapshot=decisions' : `/decisions?decisionId=${encodeURIComponent(item.id)}`)
   }
 
   const openTask = (task: HomeTaskItem) => {
@@ -305,40 +328,36 @@ export function HomePage() {
   }
 
   const viewAllWork = () => {
-		if (activeFilter === 'report') {
+    if (activeFilter === 'report') {
       navigate(snapshot ? '/reports?snapshot=assets' : '/reports')
-			return
-		}
-		navigate(activeFilter === 'decision' ? '/decisions' : '/ask-data')
-	}
+      return
+    }
+    navigate(activeFilter === 'decision' ? '/decisions' : '/ask-data')
+  }
 
   return <AppShell
     className="home-shell"
     hidePageHeader
   >
     <div className="home-layout">
-      {showResumePanel && <section className="home-resume-panel" aria-labelledby="home-resume-title" aria-busy={work.question.status === 'loading'}>
-        <header><h2 id="home-resume-title">继续上次分析</h2></header>
-        {continueItem && <div className="home-resume-content">
-          <span className="home-resume-icon" aria-hidden="true"><ChatCircleDots size={29} weight="duotone" /></span>
-          <div className="home-resume-copy">
-            <h3>{continueItem.title}</h3>
-            <p>{continueItem.viewedAt} <span>·</span> {continueItem.meta.replace('问数 · ', '')} <span>·</span> {continueItem.range}</p>
-            <div className="home-resume-trust"><CheckCircle size={15} weight="fill" aria-hidden="true" /><strong>已完成</strong><i aria-hidden="true" /><ShieldCheck size={15} weight="duotone" aria-hidden="true" /><span>已接入企业数据权限体系，回答可信可追溯</span><AppButton link type="button" onClick={() => setNotice('可信问数会固定当前领域、语义版本、权限与证据链。')}>了解更多<ArrowRight size={13} /></AppButton></div>
-          </div>
-          <AppButton className="home-resume-button" variant="primary" type="button" onClick={() => openWork(continueItem)}>继续分析</AppButton>
-        </div>}
-        {work.question.status === 'loading' && <div className="home-resume-state"><span className="home-loading-dot" />正在加载上次分析…</div>}
-        {work.question.status === 'error' && <div className="home-resume-state is-error"><WarningCircle size={18} /><span>{work.question.error}</span><AppButton plain size="small" type="button" onClick={reloadHome}><ArrowClockwise size={13} />重新加载</AppButton></div>}
-      </section>}
+      <header className="home-intro">
+        <h1>您好，{displayName || '欢迎回来'} <HandWaving size={26} weight="duotone" aria-hidden="true" /></h1>
+        <p>向我提出业务问题，或上传文件，我将为您进行智能分析与洞察。</p>
+      </header>
 
       <section className="home-question-launcher" aria-labelledby="home-question-title">
-        <header className="home-question-heading"><div><h2 id="home-question-title">开始一个新问题</h2><p>描述分析目标，或上传文本数据作为本次分析的补充上下文</p></div></header>
-        <form className="home-chat-composer" onSubmit={startQuestion}>
+        <h2 className="sr-only" id="home-question-title">开始智能分析</h2>
+        <form
+          className={`home-chat-composer${attachmentDropActive ? ' is-dragging' : ''}`}
+          onSubmit={startQuestion}
+          onDragEnter={event => { event.preventDefault(); setAttachmentDropActive(true) }}
+          onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setAttachmentDropActive(true) }}
+          onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setAttachmentDropActive(false) }}
+          onDrop={dropAttachments}
+        >
           <label className="home-chat-field">
             <span className="sr-only">输入分析问题</span>
-            <textarea rows={3} value={question} maxLength={500} aria-invalid={Boolean(questionError)} aria-describedby={questionError ? 'home-question-error' : undefined} onChange={event => { setQuestion(event.target.value); setQuestionError('') }} placeholder="例如：请分析本月销售额下降的主要原因，并指出影响最大的区域和渠道" />
-            <small>{question.length}/500</small>
+            <textarea rows={3} value={question} maxLength={500} aria-invalid={Boolean(questionError)} aria-describedby={questionError ? 'home-question-error' : undefined} onChange={event => { setQuestion(event.target.value); setQuestionError('') }} placeholder="今天想分析什么？（支持多行输入）" />
           </label>
           {attachments.length > 0 && <div className="home-attachment-list" aria-label="已添加附件">
             {attachments.map(item => <span className="home-attachment-chip" key={item.id}><FileText size={15} /><span><strong>{item.name}</strong><small>{formatAttachmentSize(item.size)}</small></span><AppButton text circle size="small" type="button" aria-label={`移除附件 ${item.name}`} onClick={() => removeAttachment(item.id)}><X size={13} /></AppButton></span>)}
@@ -347,16 +366,18 @@ export function HomePage() {
           <footer className="home-chat-toolbar">
             <div className="home-upload-control">
               <input ref={attachmentInputRef} className="sr-only" type="file" multiple accept={askDataAttachmentAccept} onChange={event => void chooseAttachments(event)} />
-              <AppButton plain type="button" onClick={() => attachmentInputRef.current?.click()}><Paperclip size={17} />添加附件</AppButton>
-              <small>TXT、CSV、JSON、MD，最多 3 个，单个不超过 1MB</small>
+              <AppButton text type="button" onClick={() => attachmentInputRef.current?.click()}><Paperclip size={18} />上传文件或拖拽到此处</AppButton>
+              <small>支持 TXT、CSV、JSON、MD，单个文件不超过 1MB</small>
             </div>
-            <AppButton className="home-ask-button" variant="primary" type="submit"><PaperPlaneTilt size={18} weight="fill" aria-hidden="true" />发送问题</AppButton>
+            <span className="home-question-count" aria-hidden="true">{question.length}/500</span>
+            <AppButton className="home-ask-button" variant="primary" circle type="submit" aria-label="发送问题"><PaperPlaneTilt size={20} weight="fill" aria-hidden="true" /></AppButton>
           </footer>
-          <div className="home-suggestions">
-            <span>{suggestions.length > 0 ? '常用问题：' : '暂无保存问题，可直接输入新问题'}</span>
-            {suggestions.map(item => <AppButton plain size="small" type="button" key={item.id} title={item.questionText} onClick={() => void chooseSuggestion(item)}>{item.name}</AppButton>)}
-          </div>
         </form>
+        <div className="home-suggestions" aria-label="常用问题">
+          {suggestions.length > 0
+            ? suggestions.map(item => <AppButton plain type="button" key={item.id} title={item.questionText} onClick={() => void chooseSuggestion(item)}><ChartLineUp size={16} />{item.questionText}</AppButton>)
+            : <span>暂无保存问题，可直接输入新问题</span>}
+        </div>
       </section>
 
       <div className="home-lower-grid">
@@ -365,12 +386,21 @@ export function HomePage() {
           <div className="home-work-tabs" role="tablist" aria-label="最近工作的资产类型">
             {(Object.keys(workFilterLabels) as HomeWorkFilter[]).map(value => <AppButton text type="button" role="tab" aria-selected={activeFilter === value} key={value} onClick={() => setActiveFilter(value)}>{workFilterLabels[value]}</AppButton>)}
           </div>
+          <div className="home-work-columns" role="row" aria-hidden="true">
+            <span />
+            <span>名称</span>
+            <span>类型 / 领域</span>
+            <span>更新时间</span>
+            <span>状态</span>
+            <span />
+          </div>
           <div className="home-work-table" role="table" aria-label={workFilterLabels[activeFilter]} aria-busy={recentState.status === 'loading'}>
             {visibleWork.map(item => {
               const status = statusForWork(item)
-              return <AppButton text className="home-work-row" type="button" role="row" key={`${item.kind}:${item.id}`} onClick={() => openWork(item)}>
+              const isResumeRow = item === continueItem && (activeFilter === 'all' || activeFilter === 'question')
+              return <AppButton text className={`home-work-row${isResumeRow ? ' is-resume' : ''}`} type="button" role="row" key={`${item.kind}:${item.id}`} onClick={() => openWork(item)}>
                 <span className={`home-work-type is-${item.kind}`} aria-hidden="true"><WorkIcon kind={item.kind} /></span>
-                <span className="home-work-name" role="cell"><strong>{item.title}</strong></span>
+                <span className="home-work-name" role="cell"><strong>{isResumeRow ? `继续上次分析 · ${item.title}` : item.title}</strong></span>
                 <span className="home-work-meta" role="cell">{item.meta.replace('问数 · ', '分析 · ')}</span>
                 <span className="home-work-time" role="cell">{item.viewedAt}</span>
                 <span className={`home-work-status ${status.className}`} role="cell"><CheckCircle size={14} />{status.label}</span>
@@ -394,7 +424,7 @@ export function HomePage() {
             </article>)}
             {taskState.status === 'loading' && <div className="home-task-empty"><span className="home-loading-dot" /><strong>正在加载待办</strong><span>仅查询当前用户与领域</span></div>}
             {taskState.status === 'error' && <div className="home-task-empty is-error"><WarningCircle size={24} /><strong>待办暂时无法加载</strong><span>{taskState.error}</span><AppButton plain size="small" type="button" onClick={reloadHome}><ArrowClockwise size={13} />重新加载</AppButton></div>}
-            {taskState.status === 'ready' && visibleTasks.length === 0 && <div className="home-task-empty"><CheckCircle size={24} weight="duotone" /><strong>当前没有待办</strong><span>所有事项都已处理完成</span></div>}
+            {taskState.status === 'ready' && visibleTasks.length === 0 && <div className="home-task-empty"><img className="home-task-empty-visual" src="/home-empty-task.png" alt="" /><strong>当前没有待办</strong><span>所有事项都已处理完成</span></div>}
           </div>
         </aside>
       </div>

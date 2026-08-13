@@ -6,7 +6,6 @@ import (
 
 	"intelligent-report-generation-system/internal/askdata"
 	"intelligent-report-generation-system/internal/askdata/compiler"
-	"intelligent-report-generation-system/internal/askdata/ir"
 	"intelligent-report-generation-system/internal/askdata/registry"
 )
 
@@ -14,11 +13,18 @@ import (
 // the field roles and canonical types the compiler needs to reason about
 // aggregation, and nothing that could be mistaken for a real company's data.
 const (
-	goldenReleaseID      = "release-golden-additivity-v1"
-	goldenDomainID       = "domain-golden"
-	goldenModelVersionID = "model-golden-sales-v1"
+	goldenTenantID       askdata.ID = "tenant-golden"
+	goldenActorID        askdata.ID = "actor-golden"
+	goldenRoleID         askdata.ID = "analyst"
+	goldenDomainID       askdata.ID = "domain-golden"
+	goldenReleaseID      askdata.ID = "release-golden-additivity-v1"
+	goldenModelObjectID  askdata.ID = "model-golden-sales"
+	goldenModelVersionID askdata.ID = "model-golden-sales-v1"
 )
 
+// Field identifiers must satisfy both askdata.ID and the Dataset DSL identifier
+// pattern, because the compiler projects a model field id straight into the
+// generated document. That intersection is letters, digits and underscores.
 const (
 	fieldOrderDate      askdata.ID = "field_golden_order_date"
 	fieldRegion         askdata.ID = "field_golden_region"
@@ -32,12 +38,15 @@ const (
 )
 
 const (
-	dimensionRegion    askdata.ID = "dimension-golden-region-v1"
-	dimensionChannel   askdata.ID = "dimension-golden-channel-v1"
-	dimensionOrderDate askdata.ID = "dimension-golden-order-date-v1"
+	dimensionRegionObject    askdata.ID = "dimension-golden-region"
+	dimensionRegion          askdata.ID = "dimension-golden-region-v1"
+	dimensionChannelObject   askdata.ID = "dimension-golden-channel"
+	dimensionChannel         askdata.ID = "dimension-golden-channel-v1"
+	dimensionOrderDateObject askdata.ID = "dimension-golden-order-date"
+	dimensionOrderDate       askdata.ID = "dimension-golden-order-date-v1"
 )
 
-func goldenFields() []compiler.FieldContract {
+func goldenFields() ([]compiler.FieldContract, error) {
 	definitions := []struct {
 		id            askdata.ID
 		code          string
@@ -56,25 +65,39 @@ func goldenFields() []compiler.FieldContract {
 	}
 	fields := make([]compiler.FieldContract, 0, len(definitions))
 	for _, definition := range definitions {
-		fields = append(fields, compiler.FieldContract{
+		// The hash is stamped by the compiler's own constructor rather than
+		// recomputed here; validateSnapshot checks it, and a fixture that
+		// reimplemented the algorithm would drift from the real store.
+		field, err := compiler.NewFieldContract(compiler.FieldContract{
 			FieldID: definition.id, Code: definition.code, Role: definition.role,
 			CanonicalType: definition.canonicalType, Nullable: false, Visible: true,
-			ContractHash: askdata.HashBytes([]byte("golden-field|" + definition.code)),
 		})
+		if err != nil {
+			return nil, err
+		}
+		fields = append(fields, field)
 	}
-	return fields
+	return fields, nil
 }
 
-func goldenModel() compiler.ModelContract {
+func goldenModel() (compiler.ModelContract, error) {
+	fields, err := goldenFields()
+	if err != nil {
+		return compiler.ModelContract{}, err
+	}
+	grain, err := canonicalAST(`{"keys":["order_date","region","channel"]}`)
+	if err != nil {
+		return compiler.ModelContract{}, err
+	}
 	primaryTime := fieldOrderDate
 	schemaHash := askdata.HashBytes([]byte("golden-model-schema-v1"))
 	return compiler.ModelContract{
 		ModelVersionID:     goldenModelVersionID,
 		ContentHash:        askdata.HashBytes([]byte("golden-model-content-v1")),
 		DatasetSchemaHash:  schemaHash,
-		GrainContract:      json.RawMessage(`{"keys":["order_date","region","channel"]}`),
+		GrainContract:      grain,
 		PrimaryTimeFieldID: &primaryTime,
-		Fields:             goldenFields(),
+		Fields:             fields,
 		Materialization: compiler.MaterializationContract{
 			MaterializationID: "materialization-golden-v1", DatasetID: "dataset-golden",
 			DatasetVersionID: "dataset-version-golden-v1", Layer: "DWS", Status: "ACTIVE",
@@ -82,10 +105,10 @@ func goldenModel() compiler.ModelContract {
 			SchemaHash: schemaHash, SnapshotHash: askdata.HashBytes([]byte("golden-snapshot-v1")),
 			RowCount: 1000,
 		},
-	}
+	}, nil
 }
 
-func goldenDimensions() []compiler.DimensionContract {
+func goldenDimensions() map[askdata.ID]compiler.DimensionContract {
 	definitions := []struct {
 		id      askdata.ID
 		fieldID askdata.ID
@@ -93,23 +116,36 @@ func goldenDimensions() []compiler.DimensionContract {
 	}{
 		{dimensionRegion, fieldRegion, registry.DimensionCategorical},
 		{dimensionChannel, fieldChannel, registry.DimensionCategorical},
+		// The time dimension must point at the model's primary time field: the
+		// resolver refuses a time dimension that names any other column.
 		{dimensionOrderDate, fieldOrderDate, registry.DimensionTime},
 	}
-	dimensions := make([]compiler.DimensionContract, 0, len(definitions))
+	dimensions := make(map[askdata.ID]compiler.DimensionContract, len(definitions))
 	for _, definition := range definitions {
-		dimensions = append(dimensions, compiler.DimensionContract{
+		dimensions[definition.id] = compiler.DimensionContract{
 			DimensionVersionID: definition.id, ModelVersionID: goldenModelVersionID,
 			LogicalFieldID: definition.fieldID, Kind: definition.kind,
 			ContentHash:       askdata.HashBytes([]byte("golden-dimension|" + string(definition.id))),
 			Sensitivity:       registry.SensitivityPublic,
 			MemberIndexPolicy: registry.MemberIndexFull,
-		})
+		}
 	}
 	return dimensions
 }
 
-func fieldReferenceAST(fieldID askdata.ID) json.RawMessage {
-	return json.RawMessage(fmt.Sprintf(`{"type":"FIELD_REF","fieldId":%q}`, fieldID))
+// canonicalAST normalizes hand-written contract JSON. The resolver requires
+// every governed AST to be byte-identical to its canonical form, so a fixture
+// that skipped this would pass a suite that production would refuse to run.
+func canonicalAST(raw string) (json.RawMessage, error) {
+	canonical, err := registry.CanonicalJSON(json.RawMessage(raw))
+	if err != nil {
+		return nil, fmt.Errorf("%w: canonical AST %q: %v", ErrAdditivityGoldenSet, raw, err)
+	}
+	return canonical, nil
+}
+
+func fieldReferenceAST(fieldID askdata.ID) (json.RawMessage, error) {
+	return canonicalAST(fmt.Sprintf(`{"type":"FIELD_REF","fieldId":%q}`, fieldID))
 }
 
 func measureReferenceAST(measureVersionID askdata.ID) string {
@@ -121,86 +157,40 @@ func goldenMeasure(
 	fieldID askdata.ID,
 	aggregation registry.Aggregation,
 	dataType registry.NumericDataType,
-) compiler.MeasureContract {
+) (compiler.MeasureContract, error) {
+	formula, err := fieldReferenceAST(fieldID)
+	if err != nil {
+		return compiler.MeasureContract{}, err
+	}
+	additivity, semi, restriction := measureAdditivityFor(aggregation)
 	measureID := askdata.ID("measure-golden-" + suffix)
 	return compiler.MeasureContract{
 		MeasureID: measureID, MeasureVersionID: measureID + "-v1", ModelVersionID: goldenModelVersionID,
 		ContentHash: askdata.HashBytes([]byte("golden-measure|" + suffix)),
-		FormulaAST:  fieldReferenceAST(fieldID), Aggregation: aggregation, DataType: dataType,
+		FormulaAST:  formula, Aggregation: aggregation, DataType: dataType,
+		Additivity: additivity, SemiAdditiveTimeAggregation: semi, AggregationRestriction: restriction,
+		// Measure units are uniform on purpose: the incompatible-unit rule is a
+		// property of the metrics a single chart puts side by side, and
+		// CheckUnitCompatibility reads the metric contract, not the measure.
+		Unit:                  "UNIT",
 		NonAdditiveDimensions: []string{}, ZeroDenominatorPolicy: registry.ZeroDenominatorNull,
-	}
+	}, nil
 }
 
-// metricAlias reproduces the alias the IR builder assigns. Diverging from it
-// would make the golden plan a different plan than production compiles.
-func metricAlias(metricVersionID askdata.ID) string {
-	return "metric_" + string(askdata.HashBytes([]byte(metricVersionID))[:56])
-}
-
-func goldenScope() (askdata.PolicyScope, error) {
-	release := askdata.ReleaseRef{
-		ReleaseID: goldenReleaseID, ContentHash: askdata.HashBytes([]byte(goldenReleaseID)),
-	}
-	return askdata.NewPolicyScope(
-		"tenant-golden", "actor-golden", []askdata.ID{goldenDomainID}, []askdata.ID{"analyst"}, release,
-	)
-}
-
-func goldenSemanticIR(
-	metrics []compiler.MetricContract,
-	groupBy []askdata.ID,
-	withTimeRange bool,
-) ir.SemanticIR {
-	selected := make([]ir.Metric, 0, len(metrics))
-	for _, metric := range metrics {
-		selected = append(selected, ir.Metric{
-			MetricVersionID: metric.MetricVersionID, Alias: metricAlias(metric.MetricVersionID),
-		})
-	}
-	groups := make([]ir.GroupBy, 0, len(groupBy))
-	for _, dimensionVersionID := range groupBy {
-		groups = append(groups, ir.GroupBy{DimensionVersionID: dimensionVersionID})
-	}
-	semanticIR := ir.SemanticIR{
-		IRVersion: ir.Version, SemanticReleaseID: goldenReleaseID,
-		SemanticContentHash: askdata.HashBytes([]byte(goldenReleaseID)),
-		DomainID:            goldenDomainID, ModelVersionID: goldenModelVersionID,
-		Metrics: selected, GroupBy: groups, Filters: []ir.Filter{}, Sort: []ir.Sort{},
-		Limit: ir.DefaultLimit, OtherPolicy: ir.OtherNone, TieBreaking: ir.TieIncludeAll,
-	}
-	if withTimeRange {
-		semanticIR.TimeRange = &ir.TimeRange{
-			DimensionVersionID: dimensionOrderDate, Start: "2026-01-01", EndExclusive: "2026-08-01",
-			Timezone: "Asia/Shanghai", RequestedPeriod: "ABSOLUTE", Grain: ir.TimeGrainMonth,
-		}
-	}
-	return semanticIR
-}
-
-func goldenResolution(
-	scope askdata.PolicyScope,
-	metrics []compiler.MetricContract,
-	dimensionIDs []askdata.ID,
-	timeDimension *askdata.ID,
-) compiler.Resolution {
-	dimensions := make([]compiler.DimensionContract, 0, len(dimensionIDs))
-	catalog := goldenDimensions()
-	for _, id := range dimensionIDs {
-		for _, dimension := range catalog {
-			if dimension.DimensionVersionID == id {
-				dimensions = append(dimensions, dimension)
-			}
-		}
-	}
-	return compiler.Resolution{
-		Version: compiler.ResolutionVersion, Scope: scope, DomainID: goldenDomainID,
-		IRHash:                 askdata.HashBytes([]byte("golden-ir")),
-		BuildArtifactHash:      askdata.HashBytes([]byte("golden-build-artifact")),
-		GraphPlanHash:          askdata.HashBytes([]byte("golden-graph-plan")),
-		ResolutionHash:         askdata.HashBytes([]byte("golden-resolution")),
-		TimeDimensionVersionID: timeDimension,
-		MemberBindings:         []compiler.MemberBinding{},
-		Model:                  goldenModel(), Metrics: metrics, Dimensions: dimensions,
-		Members: []compiler.MemberContract{}, Relationships: []compiler.RelationshipContract{},
+// measureAdditivityFor derives the additivity a measure with this aggregation
+// is allowed to declare. A distinct count or an average cannot be re-added, and
+// a min or max is only meaningful once reduced over a period — the registry
+// refuses the other combinations at authoring time, so a fixture that declared
+// them would be describing a measure the platform would never certify.
+func measureAdditivityFor(aggregation registry.Aggregation) (
+	registry.Additivity, registry.SemiAdditiveTimeAggregation, registry.AggregationRestriction,
+) {
+	switch aggregation {
+	case registry.AggregationCountDistinct, registry.AggregationAverage:
+		return registry.NonAdditive, "", registry.PostAggregate
+	case registry.AggregationMinimum, registry.AggregationMaximum:
+		return registry.SemiAdditive, registry.SemiAdditivePeriodEnd, ""
+	default:
+		return registry.FullyAdditive, "", ""
 	}
 }

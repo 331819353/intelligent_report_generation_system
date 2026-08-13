@@ -10,6 +10,100 @@ import (
 	"intelligent-report-generation-system/internal/askdata/registry"
 )
 
+// The metric identities are fixed per position so many cases can share one
+// compiled question shape. What varies between cases is the governed contract
+// the release resolves those identities to — which is exactly the variable the
+// suite is about.
+var (
+	subjectMetricA = chainMetric{
+		ObjectID: "metric-golden-subject-a", VersionID: "metric-golden-subject-a-v1", Text: "库存",
+	}
+	subjectMetricB = chainMetric{
+		ObjectID: "metric-golden-subject-b", VersionID: "metric-golden-subject-b-v1", Text: "收入",
+	}
+	regionDimension = chainDimension{
+		ObjectID: dimensionRegionObject, VersionID: dimensionRegion, Text: "地区",
+	}
+	channelDimension = chainDimension{
+		ObjectID: dimensionChannelObject, VersionID: dimensionChannel, Text: "渠道",
+	}
+)
+
+// The questions deliberately avoid 按 and 各: those trigger deterministic
+// grouping rules, which would make the parser rather than the contract decide
+// the GROUP_BY roles this suite is not trying to test.
+var additivityChainSpecs = []chainSpec{
+	{Key: "one-metric", Question: "库存", Metrics: []chainMetric{subjectMetricA}},
+	{
+		Key: "one-metric-region", Question: "地区库存",
+		Metrics: []chainMetric{subjectMetricA}, GroupBy: []chainDimension{regionDimension},
+	},
+	{
+		Key: "one-metric-channel", Question: "渠道库存",
+		Metrics: []chainMetric{subjectMetricA}, GroupBy: []chainDimension{channelDimension},
+	},
+	{
+		Key: "one-metric-region-channel", Question: "地区渠道库存",
+		Metrics: []chainMetric{subjectMetricA},
+		GroupBy: []chainDimension{regionDimension, channelDimension},
+	},
+	{
+		Key: "one-metric-time", Question: "本月库存",
+		Metrics: []chainMetric{subjectMetricA}, WithTime: true,
+	},
+	{
+		Key: "one-metric-region-time", Question: "本月地区库存",
+		Metrics: []chainMetric{subjectMetricA}, GroupBy: []chainDimension{regionDimension}, WithTime: true,
+	},
+	{
+		Key: "one-metric-region-channel-time", Question: "本月地区渠道库存",
+		Metrics: []chainMetric{subjectMetricA},
+		GroupBy: []chainDimension{regionDimension, channelDimension}, WithTime: true,
+	},
+	{
+		Key: "two-metrics", Question: "库存收入",
+		Metrics: []chainMetric{subjectMetricA, subjectMetricB},
+	},
+	{
+		Key: "two-metrics-region", Question: "地区库存收入",
+		Metrics: []chainMetric{subjectMetricA, subjectMetricB}, GroupBy: []chainDimension{regionDimension},
+	},
+	{
+		Key: "two-metrics-region-channel", Question: "地区渠道库存收入",
+		Metrics: []chainMetric{subjectMetricA, subjectMetricB},
+		GroupBy: []chainDimension{regionDimension, channelDimension},
+	},
+}
+
+func buildAdditivityChains() (map[string]chain, error) {
+	chains := make(map[string]chain, len(additivityChainSpecs))
+	for _, spec := range additivityChainSpecs {
+		built, err := buildChain(spec)
+		if err != nil {
+			return nil, err
+		}
+		chains[spec.Key] = built
+	}
+	return chains, nil
+}
+
+// dimensionIDsFor lists the dimensions the release must resolve for a shape.
+// The time dimension is included because a resolved time range is looked up as
+// a dimension, not as a property of the query.
+func dimensionIDsFor(shape string) ([]askdata.ID, error) {
+	for _, spec := range additivityChainSpecs {
+		if spec.Key != shape {
+			continue
+		}
+		ids := make([]askdata.ID, 0, len(spec.GroupBy)+1)
+		for _, dimension := range chainDimensions(spec) {
+			ids = append(ids, dimension.VersionID)
+		}
+		return ids, nil
+	}
+	return nil, fmt.Errorf("%w: unknown shape %s", ErrAdditivityGoldenSet, shape)
+}
+
 type additivityScenarioBuilder struct {
 	scenarios []additivityScenario
 	err       error
@@ -25,25 +119,17 @@ func (builder *additivityScenarioBuilder) add(
 	id string,
 	category suites.AdditivitySuiteCategory,
 	expectedFunction string,
+	shape string,
 	metrics []compiler.MetricContract,
 	subject askdata.ID,
-	groupBy []askdata.ID,
-	withTimeRange bool,
 ) {
 	if builder.err != nil {
 		return
 	}
-	scope, err := goldenScope()
+	dimensionIDs, err := dimensionIDsFor(shape)
 	if err != nil {
 		builder.fail(err)
 		return
-	}
-	dimensionIDs := append([]askdata.ID(nil), groupBy...)
-	var timeDimension *askdata.ID
-	if withTimeRange {
-		dimensionIDs = append(dimensionIDs, dimensionOrderDate)
-		value := dimensionOrderDate
-		timeDimension = &value
 	}
 	contractPayload, err := json.Marshal(metrics)
 	if err != nil {
@@ -56,9 +142,7 @@ func (builder *additivityScenarioBuilder) add(
 			ContractHash:     askdata.HashBytes(append([]byte(AdditivitySuiteVersion+"|"+id+"|"), contractPayload...)),
 			ExpectedFunction: expectedFunction,
 		},
-		query:           goldenSemanticIR(metrics, groupBy, withTimeRange),
-		resolution:      goldenResolution(scope, metrics, dimensionIDs, timeDimension),
-		metricVersionID: subject,
+		shape: shape, metrics: metrics, dimensionIDs: dimensionIDs, subject: subject,
 	})
 }
 
@@ -89,7 +173,7 @@ func (builder *additivityScenarioBuilder) ratioGroupTotals() {
 		{"sales-per-unit", fieldNetSales, fieldInventoryUnits},
 		{"orders-per-unit", fieldOrderCount, fieldInventoryUnits},
 	}
-	groupings := [][]askdata.ID{{dimensionRegion}, {dimensionRegion, dimensionChannel}}
+	shapes := []string{"one-metric-region", "one-metric-region-channel"}
 	index := 0
 	for _, pair := range pairs {
 		for _, zeroPolicy := range []registry.ZeroDenominatorPolicy{
@@ -98,38 +182,47 @@ func (builder *additivityScenarioBuilder) ratioGroupTotals() {
 			for _, denominatorAggregation := range []registry.Aggregation{
 				registry.AggregationSum, registry.AggregationCount,
 			} {
-				for _, grouping := range groupings {
+				for _, shape := range shapes {
 					index++
-					id := fmt.Sprintf("additivity-golden-ratio-%03d", index)
-					numerator := goldenMeasure(
-						pair.name+"-numerator-"+fmt.Sprint(index), pair.numerator,
+					numerator, err := goldenMeasure(
+						fmt.Sprintf("%s-numerator-%d", pair.name, index), pair.numerator,
 						registry.AggregationSum, registry.NumericDecimal,
 					)
-					denominator := goldenMeasure(
-						pair.name+"-denominator-"+fmt.Sprint(index), pair.denominator,
+					if err != nil {
+						builder.fail(err)
+						return
+					}
+					denominator, err := goldenMeasure(
+						fmt.Sprintf("%s-denominator-%d", pair.name, index), pair.denominator,
 						denominatorAggregation, registry.NumericDecimal,
 					)
-					metricVersionID := askdata.ID("metric-golden-" + pair.name + "-" + fmt.Sprint(index) + "-v1")
+					if err != nil {
+						builder.fail(err)
+						return
+					}
 					formula := fmt.Sprintf(
 						`{"type":"DIVIDE","arguments":[%s,%s]}`,
 						measureReferenceAST(numerator.MeasureVersionID),
 						measureReferenceAST(denominator.MeasureVersionID),
 					)
-					metric := compiler.MetricContract{
-						MetricVersionID: metricVersionID, ModelVersionID: goldenModelVersionID,
-						ContentHash:      askdata.HashBytes([]byte("golden-metric|" + metricVersionID)),
-						FormulaAST:       json.RawMessage(formula),
-						DefaultFilterAST: json.RawMessage(`{"type":"TRUE"}`),
-						Unit:             "RATIO", TimeGrain: "DAY",
-						Additivity:             registry.NonAdditive,
-						AggregationRestriction: registry.PostAggregate,
-						NonAdditiveDimensions:  []string{},
-						ZeroDenominatorPolicy:  zeroPolicy, DisplayPrecision: 4, NullPolicy: "PRESERVE",
+					// NullPolicy stays PRESERVE: a metric-level zero fill on top of
+					// the zero-denominator COALESCE would nest two COALESCE nodes
+					// and the ratio shape would no longer be recognisable — the
+					// compiler would be right and the assertion wrong.
+					metric, err := goldenMetric(goldenMetricSpec{
+						Name: pair.name, Index: index, Formula: formula, Unit: "RATIO",
+						Additivity: registry.NonAdditive, Restriction: registry.PostAggregate,
+						ZeroPolicy: zeroPolicy, NullPolicy: "PRESERVE", Precision: 4,
 						Measures: []compiler.MeasureContract{numerator, denominator},
+					})
+					if err != nil {
+						builder.fail(err)
+						return
 					}
 					builder.add(
-						id, suites.AdditivityRatioGroupTotal, "",
-						[]compiler.MetricContract{metric}, metricVersionID, grouping, false,
+						fmt.Sprintf("additivity-golden-ratio-%03d", index),
+						suites.AdditivityRatioGroupTotal, "", shape,
+						[]compiler.MetricContract{metric}, metric.MetricVersionID,
 					)
 				}
 			}
@@ -149,37 +242,36 @@ func (builder *additivityScenarioBuilder) distinctGroupTotals() {
 		{"distinct-regions", fieldRegion},
 		{"distinct-channels", fieldChannel},
 	}
-	groupings := [][]askdata.ID{
-		{dimensionRegion}, {dimensionChannel}, {dimensionRegion, dimensionChannel},
-	}
+	shapes := []string{"one-metric-region", "one-metric-channel", "one-metric-region-channel"}
 	index := 0
 	for _, subject := range subjects {
-		for _, grouping := range groupings {
+		for _, shape := range shapes {
 			for _, nullPolicy := range []string{"PRESERVE", "ZERO"} {
 				for _, unit := range []string{"COUNT", "ENTITY"} {
 					index++
-					id := fmt.Sprintf("additivity-golden-distinct-%03d", index)
-					measure := goldenMeasure(
-						subject.name+"-"+fmt.Sprint(index), subject.field,
+					measure, err := goldenMeasure(
+						fmt.Sprintf("%s-%d", subject.name, index), subject.field,
 						registry.AggregationCountDistinct, registry.NumericInteger,
 					)
-					metricVersionID := askdata.ID("metric-golden-" + subject.name + "-" + fmt.Sprint(index) + "-v1")
-					metric := compiler.MetricContract{
-						MetricVersionID: metricVersionID, ModelVersionID: goldenModelVersionID,
-						ContentHash:      askdata.HashBytes([]byte("golden-metric|" + metricVersionID)),
-						FormulaAST:       json.RawMessage(measureReferenceAST(measure.MeasureVersionID)),
-						DefaultFilterAST: json.RawMessage(`{"type":"TRUE"}`),
-						Unit:             unit, TimeGrain: "DAY",
-						Additivity:             registry.NonAdditive,
-						AggregationRestriction: registry.PostAggregate,
-						NonAdditiveDimensions:  []string{},
-						ZeroDenominatorPolicy:  registry.ZeroDenominatorNull,
-						DisplayPrecision:       0, NullPolicy: nullPolicy,
+					if err != nil {
+						builder.fail(err)
+						return
+					}
+					metric, err := goldenMetric(goldenMetricSpec{
+						Name: subject.name, Index: index,
+						Formula: measureReferenceAST(measure.MeasureVersionID), Unit: unit,
+						Additivity: registry.NonAdditive, Restriction: registry.PostAggregate,
+						ZeroPolicy: registry.ZeroDenominatorNull, NullPolicy: nullPolicy, Precision: 0,
 						Measures: []compiler.MeasureContract{measure},
+					})
+					if err != nil {
+						builder.fail(err)
+						return
 					}
 					builder.add(
-						id, suites.AdditivityDistinctGroupTotal, "",
-						[]compiler.MetricContract{metric}, metricVersionID, grouping, false,
+						fmt.Sprintf("additivity-golden-distinct-%03d", index),
+						suites.AdditivityDistinctGroupTotal, "", shape,
+						[]compiler.MetricContract{metric}, metric.MetricVersionID,
 					)
 				}
 			}
@@ -215,33 +307,41 @@ func (builder *additivityScenarioBuilder) semiAdditivePeriods() {
 			for _, inner := range innerAggregations {
 				for _, nullPolicy := range []string{"PRESERVE", "ZERO"} {
 					index++
-					id := fmt.Sprintf("additivity-golden-semi-time-%03d", index)
-					metric, metricVersionID := semiAdditiveMetric(
+					metric, err := builder.semiAdditiveMetric(
 						subject.name, index, subject.field, inner, reduction.aggregation, nullPolicy,
 					)
+					if err != nil {
+						builder.fail(err)
+						return
+					}
 					builder.add(
-						id, suites.AdditivitySemiPeriod, reduction.expected,
-						[]compiler.MetricContract{metric}, metricVersionID, nil, true,
+						fmt.Sprintf("additivity-golden-semi-time-%03d", index),
+						suites.AdditivitySemiPeriod, reduction.expected, "one-metric-time",
+						[]compiler.MetricContract{metric}, metric.MetricVersionID,
 					)
 				}
 			}
 		}
 	}
-	groupings := [][]askdata.ID{{dimensionRegion}, {dimensionRegion, dimensionChannel}}
+	shapes := []string{"one-metric-region-time", "one-metric-region-channel-time"}
 	index = 0
 	for _, subject := range subjects {
 		for _, reduction := range reductions {
-			for _, grouping := range groupings {
+			for _, shape := range shapes {
 				for _, nullPolicy := range []string{"PRESERVE", "ZERO"} {
 					index++
-					id := fmt.Sprintf("additivity-golden-semi-mixed-%03d", index)
-					metric, metricVersionID := semiAdditiveMetric(
+					metric, err := builder.semiAdditiveMetric(
 						subject.name+"-grouped", index, subject.field,
 						registry.AggregationSum, reduction.aggregation, nullPolicy,
 					)
+					if err != nil {
+						builder.fail(err)
+						return
+					}
 					builder.add(
-						id, suites.AdditivitySemiTimeAndNonTime, reduction.expected,
-						[]compiler.MetricContract{metric}, metricVersionID, grouping, true,
+						fmt.Sprintf("additivity-golden-semi-mixed-%03d", index),
+						suites.AdditivitySemiTimeAndNonTime, reduction.expected, shape,
+						[]compiler.MetricContract{metric}, metric.MetricVersionID,
 					)
 				}
 			}
@@ -249,77 +349,127 @@ func (builder *additivityScenarioBuilder) semiAdditivePeriods() {
 	}
 }
 
-func semiAdditiveMetric(
+func (builder *additivityScenarioBuilder) semiAdditiveMetric(
 	name string,
 	index int,
 	field askdata.ID,
 	inner registry.Aggregation,
 	reduction registry.SemiAdditiveTimeAggregation,
 	nullPolicy string,
-) (compiler.MetricContract, askdata.ID) {
-	measure := goldenMeasure(name+"-"+fmt.Sprint(index), field, inner, registry.NumericDecimal)
-	metricVersionID := askdata.ID("metric-golden-" + name + "-" + fmt.Sprint(index) + "-v1")
-	return compiler.MetricContract{
-		MetricVersionID: metricVersionID, ModelVersionID: goldenModelVersionID,
-		ContentHash:      askdata.HashBytes([]byte("golden-metric|" + metricVersionID)),
-		FormulaAST:       json.RawMessage(measureReferenceAST(measure.MeasureVersionID)),
-		DefaultFilterAST: json.RawMessage(`{"type":"TRUE"}`),
-		Unit:             "UNIT", TimeGrain: "DAY",
-		Additivity:                  registry.SemiAdditive,
-		SemiAdditiveTimeAggregation: reduction,
-		NonAdditiveDimensions:       []string{},
-		ZeroDenominatorPolicy:       registry.ZeroDenominatorNull,
-		DisplayPrecision:            2, NullPolicy: nullPolicy,
+) (compiler.MetricContract, error) {
+	measure, err := goldenMeasure(fmt.Sprintf("%s-%d", name, index), field, inner, registry.NumericDecimal)
+	if err != nil {
+		return compiler.MetricContract{}, err
+	}
+	return goldenMetric(goldenMetricSpec{
+		Name: name, Index: index, Formula: measureReferenceAST(measure.MeasureVersionID), Unit: "UNIT",
+		Additivity: registry.SemiAdditive, SemiAdditive: reduction,
+		ZeroPolicy: registry.ZeroDenominatorNull, NullPolicy: nullPolicy, Precision: 2,
 		Measures: []compiler.MeasureContract{measure},
-	}, metricVersionID
+	})
 }
 
 // mixedUnitBlocks asserts the compiler refuses rather than produces a number.
 // A chart that adds a currency amount to a count is not a degraded answer, it
 // is a wrong one, so the only acceptable behaviour is a governed refusal.
 func (builder *additivityScenarioBuilder) mixedUnitBlocks() {
-	type variation struct {
-		name      string
-		units     []string
-		currency  []string
-		metricSet int
+	// Every variation is a pair of individually well-formed metrics that simply
+	// cannot share an axis. A metric with no unit at all is deliberately absent:
+	// the resolver refuses to load such a contract in the first place, so it
+	// never reaches the aggregation planner. Filing it here would credit this
+	// suite with a refusal an earlier and stronger gate actually made.
+	variations := []struct {
+		name       string
+		units      []string
+		currencies []string
+	}{
+		{"unit-mismatch", []string{"CURRENCY", "COUNT"}, []string{"CNY", ""}},
+		{"currency-mismatch", []string{"CURRENCY", "CURRENCY"}, []string{"CNY", "USD"}},
+		{"ratio-versus-percent", []string{"RATIO", "PERCENT"}, []string{"", ""}},
+		{"currency-versus-unit", []string{"CURRENCY", "UNIT"}, []string{"CNY", ""}},
+		{"count-versus-ratio", []string{"COUNT", "RATIO"}, []string{"", ""}},
 	}
-	variations := []variation{
-		{"unit-mismatch", []string{"CURRENCY", "COUNT"}, []string{"CNY", ""}, 2},
-		{"currency-mismatch", []string{"CURRENCY", "CURRENCY"}, []string{"CNY", "USD"}, 2},
-		{"ratio-versus-percent", []string{"RATIO", "PERCENT"}, []string{"", ""}, 2},
-		{"missing-unit", []string{""}, []string{""}, 1},
-		{"currency-without-code", []string{"CURRENCY"}, []string{""}, 1},
-	}
-	groupings := [][]askdata.ID{nil, {dimensionRegion}, {dimensionRegion, dimensionChannel}}
+	twoMetricShapes := []string{"two-metrics", "two-metrics-region", "two-metrics-region-channel"}
 	index := 0
-	for _, item := range variations {
-		for _, grouping := range groupings {
+	for _, variation := range variations {
+		for _, shape := range twoMetricShapes {
 			index++
-			id := fmt.Sprintf("additivity-golden-mixed-unit-%03d", index)
-			metrics := make([]compiler.MetricContract, 0, item.metricSet)
-			for position := 0; position < item.metricSet; position++ {
-				measure := goldenMeasure(
-					fmt.Sprintf("%s-%d-%d", item.name, index, position), fieldNetSales,
+			metrics := make([]compiler.MetricContract, 0, len(variation.units))
+			for position := range variation.units {
+				measure, err := goldenMeasure(
+					fmt.Sprintf("%s-%d-%d", variation.name, index, position), fieldNetSales,
 					registry.AggregationSum, registry.NumericDecimal,
 				)
-				metricVersionID := askdata.ID(fmt.Sprintf("metric-golden-%s-%d-%d-v1", item.name, index, position))
-				metrics = append(metrics, compiler.MetricContract{
-					MetricVersionID: metricVersionID, ModelVersionID: goldenModelVersionID,
-					ContentHash:      askdata.HashBytes([]byte("golden-metric|" + metricVersionID)),
-					FormulaAST:       json.RawMessage(measureReferenceAST(measure.MeasureVersionID)),
-					DefaultFilterAST: json.RawMessage(`{"type":"TRUE"}`),
-					Unit:             item.units[position], Currency: item.currency[position], TimeGrain: "DAY",
-					Additivity: registry.FullyAdditive, NonAdditiveDimensions: []string{},
-					ZeroDenominatorPolicy: registry.ZeroDenominatorNull,
-					DisplayPrecision:      2, NullPolicy: "PRESERVE",
+				if err != nil {
+					builder.fail(err)
+					return
+				}
+				metric, err := goldenMetric(goldenMetricSpec{
+					Name: variation.name, Index: index, Position: position,
+					Formula: measureReferenceAST(measure.MeasureVersionID),
+					Unit:    variation.units[position], Currency: variation.currencies[position],
+					Additivity: registry.FullyAdditive, ZeroPolicy: registry.ZeroDenominatorNull,
+					NullPolicy: "PRESERVE", Precision: 2,
 					Measures: []compiler.MeasureContract{measure},
 				})
+				if err != nil {
+					builder.fail(err)
+					return
+				}
+				metrics = append(metrics, metric)
 			}
 			builder.add(
-				id, suites.AdditivityMixedUnitCurrencyBlock, "",
-				metrics, metrics[0].MetricVersionID, grouping, false,
+				fmt.Sprintf("additivity-golden-mixed-unit-%03d", index),
+				suites.AdditivityMixedUnitCurrencyBlock, "", shape,
+				metrics, metrics[0].MetricVersionID,
 			)
 		}
 	}
+}
+
+// goldenMetricSpec keeps the contract fields a case actually varies together in
+// one place, so a new case cannot silently omit one the resolver requires.
+type goldenMetricSpec struct {
+	Name         string
+	Index        int
+	Position     int
+	Formula      string
+	Unit         string
+	Currency     string
+	Additivity   registry.Additivity
+	SemiAdditive registry.SemiAdditiveTimeAggregation
+	Restriction  registry.AggregationRestriction
+	ZeroPolicy   registry.ZeroDenominatorPolicy
+	NullPolicy   string
+	Precision    int16
+	Measures     []compiler.MeasureContract
+}
+
+func goldenMetric(spec goldenMetricSpec) (compiler.MetricContract, error) {
+	formula, err := canonicalAST(spec.Formula)
+	if err != nil {
+		return compiler.MetricContract{}, err
+	}
+	defaultFilter, err := canonicalAST(`{"type":"TRUE"}`)
+	if err != nil {
+		return compiler.MetricContract{}, err
+	}
+	// The identity comes from the position in the query, not from the case: many
+	// cases share one compiled question shape and therefore one metric identity.
+	metricVersionID := subjectMetricA.VersionID
+	if spec.Position == 1 {
+		metricVersionID = subjectMetricB.VersionID
+	}
+	return compiler.MetricContract{
+		MetricVersionID: metricVersionID, ModelVersionID: goldenModelVersionID,
+		ContentHash: askdata.HashBytes([]byte(fmt.Sprintf(
+			"golden-metric|%s|%d|%d", spec.Name, spec.Index, spec.Position,
+		))),
+		FormulaAST: formula, DefaultFilterAST: defaultFilter,
+		Unit: spec.Unit, Currency: spec.Currency, TimeGrain: "DAY",
+		Additivity: spec.Additivity, SemiAdditiveTimeAggregation: spec.SemiAdditive,
+		AggregationRestriction: spec.Restriction, NonAdditiveDimensions: []string{},
+		ZeroDenominatorPolicy: spec.ZeroPolicy, DisplayPrecision: spec.Precision,
+		NullPolicy: spec.NullPolicy, Measures: spec.Measures,
+	}, nil
 }
