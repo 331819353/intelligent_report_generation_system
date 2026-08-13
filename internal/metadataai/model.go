@@ -12,7 +12,7 @@ import (
 
 const (
 	SchemaVersion        = "1.1"
-	PromptVersion        = "metadata-completion-v13"
+	PromptVersion        = "metadata-completion-v14"
 	SourceFormatCSV      = "CSV"
 	SourceFormatExcel    = "EXCEL"
 	SourceFormatDatabase = "DATABASE"
@@ -87,12 +87,18 @@ type CompletionInput struct {
 }
 
 type CompletionColumnContext struct {
-	Name          string `json:"name"`
-	CanonicalType string `json:"canonicalType,omitempty"`
-	PrimaryKey    bool   `json:"primaryKey,omitempty"`
-	ForeignKey    bool   `json:"foreignKey,omitempty"`
-	Unique        bool   `json:"unique,omitempty"`
-	Nullable      bool   `json:"nullable"`
+	Name                string   `json:"name"`
+	CanonicalType       string   `json:"canonicalType,omitempty"`
+	PrimaryKey          bool     `json:"primaryKey,omitempty"`
+	ForeignKey          bool     `json:"foreignKey,omitempty"`
+	Unique              bool     `json:"unique,omitempty"`
+	Nullable            bool     `json:"nullable"`
+	CurrentBusinessName string   `json:"currentBusinessName,omitempty"`
+	CurrentDescription  string   `json:"currentDescription,omitempty"`
+	CurrentTags         []string `json:"currentTags,omitempty"`
+	CurrentSemanticType string   `json:"currentSemanticType,omitempty"`
+	CurrentSensitivity  string   `json:"currentSensitivity,omitempty"`
+	ManualLocked        bool     `json:"manualLocked,omitempty"`
 }
 
 func completionColumnContexts(columns []Target) []CompletionColumnContext {
@@ -102,6 +108,12 @@ func completionColumnContexts(columns []Target) []CompletionColumnContext {
 			Name: column.Name, CanonicalType: column.CanonicalType,
 			PrimaryKey: column.PrimaryKey, ForeignKey: column.ForeignKey,
 			Unique: column.Unique, Nullable: column.Nullable,
+			CurrentBusinessName: column.CurrentBusinessName,
+			CurrentDescription:  column.CurrentDescription,
+			CurrentTags:         append([]string(nil), column.CurrentTags...),
+			CurrentSemanticType: column.CurrentSemanticType,
+			CurrentSensitivity:  column.CurrentSensitivity,
+			ManualLocked:        column.ManualLocked,
 		})
 	}
 	return contexts
@@ -172,6 +184,99 @@ type Suggestion struct {
 	PendingReason string          `json:"pendingReason,omitempty"`
 	CreatedAt     string          `json:"createdAt"`
 	DecidedAt     string          `json:"decidedAt,omitempty"`
+	// Applicable / BlockedReason / ChangedFields 是读取时按目标当前状态计算的可应用性，
+	// 让页面在用户点击之前就知道某条建议能不能被接受、以及为什么不能。
+	Applicable    bool     `json:"applicable"`
+	BlockedReason string   `json:"blockedReason,omitempty"`
+	ChangedFields []string `json:"changedFields,omitempty"`
+	// TargetBusinessVersion 是应用后目标的最新业务版本，供编辑器同步本地版本号，
+	// 避免接受建议后紧接着的保存因版本过期而失败。
+	TargetBusinessVersion int64 `json:"targetBusinessVersion,omitempty"`
+}
+
+// 建议不可应用的原因。除 TargetEdited 外都是硬阻断：目标已不存在、技术结构已变化
+// 或语义类型与当前物理类型不相容时，这条建议描述的对象已经不是当前对象。
+const (
+	// SuggestionBlockedTargetEdited 表示建议生成后目标业务字段被改写。这是唯一
+	// 可以由用户确认后强制覆盖的原因，因为内容本身仍然有效，只是会覆盖他人的修改。
+	SuggestionBlockedTargetEdited     = "TARGET_EDITED"
+	SuggestionBlockedAssetRemoved     = "ASSET_REMOVED"
+	SuggestionBlockedStructureChanged = "STRUCTURE_CHANGED"
+	SuggestionBlockedSemanticType     = "SEMANTIC_TYPE_INCOMPATIBLE"
+	SuggestionBlockedAlreadyDecided   = "ALREADY_DECIDED"
+)
+
+// SuggestionConflictError 让上层把"为什么不能应用"原样透传给用户，而不是所有
+// 冲突都退化成同一句"建议已失效或资产已变更"。
+type SuggestionConflictError struct {
+	Reason        string
+	ChangedFields []string
+}
+
+func (e *SuggestionConflictError) Error() string {
+	return "metadata AI suggestion conflict: " + e.Reason
+}
+
+// Unwrap 保持既有 errors.Is(err, ErrConflict) 调用点继续工作。
+func (e *SuggestionConflictError) Unwrap() error { return ErrConflict }
+
+// suggestionBlockedMessages 是面向用户的确切原因；每一条都说明用户可以怎么处理。
+var suggestionBlockedMessages = map[string]string{
+	SuggestionBlockedTargetEdited:     "该目标的业务定义在建议生成后已被修改，确认覆盖后才能应用此建议",
+	SuggestionBlockedAssetRemoved:     "该字段或表资产已被删除或停用，建议不再适用",
+	SuggestionBlockedStructureChanged: "该目标的技术结构已变化，请重新生成元数据建议",
+	SuggestionBlockedSemanticType:     "建议的语义类型与当前物理类型不相容，请改为手工维护",
+	SuggestionBlockedAlreadyDecided:   "该建议已被处理，请刷新后查看最新结果",
+}
+
+// SuggestionBlockedMessage 返回可直接展示的中文原因。
+func SuggestionBlockedMessage(reason string) string {
+	if message, ok := suggestionBlockedMessages[reason]; ok {
+		return message
+	}
+	return "该建议当前不可应用，请刷新后重试"
+}
+
+// businessFieldsChanged 比较建议生成时的基线与目标当前值，返回被改写的字段。
+// 只比较建议真正会覆盖的业务字段：业务版本号、结构哈希、锁定状态和其他字段的
+// 变化都不构成冲突，因为它们不会让这条建议的内容失效。
+func businessFieldsChanged(baseline, current SuggestionValue, column bool) []string {
+	changed := make([]string, 0, 5)
+	if strings.TrimSpace(baseline.BusinessName) != strings.TrimSpace(current.BusinessName) {
+		changed = append(changed, "业务名称")
+	}
+	if strings.TrimSpace(baseline.BusinessDescription) != strings.TrimSpace(current.BusinessDescription) {
+		changed = append(changed, "业务说明")
+	}
+	if !sameTags(baseline.Tags, current.Tags) {
+		changed = append(changed, "标签")
+	}
+	if baseline.SensitivityLevel != current.SensitivityLevel {
+		changed = append(changed, "敏感级")
+	}
+	if column && strings.TrimSpace(baseline.SemanticType) != strings.TrimSpace(current.SemanticType) {
+		changed = append(changed, "语义类型")
+	}
+	return changed
+}
+
+// sameTags 按集合语义比较标签，标签顺序调整不算内容变化。
+func sameTags(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	seen := make(map[string]int, len(left))
+	for _, tag := range left {
+		seen[strings.TrimSpace(tag)]++
+	}
+	for _, tag := range right {
+		key := strings.TrimSpace(tag)
+		seen[key]--
+		if seen[key] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 var allowedTags = map[string]bool{

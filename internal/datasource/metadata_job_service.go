@@ -151,6 +151,8 @@ func (s *Service) QueueRefreshTablesWithSampleMode(
 		}
 		selections = selected
 	}
+	// 锁定只保护字段，不是整表开关：任何表都可以进入刷新范围，锁定字段
+	// 作为识别上下文保留但不会被 AI 写回，其余字段和表级定义照常刷新。
 	hash, err := metadataJobSourceHash(source)
 	if err != nil {
 		return MetadataJob{}, err

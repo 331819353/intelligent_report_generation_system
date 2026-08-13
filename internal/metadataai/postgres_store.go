@@ -58,7 +58,7 @@ func (s *PostgresStore) LoadInput(ctx context.Context, tenantID, tableID string)
 		var primaryKeys, constraints, indexes []byte
 		var sourceType, sourceFilename string
 		err := tx.QueryRow(ctx, `SELECT t.id::text,t.structure_hash,t.catalog_name,t.schema_name,t.table_name,t.table_type,t.source_comment,
-			t.primary_key_columns,t.constraints_json,t.indexes_json,t.business_name,t.business_description,t.tags,t.sensitivity_level::text,t.manual_locked,t.business_version,
+			t.primary_key_columns,t.constraints_json,t.indexes_json,t.business_name,t.business_description,t.tags,t.sensitivity_level::text,false,t.business_version,
 			t.last_enriched_table_structure_hash<>t.table_structure_hash,
 			d.source_type::text,COALESCE(f.filename,'')
 			FROM platform.metadata_tables t
@@ -586,12 +586,16 @@ func (s *PostgresStore) persistSuggestion(ctx context.Context, tx pgx.Tx, tenant
 	var locked bool
 	var currentVersion int64
 	var currentStructureHash string
+	var baseline SuggestionValue
 	table := target.Kind == "TABLE"
-	query := `SELECT manual_locked,business_version,structure_hash FROM platform.metadata_columns WHERE id=$1 AND asset_status='ACTIVE' FOR UPDATE`
+	query := `SELECT manual_locked,business_version,structure_hash,business_name,business_description,tags,sensitivity_level::text,semantic_type
+		FROM platform.metadata_columns WHERE id=$1 AND asset_status='ACTIVE' FOR UPDATE`
 	if table {
-		query = `SELECT manual_locked,business_version,structure_hash FROM platform.metadata_tables WHERE id=$1 AND asset_status='ACTIVE' FOR UPDATE`
+		query = `SELECT false,business_version,structure_hash,business_name,business_description,tags,sensitivity_level::text,''
+			FROM platform.metadata_tables WHERE id=$1 AND asset_status='ACTIVE' FOR UPDATE`
 	}
-	if err := tx.QueryRow(ctx, query, target.ID).Scan(&locked, &currentVersion, &currentStructureHash); err != nil {
+	if err := tx.QueryRow(ctx, query, target.ID).Scan(&locked, &currentVersion, &currentStructureHash,
+		&baseline.BusinessName, &baseline.BusinessDescription, &baseline.Tags, &baseline.SensitivityLevel, &baseline.SemanticType); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Suggestion{}, ErrConflict
 		}
@@ -604,7 +608,7 @@ func (s *PostgresStore) persistSuggestion(ctx context.Context, tx pgx.Tx, tenant
 	if status == "APPLIED" {
 		var command string
 		if table {
-			command = `UPDATE platform.metadata_tables SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,business_version=business_version+1 WHERE id=$5 AND business_version=$6 AND manual_locked=false`
+			command = `UPDATE platform.metadata_tables SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,manual_locked=false,business_version=business_version+1 WHERE id=$5 AND business_version=$6`
 		} else {
 			command = `UPDATE platform.metadata_columns SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,semantic_type=$5,business_version=business_version+1 WHERE id=$6 AND business_version=$7 AND manual_locked=false`
 		}
@@ -620,17 +624,41 @@ func (s *PostgresStore) persistSuggestion(ctx context.Context, tx pgx.Tx, tenant
 		}
 		if tag.RowsAffected() != 1 {
 			status, reason = "PENDING", "VERSION_CHANGED"
+		} else {
+			// 自动应用后当前值就是刚写入的建议内容；基线必须一并前进，
+			// 否则同一目标的后续建议会误判为"已被他人改写"。
+			baseline, currentVersion = appliedBaseline(value, table), currentVersion+1
 		}
 	}
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return Suggestion{}, err
 	}
+	baselinePayload, err := json.Marshal(baseline)
+	if err != nil {
+		return Suggestion{}, err
+	}
 	suggestion := Suggestion{JobID: jobID, TargetType: target.Kind, TargetID: target.ID, Value: value, Confidence: value.Confidence, Status: status, PendingReason: reason}
-	err = tx.QueryRow(ctx, `INSERT INTO platform.ai_metadata_suggestions(tenant_id,job_id,target_type,target_id,proposed_value,confidence,expected_business_version,expected_structure_hash,status,pending_reason)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id::text,created_at::text`, tenantID, jobID, target.Kind, target.ID, payload, value.Confidence, target.BusinessVersion, target.StructureHash, status, reason).
+	// 期望版本与基线都取本事务加锁读到的当前状态，而不是构建模型输入时的快照。
+	// 写入过期快照会让 VERSION_CHANGED 的建议从入库那一刻起就永远无法被接受。
+	err = tx.QueryRow(ctx, `INSERT INTO platform.ai_metadata_suggestions(tenant_id,job_id,target_type,target_id,proposed_value,confidence,expected_business_version,expected_structure_hash,status,pending_reason,baseline_value)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id::text,created_at::text`, tenantID, jobID, target.Kind, target.ID, payload, value.Confidence, currentVersion, target.StructureHash, status, reason, baselinePayload).
 		Scan(&suggestion.ID, &suggestion.CreatedAt)
 	return suggestion, err
+}
+
+// appliedBaseline 构造"建议刚被自动应用"后的目标业务字段快照。
+func appliedBaseline(value SuggestionValue, table bool) SuggestionValue {
+	baseline := SuggestionValue{
+		BusinessName:        strings.TrimSpace(value.BusinessName),
+		BusinessDescription: strings.TrimSpace(value.BusinessDescription),
+		Tags:                value.Tags,
+		SensitivityLevel:    value.SensitivityLevel,
+	}
+	if !table {
+		baseline.SemanticType = value.SemanticType
+	}
+	return baseline
 }
 
 // suggestionDisposition 按人工锁定、乐观版本和置信度依次决定建议去向。
@@ -667,21 +695,46 @@ func execTag(ctx context.Context, tx pgx.Tx, sql string, args ...any) (pgconnCom
 func (s *PostgresStore) ListSuggestions(ctx context.Context, tenantID, jobID, status string, limit int) (items []Suggestion, err error) {
 	items = []Suggestion{}
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id::text,job_id::text,target_type,target_id::text,proposed_value,confidence::float8,status,pending_reason,created_at::text,COALESCE(decided_at::text,'')
-			FROM platform.ai_metadata_suggestions WHERE ($1='' OR job_id=$1::uuid) AND ($2='' OR status=$2) ORDER BY created_at DESC,id LIMIT $3`, jobID, status, limit)
+		// 目标当前状态与建议一起返回，页面因此可以在用户点击之前就标出
+		// 哪些建议不可应用以及原因，而不是等到点击后收到一个泛化的冲突错误。
+		rows, err := tx.Query(ctx, `SELECT s.id::text,s.job_id::text,s.target_type,s.target_id::text,s.proposed_value,s.confidence::float8,
+				s.status,s.pending_reason,s.expected_structure_hash,s.baseline_value,s.created_at::text,COALESCE(s.decided_at::text,''),
+				COALESCE(t.business_name,c.business_name),COALESCE(t.business_description,c.business_description),
+				COALESCE(t.tags,c.tags),COALESCE(t.sensitivity_level::text,c.sensitivity_level::text),COALESCE(c.semantic_type,''),
+				COALESCE(t.structure_hash,c.structure_hash),COALESCE(c.canonical_type,''),
+				(t.id IS NOT NULL OR c.id IS NOT NULL)
+			FROM platform.ai_metadata_suggestions s
+			LEFT JOIN platform.metadata_tables t ON s.target_type='TABLE' AND t.id=s.target_id AND t.tenant_id=s.tenant_id AND t.asset_status='ACTIVE'
+			LEFT JOIN platform.metadata_columns c ON s.target_type='COLUMN' AND c.id=s.target_id AND c.tenant_id=s.tenant_id AND c.asset_status='ACTIVE'
+			WHERE ($1='' OR s.job_id=$1::uuid) AND ($2='' OR s.status=$2) ORDER BY s.created_at DESC,s.id LIMIT $3`, jobID, status, limit)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var item Suggestion
-			var payload []byte
-			if err := rows.Scan(&item.ID, &item.JobID, &item.TargetType, &item.TargetID, &payload, &item.Confidence, &item.Status, &item.PendingReason, &item.CreatedAt, &item.DecidedAt); err != nil {
+			var payload, baselinePayload []byte
+			var current SuggestionValue
+			var expectedStructureHash, structureHash, canonicalType string
+			var targetExists bool
+			if err := rows.Scan(&item.ID, &item.JobID, &item.TargetType, &item.TargetID, &payload, &item.Confidence,
+				&item.Status, &item.PendingReason, &expectedStructureHash, &baselinePayload, &item.CreatedAt, &item.DecidedAt,
+				&current.BusinessName, &current.BusinessDescription, &current.Tags, &current.SensitivityLevel, &current.SemanticType,
+				&structureHash, &canonicalType, &targetExists); err != nil {
 				return err
 			}
 			if err := json.Unmarshal(payload, &item.Value); err != nil {
 				return err
 			}
+			var baseline SuggestionValue
+			if len(baselinePayload) > 0 {
+				if err := json.Unmarshal(baselinePayload, &baseline); err != nil {
+					return err
+				}
+			}
+			item.Applicable, item.BlockedReason, item.ChangedFields = suggestionApplicability(
+				item, baseline, current, targetExists, expectedStructureHash, structureHash, canonicalType,
+			)
 			items = append(items, item)
 		}
 		return rows.Err()
@@ -689,15 +742,52 @@ func (s *PostgresStore) ListSuggestions(ctx context.Context, tenantID, jobID, st
 	return
 }
 
-// DecideSuggestion 锁定待处理建议，接受时以期望版本原子更新目标元数据。
-func (s *PostgresStore) DecideSuggestion(ctx context.Context, tenantID, actorID, suggestionID, decision string) (item Suggestion, err error) {
+// suggestionApplicability 用与 DecideSuggestion 相同的判定顺序预先计算可应用性，
+// 保证列表上显示的原因和真正点击时得到的结果一致。
+func suggestionApplicability(
+	item Suggestion,
+	baseline, current SuggestionValue,
+	targetExists bool,
+	expectedStructureHash, structureHash, canonicalType string,
+) (bool, string, []string) {
+	if item.Status != "PENDING" {
+		return false, "", nil
+	}
+	if !targetExists {
+		return false, SuggestionBlockedAssetRemoved, nil
+	}
+	if expectedStructureHash == "" || structureHash != expectedStructureHash {
+		return false, SuggestionBlockedStructureChanged, nil
+	}
+	if item.TargetType == "COLUMN" && !semanticquality.Compatible(canonicalType, item.Value.SemanticType) {
+		return false, SuggestionBlockedSemanticType, nil
+	}
+	if !isEmptyBaseline(baseline) {
+		if changed := businessFieldsChanged(baseline, current, item.TargetType == "COLUMN"); len(changed) > 0 {
+			// 内容冲突可以由用户确认后强制覆盖，因此不算完全不可应用。
+			return false, SuggestionBlockedTargetEdited, changed
+		}
+	}
+	return true, "", nil
+}
+
+// DecideSuggestion 锁定待处理建议并逐项判定可应用性。
+//
+// 并发安全来自"目标行 FOR UPDATE + 同事务写入"，而不是对 business_version 的精确
+// 匹配：那个计数器会被人工保存、后续 AI 轮次和手工完成资产化不断自增，与这条建议
+// 要覆盖的内容是否被改动无关，用它做栅栏会让完全有效的建议永久不可用。
+// 真正的冲突判定改为比对基线内容，并且每种不可应用原因都单独回报给用户。
+//
+// 人工锁定只拦截自动应用。用户在复核面板里显式点击接受，本身就是锁要保护的那个
+// 人工决定，因此不再阻断这条路径，但会记入审计。
+func (s *PostgresStore) DecideSuggestion(ctx context.Context, tenantID, actorID, suggestionID, decision string, force bool) (item Suggestion, err error) {
 	err = database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
-		var payload []byte
+		var payload, baselinePayload []byte
 		var expectedVersion int64
 		var expectedStructureHash string
-		if err := tx.QueryRow(ctx, `SELECT id::text,job_id::text,target_type,target_id::text,proposed_value,confidence::float8,status,pending_reason,expected_business_version,expected_structure_hash,created_at::text
+		if err := tx.QueryRow(ctx, `SELECT id::text,job_id::text,target_type,target_id::text,proposed_value,confidence::float8,status,pending_reason,expected_business_version,expected_structure_hash,baseline_value,created_at::text
 			FROM platform.ai_metadata_suggestions WHERE id=$1 FOR UPDATE`, suggestionID).
-			Scan(&item.ID, &item.JobID, &item.TargetType, &item.TargetID, &payload, &item.Confidence, &item.Status, &item.PendingReason, &expectedVersion, &expectedStructureHash, &item.CreatedAt); err != nil {
+			Scan(&item.ID, &item.JobID, &item.TargetType, &item.TargetID, &payload, &item.Confidence, &item.Status, &item.PendingReason, &expectedVersion, &expectedStructureHash, &baselinePayload, &item.CreatedAt); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
@@ -705,42 +795,62 @@ func (s *PostgresStore) DecideSuggestion(ctx context.Context, tenantID, actorID,
 		}
 		// 只有待处理建议可决策，避免重复接受或拒绝。
 		if item.Status != "PENDING" {
-			return ErrConflict
+			return &SuggestionConflictError{Reason: SuggestionBlockedAlreadyDecided}
 		}
 		if err := json.Unmarshal(payload, &item.Value); err != nil {
 			return err
 		}
 		newStatus := "REJECTED"
+		var overwritten []string
+		var lockedTarget bool
 		if decision == "ACCEPT" {
 			newStatus = "ACCEPTED"
-			var command string
-			var args []any
-			if item.TargetType == "TABLE" {
-				command = `UPDATE platform.metadata_tables SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,business_version=business_version+1
-					WHERE id=$5 AND business_version=$6 AND structure_hash=$7 AND asset_status='ACTIVE' AND manual_locked=false`
-				args = []any{item.Value.BusinessName, item.Value.BusinessDescription, item.Value.Tags, item.Value.SensitivityLevel, item.TargetID, expectedVersion, expectedStructureHash}
-			} else {
-				var canonicalType string
-				if err := tx.QueryRow(ctx, `SELECT canonical_type FROM platform.metadata_columns
-					WHERE id=$1 AND business_version=$2 AND structure_hash=$3 AND asset_status='ACTIVE' FOR UPDATE`,
-					item.TargetID, expectedVersion, expectedStructureHash).Scan(&canonicalType); err != nil {
-					return ErrConflict
-				}
-				if !semanticquality.Compatible(canonicalType, item.Value.SemanticType) {
-					return ErrConflict
-				}
-				command = `UPDATE platform.metadata_columns SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,semantic_type=$5,business_version=business_version+1
-					WHERE id=$6 AND business_version=$7 AND structure_hash=$8 AND asset_status='ACTIVE' AND manual_locked=false`
-				args = []any{item.Value.BusinessName, item.Value.BusinessDescription, item.Value.Tags, item.Value.SensitivityLevel, item.Value.SemanticType, item.TargetID, expectedVersion, expectedStructureHash}
-			}
-			tag, err := tx.Exec(ctx, command, args...)
+			current, state, err := lockSuggestionTarget(ctx, tx, item.TargetType, item.TargetID)
 			if err != nil {
 				return err
 			}
-			if tag.RowsAffected() != 1 {
-				return ErrConflict
+			lockedTarget = state.manualLocked
+			// 技术结构是这条建议赖以成立的前提，变化后必须重新生成。
+			// 历史数据没有记录结构哈希时保持原有的失败关闭语义。
+			if expectedStructureHash == "" || state.structureHash != expectedStructureHash {
+				return &SuggestionConflictError{Reason: SuggestionBlockedStructureChanged}
+			}
+			if item.TargetType == "COLUMN" && !semanticquality.Compatible(state.canonicalType, item.Value.SemanticType) {
+				return &SuggestionConflictError{Reason: SuggestionBlockedSemanticType}
+			}
+			// 基线为空表示历史建议未记录生成时的内容，无法证明存在冲突；
+			// 此时依靠上面的结构与资产校验兜底，不再凭版本号阻断。
+			if len(baselinePayload) > 0 {
+				var baseline SuggestionValue
+				if err := json.Unmarshal(baselinePayload, &baseline); err != nil {
+					return err
+				}
+				if !isEmptyBaseline(baseline) {
+					overwritten = businessFieldsChanged(baseline, current, item.TargetType == "COLUMN")
+					if len(overwritten) > 0 && !force {
+						return &SuggestionConflictError{Reason: SuggestionBlockedTargetEdited, ChangedFields: overwritten}
+					}
+				}
+			}
+			var command string
+			var args []any
+			if item.TargetType == "TABLE" {
+				command = `UPDATE platform.metadata_tables SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,manual_locked=false,business_version=business_version+1
+					WHERE id=$5 AND asset_status='ACTIVE' RETURNING business_version`
+				args = []any{item.Value.BusinessName, item.Value.BusinessDescription, item.Value.Tags, item.Value.SensitivityLevel, item.TargetID}
+			} else {
+				command = `UPDATE platform.metadata_columns SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,semantic_type=$5,business_version=business_version+1
+					WHERE id=$6 AND asset_status='ACTIVE' RETURNING business_version`
+				args = []any{item.Value.BusinessName, item.Value.BusinessDescription, item.Value.Tags, item.Value.SensitivityLevel, item.Value.SemanticType, item.TargetID}
+			}
+			if err := tx.QueryRow(ctx, command, args...).Scan(&item.TargetBusinessVersion); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return &SuggestionConflictError{Reason: SuggestionBlockedAssetRemoved}
+				}
+				return err
 			}
 		}
+		// 已决策的建议不再是可应用的候选项，Applicable 保持 false 与列表口径一致。
 		item.Status = newStatus
 		item.PendingReason = ""
 		if err := tx.QueryRow(ctx, `UPDATE platform.ai_metadata_suggestions SET status=$1,pending_reason='',decided_by=$2,decided_at=now() WHERE id=$3 RETURNING decided_at::text`, newStatus, actorID, suggestionID).Scan(&item.DecidedAt); err != nil {
@@ -748,9 +858,46 @@ func (s *PostgresStore) DecideSuggestion(ctx context.Context, tenantID, actorID,
 		}
 		return insertAudit(ctx, tx, tenantID, actorID, decision+"_METADATA_AI_SUGGESTION", "AI_METADATA_SUGGESTION", suggestionID, "SUCCESS", map[string]any{
 			"jobId": item.JobID, "targetType": item.TargetType, "targetId": item.TargetID,
+			"expectedBusinessVersion": expectedVersion, "targetBusinessVersion": item.TargetBusinessVersion,
+			"overwrittenFields": overwritten, "forced": force && len(overwritten) > 0,
+			"targetManualLocked": lockedTarget,
 		})
 	})
 	return
+}
+
+// suggestionTargetState 是应用建议前需要校验的目标当前技术状态。
+type suggestionTargetState struct {
+	manualLocked  bool
+	structureHash string
+	canonicalType string
+}
+
+// lockSuggestionTarget 锁定目标行并返回它当前的业务内容与技术状态。
+func lockSuggestionTarget(ctx context.Context, tx pgx.Tx, targetType, targetID string) (SuggestionValue, suggestionTargetState, error) {
+	var current SuggestionValue
+	var state suggestionTargetState
+	query := `SELECT business_name,business_description,tags,sensitivity_level::text,semantic_type,manual_locked,structure_hash,canonical_type
+		FROM platform.metadata_columns WHERE id=$1 AND asset_status='ACTIVE' FOR UPDATE`
+	if targetType == "TABLE" {
+		query = `SELECT business_name,business_description,tags,sensitivity_level::text,'',false,structure_hash,''
+			FROM platform.metadata_tables WHERE id=$1 AND asset_status='ACTIVE' FOR UPDATE`
+	}
+	err := tx.QueryRow(ctx, query, targetID).Scan(&current.BusinessName, &current.BusinessDescription, &current.Tags,
+		&current.SensitivityLevel, &current.SemanticType, &state.manualLocked, &state.structureHash, &state.canonicalType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return current, state, &SuggestionConflictError{Reason: SuggestionBlockedAssetRemoved}
+	}
+	return current, state, err
+}
+
+// isEmptyBaseline 识别迁移前写入、没有内容基线的历史建议。
+func isEmptyBaseline(baseline SuggestionValue) bool {
+	return strings.TrimSpace(baseline.BusinessName) == "" &&
+		strings.TrimSpace(baseline.BusinessDescription) == "" &&
+		len(baseline.Tags) == 0 &&
+		strings.TrimSpace(baseline.SensitivityLevel) == "" &&
+		strings.TrimSpace(baseline.SemanticType) == ""
 }
 
 // insertAudit 在业务事务内写入智能补全审计事件。

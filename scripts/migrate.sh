@@ -103,7 +103,7 @@ for migration in "$ROOT_DIR"/migrations/*.up.sql; do
         )
         AND EXISTS(
           SELECT 1 FROM pg_trigger
-          WHERE tgrelid='askdata.question_run_leases'::regclass
+          WHERE tgrelid=to_regclass('askdata.question_run_leases')
             AND tgname='askdata_question_run_leases_set_updated_at'
             AND NOT tgisinternal
         )")
@@ -119,19 +119,27 @@ for migration in "$ROOT_DIR"/migrations/*.up.sql; do
   echo "apply $version"
   begin_count=$(grep -Ec '^[[:space:]]*BEGIN;[[:space:]]*$' "$migration" || true)
   commit_count=$(grep -Ec '^[[:space:]]*COMMIT;[[:space:]]*$' "$migration" || true)
-  if [ "$begin_count" != "1" ] || [ "$commit_count" != "1" ]; then
-    echo "$version must contain exactly one top-level BEGIN and COMMIT" >&2
-    exit 1
-  fi
+  case "$begin_count:$commit_count" in
+    0:0 | 1:1) ;;
+    *)
+      echo "$version must contain either no explicit transaction or exactly one top-level BEGIN and COMMIT" >&2
+      exit 1
+      ;;
+  esac
   {
     echo 'BEGIN;'
-    # Migration files own a top-level transaction for direct execution. Strip
-    # only that pair here so the schema change and version registry row commit
-    # atomically under the runner's transaction.
-    sed \
-      -e '/^[[:space:]]*BEGIN;[[:space:]]*$/d' \
-      -e '/^[[:space:]]*COMMIT;[[:space:]]*$/d' \
-      "$migration"
+    # Newer migration files own a top-level transaction for direct execution,
+    # while the historical archive relies on this runner for that boundary.
+    # Strip the file-owned pair when present so both formats execute together
+    # with the version registry insert in one transaction.
+    if [ "$begin_count" = "1" ]; then
+      sed \
+        -e '/^[[:space:]]*BEGIN;[[:space:]]*$/d' \
+        -e '/^[[:space:]]*COMMIT;[[:space:]]*$/d' \
+        "$migration"
+    else
+      cat "$migration"
+    fi
     printf "\nINSERT INTO platform_schema_migrations(version) VALUES ('%s');\n" "$version"
     echo 'COMMIT;'
   } | compose exec -T postgres \

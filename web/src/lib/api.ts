@@ -10,6 +10,10 @@ export type APIError = {
   details?: Array<{ path: string; code?: string; reason?: string; message?: string }>
   /** 语义管理接口沿用注册表的 issues 字段；与 details 统一展示。 */
   issues?: Array<{ path: string; code?: string; reason?: string; message?: string }>
+  /** AI 建议冲突返回确切原因；overridable 表示用户确认后可强制覆盖。 */
+  reason?: string
+  changedFields?: string[]
+  overridable?: boolean
   /** 乐观锁冲突返回服务端最新基线，页面仍需显式让用户选择是否加载。 */
   currentRevision?: number
   currentVersion?: number

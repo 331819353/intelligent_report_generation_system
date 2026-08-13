@@ -78,6 +78,9 @@ func (r *PostgresRepository) ApplySelectedMetadata(ctx context.Context, source S
 			// 恢复此前停用的表资产，并清空完成 marker，使同结构的新文件
 			// 版本也会重新读取样本并完整执行 LLM 映射。后台增量刷新走
 			// ApplyManagedMetadata，不受这里的重置影响。
+			//
+			// 已锁定字段的 marker 直接推进到当前结构，避免进入输出目标；
+			// 表级元数据没有锁，重新导入时始终参与识别。
 			if _, err := tx.Exec(ctx, `UPDATE platform.metadata_tables
 				SET management_status='ENABLED',
 				    last_enriched_structure_hash='',
@@ -88,7 +91,7 @@ func (r *PostgresRepository) ApplySelectedMetadata(ctx context.Context, source S
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE platform.metadata_columns
-				SET last_enriched_structure_hash=''
+				SET last_enriched_structure_hash=CASE WHEN manual_locked THEN structure_hash ELSE '' END
 				WHERE table_id=$1 AND tenant_id=$2 AND asset_status='ACTIVE'`,
 				id, source.TenantID,
 			); err != nil {
@@ -185,14 +188,17 @@ func (r *PostgresRepository) ApplyManagedMetadata(
 		if id != lockedID || id != expectedTableID {
 			return errors.New("managed metadata table identity changed")
 		}
+		// 全量刷新始终重新标记表级元数据；锁定字段把 marker 推进到当前结构，
+		// 因而只作为识别上下文而不成为模型输出目标。
 		if resetCompletion {
 			if _, err := tx.Exec(ctx, `UPDATE platform.metadata_tables
-				SET last_enriched_structure_hash='',last_enriched_table_structure_hash=''
+				SET last_enriched_structure_hash='',
+				    last_enriched_table_structure_hash=''
 				WHERE id=$1 AND tenant_id=$2 AND asset_status='ACTIVE'`, id, source.TenantID); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `UPDATE platform.metadata_columns
-				SET last_enriched_structure_hash=''
+				SET last_enriched_structure_hash=CASE WHEN manual_locked THEN structure_hash ELSE '' END
 				WHERE table_id=$1 AND tenant_id=$2 AND asset_status='ACTIVE'`, id, source.TenantID); err != nil {
 				return err
 			}
@@ -208,7 +214,7 @@ func (r *PostgresRepository) ApplyManagedMetadata(
 			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT id::text,column_name FROM platform.metadata_columns
-			WHERE table_id=$1 AND asset_status='ACTIVE' AND last_enriched_structure_hash<>structure_hash
+			WHERE table_id=$1 AND asset_status='ACTIVE' AND NOT manual_locked AND last_enriched_structure_hash<>structure_hash
 			ORDER BY ordinal_position,id`, id)
 		if err != nil {
 			return err
@@ -358,7 +364,7 @@ func (r *PostgresRepository) upsertMetadataTable(ctx context.Context, tx pgx.Tx,
 	}
 	err = tx.QueryRow(ctx, `INSERT INTO platform.metadata_tables(tenant_id,data_source_id,catalog_name,schema_name,table_name,table_type,source_comment,estimated_row_count,primary_key_columns,constraints_json,indexes_json,structure_hash,table_structure_hash,last_sync_at)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-		ON CONFLICT(tenant_id,data_source_id,catalog_name,schema_name,table_name) DO UPDATE SET table_type=EXCLUDED.table_type,source_comment=EXCLUDED.source_comment,estimated_row_count=EXCLUDED.estimated_row_count,primary_key_columns=EXCLUDED.primary_key_columns,constraints_json=EXCLUDED.constraints_json,indexes_json=EXCLUDED.indexes_json,structure_hash=EXCLUDED.structure_hash,table_structure_hash=EXCLUDED.table_structure_hash,metadata_version=CASE WHEN metadata_tables.structure_hash<>EXCLUDED.structure_hash THEN metadata_tables.metadata_version+1 ELSE metadata_tables.metadata_version END,last_enriched_structure_hash=CASE WHEN metadata_tables.asset_status='INACTIVE' THEN '' ELSE metadata_tables.last_enriched_structure_hash END,last_enriched_table_structure_hash=CASE WHEN metadata_tables.asset_status='INACTIVE' THEN '' ELSE metadata_tables.last_enriched_table_structure_hash END,management_status=CASE WHEN metadata_tables.asset_status='INACTIVE' THEN 'ENABLED' ELSE metadata_tables.management_status END,asset_status='ACTIVE',last_sync_at=EXCLUDED.last_sync_at
+		ON CONFLICT(tenant_id,data_source_id,catalog_name,schema_name,table_name) DO UPDATE SET table_type=EXCLUDED.table_type,source_comment=EXCLUDED.source_comment,estimated_row_count=EXCLUDED.estimated_row_count,primary_key_columns=EXCLUDED.primary_key_columns,constraints_json=EXCLUDED.constraints_json,indexes_json=EXCLUDED.indexes_json,structure_hash=EXCLUDED.structure_hash,table_structure_hash=EXCLUDED.table_structure_hash,metadata_version=CASE WHEN metadata_tables.structure_hash<>EXCLUDED.structure_hash THEN metadata_tables.metadata_version+1 ELSE metadata_tables.metadata_version END,last_enriched_structure_hash=CASE WHEN metadata_tables.asset_status='INACTIVE' THEN '' ELSE metadata_tables.last_enriched_structure_hash END,last_enriched_table_structure_hash=CASE WHEN metadata_tables.asset_status='INACTIVE' THEN '' ELSE metadata_tables.last_enriched_table_structure_hash END,manual_locked=false,management_status=CASE WHEN metadata_tables.asset_status='INACTIVE' THEN 'ENABLED' ELSE metadata_tables.management_status END,asset_status='ACTIVE',last_sync_at=EXCLUDED.last_sync_at
 		RETURNING id::text`, source.TenantID, source.ID, table.CatalogName, table.SchemaName, table.Name, table.Type, table.SourceComment, table.EstimatedRowCount, table.PrimaryKeyColumns, constraints, indexes, hash, tableHash, watermark).Scan(&id)
 	if err != nil {
 		return "", err
@@ -404,7 +410,7 @@ func (r *PostgresRepository) upsertMetadataColumn(ctx context.Context, tx pgx.Tx
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO platform.metadata_columns(tenant_id,table_id,column_name,ordinal_position,source_comment,native_type,canonical_type,length,numeric_precision,numeric_scale,nullable,default_value,is_primary_key,is_foreign_key,is_unique,structure_hash,last_sync_at)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
-		ON CONFLICT(tenant_id,table_id,column_name) DO UPDATE SET ordinal_position=EXCLUDED.ordinal_position,source_comment=EXCLUDED.source_comment,native_type=EXCLUDED.native_type,canonical_type=EXCLUDED.canonical_type,length=EXCLUDED.length,numeric_precision=EXCLUDED.numeric_precision,numeric_scale=EXCLUDED.numeric_scale,nullable=EXCLUDED.nullable,default_value=EXCLUDED.default_value,is_primary_key=EXCLUDED.is_primary_key,is_foreign_key=EXCLUDED.is_foreign_key,is_unique=EXCLUDED.is_unique,structure_hash=EXCLUDED.structure_hash,last_enriched_structure_hash=CASE WHEN metadata_columns.asset_status='INACTIVE' THEN '' ELSE metadata_columns.last_enriched_structure_hash END,asset_status='ACTIVE',last_sync_at=EXCLUDED.last_sync_at`, source.TenantID, tableID, column.Name, column.OrdinalPosition, column.SourceComment, column.NativeType, column.CanonicalType, column.Length, column.Precision, column.Scale, column.Nullable, column.DefaultValue, column.PrimaryKey, column.ForeignKey, column.Unique, hash, watermark)
+		ON CONFLICT(tenant_id,table_id,column_name) DO UPDATE SET ordinal_position=EXCLUDED.ordinal_position,source_comment=EXCLUDED.source_comment,native_type=EXCLUDED.native_type,canonical_type=EXCLUDED.canonical_type,length=EXCLUDED.length,numeric_precision=EXCLUDED.numeric_precision,numeric_scale=EXCLUDED.numeric_scale,nullable=EXCLUDED.nullable,default_value=EXCLUDED.default_value,is_primary_key=EXCLUDED.is_primary_key,is_foreign_key=EXCLUDED.is_foreign_key,is_unique=EXCLUDED.is_unique,structure_hash=EXCLUDED.structure_hash,last_enriched_structure_hash=CASE WHEN metadata_columns.asset_status='INACTIVE' THEN '' WHEN metadata_columns.manual_locked THEN EXCLUDED.structure_hash ELSE metadata_columns.last_enriched_structure_hash END,asset_status='ACTIVE',last_sync_at=EXCLUDED.last_sync_at`, source.TenantID, tableID, column.Name, column.OrdinalPosition, column.SourceComment, column.NativeType, column.CanonicalType, column.Length, column.Precision, column.Scale, column.Nullable, column.DefaultValue, column.PrimaryKey, column.ForeignKey, column.Unique, hash, watermark)
 	if err != nil {
 		return err
 	}

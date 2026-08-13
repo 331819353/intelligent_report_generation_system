@@ -154,7 +154,7 @@ type ConnectionDraft = {
 type DialogState = { mode: 'create' | 'view' | 'edit' | 'delete' | 'select-tables' | 'edit-table' | 'delete-table'; source?: DataSourceRecord; table?: DataSourceTableRecord }
 type TableEditorPurpose = 'EDIT' | 'MANUAL_COMPLETE'
 type Notice = { tone: 'success' | 'error'; message: string }
-type TableDraft = { businessName: string; businessDescription: string; tags: string; sensitivityLevel: string; visibility: string; manualLocked: boolean }
+type TableDraft = { businessName: string; businessDescription: string; tags: string; sensitivityLevel: string; visibility: string }
 type MetadataJobSnapshot = { job: MetadataJob; title: string }
 type MetadataJobPoller = { jobId: string; timeout: number; stopped: boolean }
 type ConnectionTestPoller = {
@@ -280,7 +280,8 @@ const metadataReadiness = (source: DataSourceRecord, stats?: MetadataAssetStats)
   snapshotSourceMetrics[source.id]?.readiness ?? stats?.readiness ?? null
 const lifecycleSteps = (source: DataSourceRecord, stats?: MetadataAssetStats) => [
   { label: '已连接', complete: Boolean(source.configVersionId || source.fileAssetId) },
-  { label: '已验证', complete: effectiveValidationStatus(source) === 'PASSED' },
+  // 测试收据只有 30 分钟有效期，过期只影响发布门禁；这里看验证结果本身，否则勾会反复丢失。
+  { label: '已验证', complete: validationStatusOf(source) === 'PASSED' },
   { label: '已发布', complete: publicationStatusOf(source) === 'PUBLISHED' },
   { label: '完善元数据', complete: metadataReadiness(source, stats) === 100 },
 ]
@@ -299,7 +300,6 @@ const tableDraftChanged = (draft: TableDraft, table: DataSourceTableRecord) => d
   || normalizedTags(draft.tags).join('\u001f') !== table.tags.join('\u001f')
   || draft.sensitivityLevel !== table.sensitivityLevel
   || draft.visibility !== table.visibility
-  || draft.manualLocked !== table.manualLocked
 
 const emptyDraft = (): ConnectionDraft => ({
   code: '', name: '', description: '', visibility: 'PRIVATE', sharingScope: 'PRIVATE',
@@ -420,7 +420,7 @@ export function DataSourceCenterPage() {
   const [discoveredTables, setDiscoveredTables] = useState<DiscoveredTableRecord[]>([])
   const [selectedTableKeys, setSelectedTableKeys] = useState<string[]>([])
   const [discoveryLoading, setDiscoveryLoading] = useState(false)
-  const [tableDraft, setTableDraft] = useState<TableDraft>({ businessName: '', businessDescription: '', tags: '', sensitivityLevel: 'INTERNAL', visibility: 'PRIVATE', manualLocked: false })
+  const [tableDraft, setTableDraft] = useState<TableDraft>({ businessName: '', businessDescription: '', tags: '', sensitivityLevel: 'INTERNAL', visibility: 'PRIVATE' })
   const [columnDrafts, setColumnDrafts] = useState<ColumnDraft[]>([])
   const [tableEditorLoading, setTableEditorLoading] = useState(false)
   const [tableEditorPurpose, setTableEditorPurpose] = useState<TableEditorPurpose>('EDIT')
@@ -770,7 +770,7 @@ export function DataSourceCenterPage() {
   const openTableEditor = async (source: DataSourceRecord, table: DataSourceTableRecord, purpose: TableEditorPurpose = 'EDIT') => {
     const request = ++tableEditorRequest.current
     setTableEditorPurpose(purpose)
-    setTableDraft({ businessName: table.businessName, businessDescription: table.businessDescription, tags: table.tags.join(', '), sensitivityLevel: table.sensitivityLevel, visibility: table.visibility, manualLocked: purpose === 'MANUAL_COMPLETE' || table.manualLocked })
+    setTableDraft({ businessName: table.businessName, businessDescription: table.businessDescription, tags: table.tags.join(', '), sensitivityLevel: table.sensitivityLevel, visibility: table.visibility })
     setColumnDrafts([])
     setTableEditorLoading(true)
     setFormError('')
@@ -874,7 +874,7 @@ export function DataSourceCenterPage() {
         const updated = await dataSourceAPI.updateTable(table.id, {
           businessName: tableDraft.businessName.trim(), businessDescription: tableDraft.businessDescription.trim(),
           tags: normalizedTags(tableDraft.tags), sensitivityLevel: tableDraft.sensitivityLevel,
-          visibility: tableDraft.visibility, manualLocked: tableDraft.manualLocked, expectedVersion: table.businessVersion,
+          visibility: tableDraft.visibility, expectedVersion: table.businessVersion,
         })
         currentTable = updated
         saved += 1
@@ -1351,6 +1351,11 @@ export function DataSourceCenterPage() {
   const selectedLifecycle = selectedSource ? lifecycleSteps(selectedSource, assetStats[selectedSource.id]) : []
   const selectedMetadataComplete = selectedReadiness === 100
   const selectedIsRequester = Boolean(selectedSource && (!signedInSubject || selectedSource.reviewRequesterId === signedInSubject))
+  // 收据过期只阻断发布；已上线且无待发布草稿时不应每 30 分钟就把下一步拉回“重新测试”。
+  const selectedNeedsRetest = Boolean(selectedSource && (
+    validationStatusOf(selectedSource) !== 'PASSED'
+    || (connectionReceiptExpired(selectedSource) && (selectedPendingDraft || publicationStatusOf(selectedSource) !== 'PUBLISHED'))
+  ))
   const selectedNextAction = !selectedSource
     ? ''
     : !selectedCanManage
@@ -1359,7 +1364,7 @@ export function DataSourceCenterPage() {
       ? '等待发布审批'
       : selectedReviewStatus === 'REJECTED'
         ? '修改配置并重新验证'
-        : effectiveValidationStatus(selectedSource) !== 'PASSED'
+        : selectedNeedsRetest
           ? '重新测试连接'
           : selectedPendingDraft
             ? '提交发布审批'
@@ -1464,7 +1469,7 @@ export function DataSourceCenterPage() {
         <div className="data-source-inspector-scroll">
           <section className="data-source-inspector-card lifecycle-card">
             <header><strong>生命周期状态</strong><span className={`data-source-status ${selectedReviewStatus === 'PENDING' ? 'review-pending' : selectedReviewStatus === 'REJECTED' ? 'review-rejected' : selectedSource.status.toLowerCase()}`}>{lifecycleLabel(selectedSource)}</span></header>
-            <ol>{selectedLifecycle.map((step, index) => <li className={step.complete ? 'is-complete' : ''} key={step.label}>{step.complete ? <CheckCircle size={21} weight="fill" /> : <Circle size={21} />}<span>{step.label}<small>{index === 0 ? '连接配置' : index === 1 ? formatDataSourceTime(selectedSource.lastTestedAt) : index === 2 ? publicationLabels[publicationStatusOf(selectedSource)] : selectedReadiness === null ? '进入资产查看' : `${selectedReadiness}%`}</small></span></li>)}</ol>
+            <ol>{selectedLifecycle.map((step, index) => <li className={step.complete ? 'is-complete' : ''} key={step.label}>{step.complete ? <CheckCircle size={21} weight="fill" /> : <Circle size={21} />}<span>{step.label}<small>{index === 0 ? '连接配置' : index === 1 ? `${formatDataSourceTime(selectedSource.lastTestedAt)}${connectionReceiptExpired(selectedSource) ? ' · 需复验' : ''}` : index === 2 ? publicationLabels[publicationStatusOf(selectedSource)] : selectedReadiness === null ? '进入资产查看' : `${selectedReadiness}%`}</small></span></li>)}</ol>
           </section>
 
           <section className="data-source-inspector-card">
@@ -1501,16 +1506,16 @@ export function DataSourceCenterPage() {
         </div>
 
         <footer className="data-source-next-action">
-          <div><Sparkle size={18} weight="fill" /><span><strong>下一步：{selectedNextAction}</strong><small>{!selectedCanManage ? '以只读方式查看已共享的数据表、字段定义与治理状态。' : selectedReviewStatus === 'PENDING' ? '审核通过后继续元数据发现与资产完善。' : selectedReviewStatus === 'REJECTED' ? (selectedSource.reviewNote || '根据审核意见修改配置后重新提交。') : effectiveValidationStatus(selectedSource) !== 'PASSED' ? '生成新的连接测试收据，确认当前配置可用。' : selectedPendingDraft ? '固定当前已验证版本并进入发布审核。' : selectedMetadataComplete ? '表与字段业务元数据已完善，可作为稳定输入创建数据集。' : '补充业务定义、指标口径与血缘关系。'}</small></span></div>
+          <div><Sparkle size={18} weight="fill" /><span><strong>下一步：{selectedNextAction}</strong><small>{!selectedCanManage ? '以只读方式查看已共享的数据表、字段定义与治理状态。' : selectedReviewStatus === 'PENDING' ? '审核通过后继续元数据发现与资产完善。' : selectedReviewStatus === 'REJECTED' ? (selectedSource.reviewNote || '根据审核意见修改配置后重新提交。') : selectedNeedsRetest ? '生成新的连接测试收据，确认当前配置可用。' : selectedPendingDraft ? '固定当前已验证版本并进入发布审核。' : selectedMetadataComplete ? '表与字段业务元数据已完善，可作为稳定输入创建数据集。' : '补充业务定义、指标口径与血缘关系。'}</small></span></div>
           <AppButton variant="primary" type="button" disabled={actionBusy || (selectedReviewStatus === 'PENDING' && !selectedIsRequester)} onClick={() => {
             if (!selectedCanManage) openAssetWorkspace(selectedSource)
             else if (selectedReviewStatus === 'PENDING') void withdrawReview(selectedSource)
             else if (selectedReviewStatus === 'REJECTED') openExisting('edit', selectedSource)
-            else if (effectiveValidationStatus(selectedSource) !== 'PASSED') void testConnection(selectedSource)
+            else if (selectedNeedsRetest) void testConnection(selectedSource)
             else if (selectedCanPublish) void publishSource(selectedSource)
             else if (selectedMetadataComplete) navigate(`/datasets${designSnapshot ? '?snapshot=assets' : `?sourceId=${encodeURIComponent(selectedSource.id)}`}`)
             else openAssetWorkspace(selectedSource)
-          }}>{!selectedCanManage ? '查看资产' : selectedReviewStatus === 'PENDING' ? selectedIsRequester ? '撤销申请' : '等待审批' : selectedReviewStatus === 'REJECTED' ? '去修改' : effectiveValidationStatus(selectedSource) !== 'PASSED' ? '重新测试' : selectedCanPublish ? '提交审批' : selectedMetadataComplete ? '去建模' : '去完善'}</AppButton>
+          }}>{!selectedCanManage ? '查看资产' : selectedReviewStatus === 'PENDING' ? selectedIsRequester ? '撤销申请' : '等待审批' : selectedReviewStatus === 'REJECTED' ? '去修改' : selectedNeedsRetest ? '重新测试' : selectedCanPublish ? '提交审批' : selectedMetadataComplete ? '去建模' : '去完善'}</AppButton>
         </footer>
       </aside>}
 
@@ -1690,12 +1695,11 @@ export function DataSourceCenterPage() {
 
       {dialog?.mode === 'edit-table' && dialog.source && dialog.table && <Dialog title={tableEditorPurpose === 'MANUAL_COMPLETE' ? '手工完善数据表' : '修改数据表资产'} wide onClose={closeDialog}>
         <form className="data-source-form" onSubmit={event => { event.preventDefault(); void saveTableAsset(tableEditorPurpose === 'MANUAL_COMPLETE') }}>
-          {tableEditorPurpose === 'MANUAL_COMPLETE' && <div className="data-source-manual-completion-note" role="note"><strong>补齐 LLM 未完成的业务元数据</strong><span>表和每个活动字段都必须填写业务名称、业务说明和至少一个标签；字段还必须选择语义类型。提交完成后系统会锁定人工结果、标记当前结构已完善，并按源表粒度生成或刷新对应 ODS/DWS 数据集。</span></div>}
+          {tableEditorPurpose === 'MANUAL_COMPLETE' && <div className="data-source-manual-completion-note" role="note"><strong>补齐 LLM 未完成的业务元数据</strong><span>表和每个活动字段都必须填写业务名称、业务说明和至少一个标签；字段还必须选择语义类型。提交完成后系统会锁定字段级人工结果、标记当前结构已完善，并按源表粒度生成或刷新对应 ODS/DWS 数据集。</span></div>}
           <label>业务名称<input value={tableDraft.businessName} onChange={event => setTableDraft(current => ({ ...current, businessName: event.target.value }))} /></label>
           <label>业务说明<textarea rows={4} value={tableDraft.businessDescription} onChange={event => setTableDraft(current => ({ ...current, businessDescription: event.target.value }))} /></label>
           <label>标签<input value={tableDraft.tags} onChange={event => setTableDraft(current => ({ ...current, tags: event.target.value }))} placeholder="多个标签使用英文逗号分隔" /></label>
           <div className="data-source-form-grid"><label>敏感级别<select value={tableDraft.sensitivityLevel} onChange={event => setTableDraft(current => ({ ...current, sensitivityLevel: event.target.value }))}><option value="PUBLIC">公开</option><option value="INTERNAL">内部</option><option value="CONFIDENTIAL">机密</option><option value="RESTRICTED">严格限制</option></select></label><label>可见范围<select value={tableDraft.visibility} onChange={event => setTableDraft(current => ({ ...current, visibility: event.target.value }))}><option value="PRIVATE">私有</option><option value="TENANT_PUBLIC">领域公开</option></select></label></div>
-          <label className="data-source-checkbox"><input type="checkbox" checked={tableDraft.manualLocked} onChange={event => setTableDraft(current => ({ ...current, manualLocked: event.target.checked }))} />锁定人工修改，后续 LLM 刷新不自动覆盖</label>
           <section className="data-source-field-mapping" aria-label="字段映射">
             <header><div><span className="eyebrow">字段映射</span><strong>源字段与业务字段</strong><small id="field-tag-contract">人工编辑支持自由标签；LLM 自动完善只使用受控词表。多个标签用英文逗号分隔，保存时自动去空、去重（最多 30 个，每个不超过 50 字符）。</small></div><small>{columnDrafts.length} 个字段</small></header>
             {tableEditorLoading ? <div className="data-source-column-state" role="status">正在加载字段映射…</div>

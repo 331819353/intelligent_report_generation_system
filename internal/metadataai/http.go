@@ -55,17 +55,30 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 		claims, _ := auth.ClaimsFromContext(r.Context())
 		var input struct {
 			Decision string `json:"decision"`
+			// Force 表示用户已经知道目标业务定义在建议生成后被改动，仍然选择覆盖。
+			Force bool `json:"force"`
 		}
 		if !decodeJSON(w, r, &input) {
 			return
 		}
-		item, err := service.DecideSuggestion(r.Context(), claims.TenantID, claims.Subject, r.PathValue("id"), strings.ToUpper(strings.TrimSpace(input.Decision)))
+		item, err := service.DecideSuggestion(r.Context(), claims.TenantID, claims.Subject, r.PathValue("id"), strings.ToUpper(strings.TrimSpace(input.Decision)), input.Force)
 		if err != nil {
+			var conflict *SuggestionConflictError
 			switch {
 			case errors.Is(err, ErrNotFound):
 				writeError(w, http.StatusNotFound, "SUGGESTION_NOT_FOUND", "metadata AI suggestion not found")
+			case errors.As(err, &conflict):
+				// 每种冲突单独回报原因码与可读原因，页面据此决定是提示刷新、
+				// 引导重新生成，还是请用户确认覆盖后重试。
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"code":          "SUGGESTION_CONFLICT",
+					"reason":        conflict.Reason,
+					"message":       SuggestionBlockedMessage(conflict.Reason),
+					"changedFields": conflict.ChangedFields,
+					"overridable":   conflict.Reason == SuggestionBlockedTargetEdited,
+				})
 			case errors.Is(err, ErrConflict):
-				writeError(w, http.StatusConflict, "SUGGESTION_CONFLICT", "suggestion is no longer pending or the asset changed or is locked")
+				writeError(w, http.StatusConflict, "SUGGESTION_CONFLICT", SuggestionBlockedMessage(""))
 			case errors.Is(err, ErrInvalidDecision):
 				writeError(w, http.StatusBadRequest, "INVALID_DECISION", "decision must be ACCEPT or REJECT")
 			default:

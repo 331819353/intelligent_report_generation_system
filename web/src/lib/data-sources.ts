@@ -220,44 +220,27 @@ export type DataSourceTableRecord = {
   tags: string[]
   sensitivityLevel: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED'
   visibility: 'PRIVATE' | 'TENANT_PUBLIC'
-  manualLocked: boolean
   assetStatus?: string
   businessVersion: number
   structureHash: string
   managementStatus: 'ENABLED' | 'DISABLED'
   enrichmentStatus: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED'
   columnCount: number
+  /** 已锁定人工定义的字段数；锁定是字段级保护，不影响同表其余字段刷新。 */
+  lockedColumnCount?: number
   metadataVersion: number
   lastSyncAt: string
+  // 以下三项只在该表参与一个尚未结束的元数据任务时返回，用于在整批完成之前
+  // 逐表展示真实进度；任务结束后服务端立即回落为空。
+  refreshState?: MetadataJobItemStatus
+  refreshStage?: MetadataJobStage
+  refreshNote?: string
 }
 
 export type DataSourceTablePreview = {
   columns: string[]
   rows: unknown[][]
   rowCount: number
-}
-
-export type MetadataAISuggestionValue = {
-  targetId: string
-  businessName: string
-  businessDescription: string
-  tags: string[]
-  sensitivityLevel: DataSourceTableRecord['sensitivityLevel']
-  semanticType?: string
-  confidence: number
-}
-
-export type MetadataAISuggestion = {
-  id: string
-  jobId: string
-  targetType: 'TABLE' | 'COLUMN'
-  targetId: string
-  value: MetadataAISuggestionValue
-  confidence: number
-  status: 'PENDING' | 'APPLIED' | 'ACCEPTED' | 'REJECTED'
-  pendingReason?: string
-  createdAt: string
-  decidedAt?: string
 }
 
 export type DiscoveredTableRecord = {
@@ -274,6 +257,7 @@ export type MetadataRefreshMode = 'INCREMENTAL' | 'FULL'
 export type MetadataSampleMode = 'DENY' | 'MASK' | 'RAW'
 export type MetadataJobStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'PARTIAL' | 'FAILED'
 export type MetadataJobStage = 'QUEUED' | 'DISCOVERY' | 'DIFF' | 'SAMPLE' | 'PERSISTENCE' | 'LLM' | 'COMPLETE' | 'FAILED'
+export type MetadataJobItemStatus = 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'SKIPPED' | 'FAILED'
 
 export type MetadataJobFailure = {
   catalogName?: string
@@ -613,9 +597,7 @@ export const dataSourceAPI = {
   table: (tableId: string) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}`, { cache: 'no-store' }),
   columns: (tableId: string) => apiRequest<{ items: DataSourceColumnRecord[] }>(`/v1/assets/tables/${encodeURIComponent(tableId)}/columns`, { cache: 'no-store' }),
   previewTable: (tableId: string, maxRows = 5) => apiRequest<DataSourceTablePreview>(`/v1/assets/tables/${encodeURIComponent(tableId)}/preview?maxRows=${Math.min(5, Math.max(1, maxRows))}`, { cache: 'no-store' }),
-  metadataSuggestions: (status = 'PENDING', limit = 500) => apiRequest<{ items: MetadataAISuggestion[]; total: number }>(`/v1/metadata-ai/suggestions?status=${encodeURIComponent(status)}&limit=${Math.min(500, Math.max(1, limit))}`, { cache: 'no-store' }),
-  decideMetadataSuggestion: (suggestionId: string, decision: 'ACCEPT' | 'REJECT') => apiRequest<MetadataAISuggestion>(`/v1/metadata-ai/suggestions/${encodeURIComponent(suggestionId)}/decision`, { method: 'POST', body: JSON.stringify({ decision }) }),
-  updateTable: (tableId: string, input: { businessName: string; businessDescription: string; tags: string[]; sensitivityLevel: string; visibility: string; manualLocked: boolean; expectedVersion: number }) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/business-metadata`, { method: 'PUT', body: JSON.stringify(input) }),
+  updateTable: (tableId: string, input: { businessName: string; businessDescription: string; tags: string[]; sensitivityLevel: string; visibility: string; expectedVersion: number }) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/business-metadata`, { method: 'PUT', body: JSON.stringify(input) }),
   updateColumn: (columnId: string, input: DataSourceColumnBusinessMetadataInput) => apiRequest<DataSourceColumnRecord>(`/v1/assets/columns/${encodeURIComponent(columnId)}/business-metadata`, { method: 'PUT', body: JSON.stringify(input) }),
   completeTableManually: (tableId: string, expectedVersion: number, expectedStructureHash: string) => apiRequest<DataSourceTableRecord>(`/v1/assets/tables/${encodeURIComponent(tableId)}/manual-completion`, {
     method: 'POST',

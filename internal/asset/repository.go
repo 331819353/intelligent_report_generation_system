@@ -30,7 +30,15 @@ func (r *Repository) SetManualCompletionSink(sink manualCompletionSink) {
 	r.manualCompletionSink = sink
 }
 
-const tableSelect = `t.id::text,t.data_source_id::text,d.name,d.source_type::text,COALESCE((SELECT fv.id::text FROM platform.file_assets fa JOIN platform.file_asset_versions fv ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version WHERE fa.id=d.file_asset_id),''),t.catalog_name,t.schema_name,t.table_name,t.table_type,t.source_comment,t.business_name,t.business_description,t.tags,t.sensitivity_level::text,t.visibility::text,t.manual_locked,t.asset_status::text,t.management_status,CASE WHEN t.last_enriched_structure_hash<>'' AND t.last_enriched_structure_hash=t.structure_hash THEN 'SUCCEEDED' ELSE COALESCE((SELECT j.status FROM platform.ai_metadata_jobs j WHERE j.table_id=t.id AND j.metadata_structure_hash=t.structure_hash ORDER BY j.created_at DESC LIMIT 1),'PENDING') END,t.structure_hash,t.metadata_version,t.business_version,(SELECT count(*) FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE'),t.last_sync_at::text`
+// liveRefreshSelect 读取该表在尚未结束的元数据批任务中的实时逐表进度。
+// 任务结束后立即回落为空，页面因此只在“执行视图”期间显示运行态。
+const liveRefreshSelect = `COALESCE((SELECT ARRAY[i.status,i.stage,COALESCE(NULLIF(i.error_message,''),i.error_code)]
+	FROM platform.data_source_metadata_job_items i
+	JOIN platform.data_source_metadata_jobs j ON j.id=i.job_id AND j.tenant_id=i.tenant_id
+	WHERE i.table_id=t.id AND j.status IN ('QUEUED','RUNNING')
+	ORDER BY j.created_at DESC,i.id LIMIT 1),ARRAY['','','']::text[])`
+
+const tableSelect = `t.id::text,t.data_source_id::text,d.name,d.source_type::text,COALESCE((SELECT fv.id::text FROM platform.file_assets fa JOIN platform.file_asset_versions fv ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version WHERE fa.id=d.file_asset_id),''),t.catalog_name,t.schema_name,t.table_name,t.table_type,t.source_comment,t.business_name,t.business_description,t.tags,t.sensitivity_level::text,t.visibility::text,false,t.asset_status::text,t.management_status,CASE WHEN t.last_enriched_structure_hash<>'' AND t.last_enriched_structure_hash=t.structure_hash THEN 'SUCCEEDED' ELSE COALESCE((SELECT j.status FROM platform.ai_metadata_jobs j WHERE j.table_id=t.id AND j.metadata_structure_hash=t.structure_hash ORDER BY j.created_at DESC LIMIT 1),'PENDING') END,t.structure_hash,t.metadata_version,t.business_version,(SELECT count(*) FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE'),(SELECT count(*) FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE' AND c.manual_locked),t.last_sync_at::text,` + liveRefreshSelect
 
 // SearchTables 按租户、关键词和分类条件分页检索表资产。
 func (r *Repository) SearchTables(ctx context.Context, tenantID string, search Search) (items []Table, total int, err error) {
@@ -73,7 +81,14 @@ func (r *Repository) GetTable(ctx context.Context, tenantID, id string) (item Ta
 
 // scanTable 统一数据库列到表资产模型的映射顺序。
 func scanTable(row interface{ Scan(...any) error }, item *Table) error {
-	return row.Scan(&item.ID, &item.DataSourceID, &item.DataSourceName, &item.DataSourceType, &item.FileVersionID, &item.CatalogName, &item.SchemaName, &item.TableName, &item.TableType, &item.SourceComment, &item.BusinessName, &item.BusinessDescription, &item.Tags, &item.SensitivityLevel, &item.Visibility, &item.ManualLocked, &item.AssetStatus, &item.ManagementStatus, &item.EnrichmentStatus, &item.StructureHash, &item.MetadataVersion, &item.BusinessVersion, &item.ColumnCount, &item.LastSyncAt)
+	live := make([]string, 0, 3)
+	if err := row.Scan(&item.ID, &item.DataSourceID, &item.DataSourceName, &item.DataSourceType, &item.FileVersionID, &item.CatalogName, &item.SchemaName, &item.TableName, &item.TableType, &item.SourceComment, &item.BusinessName, &item.BusinessDescription, &item.Tags, &item.SensitivityLevel, &item.Visibility, &item.ManualLocked, &item.AssetStatus, &item.ManagementStatus, &item.EnrichmentStatus, &item.StructureHash, &item.MetadataVersion, &item.BusinessVersion, &item.ColumnCount, &item.LockedColumnCount, &item.LastSyncAt, &live); err != nil {
+		return err
+	}
+	if len(live) == 3 {
+		item.RefreshState, item.RefreshStage, item.RefreshNote = live[0], live[1], live[2]
+	}
+	return nil
 }
 
 // ListColumns 返回表下按序排列的当前活动字段资产。已从源库移除的字段仍保留在
@@ -98,14 +113,15 @@ func (r *Repository) ListColumns(ctx context.Context, tenantID, tableID string) 
 	return
 }
 
-// UpdateTable 更新人工业务元数据、锁定字段并记录审计事件。
+// UpdateTable 更新表级业务元数据并记录审计事件。历史表级锁在任意保存时清除；
+// 刷新保护只由字段级锁提供。
 func (r *Repository) UpdateTable(ctx context.Context, tenantID, actorID, id string, m BusinessMetadata) (Table, error) {
 	m.Tags = normalizeTags(m.Tags)
 	if err := m.Validate(false); err != nil {
 		return Table{}, err
 	}
 	err := database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE platform.metadata_tables SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,visibility=$5,manual_locked=$6,business_version=business_version+1 WHERE id=$7 AND business_version=$8`, strings.TrimSpace(m.BusinessName), strings.TrimSpace(m.BusinessDescription), m.Tags, m.SensitivityLevel, m.Visibility, m.ManualLocked, id, m.ExpectedVersion)
+		tag, err := tx.Exec(ctx, `UPDATE platform.metadata_tables SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,visibility=$5,manual_locked=false,business_version=business_version+1 WHERE id=$6 AND business_version=$7`, strings.TrimSpace(m.BusinessName), strings.TrimSpace(m.BusinessDescription), m.Tags, m.SensitivityLevel, m.Visibility, id, m.ExpectedVersion)
 		if err != nil {
 			return err
 		}
@@ -152,8 +168,8 @@ func (r *Repository) UpdateColumn(ctx context.Context, tenantID, actorID, id str
 }
 
 // CompleteTableManually 对人工填写结果做完整性复核，原子推进当前结构的完善
-// marker，并创建或刷新系统维护的 ODS 数据集。手工完成的数据会自动锁定，避免
-// 后续 LLM 刷新覆盖已经确认的业务语义。
+// marker，并创建或刷新系统维护的 ODS 数据集。手工完成时只锁定字段；表级
+// 元数据仍可由后续 LLM 刷新重新识别。
 func (r *Repository) CompleteTableManually(
 	ctx context.Context,
 	tenantID, actorID, id string,
@@ -247,7 +263,7 @@ func (r *Repository) CompleteTableManually(
 			return errors.New("table structure hash is unavailable")
 		}
 		if _, err := tx.Exec(ctx, `UPDATE platform.metadata_tables
-			SET manual_locked=true,
+			SET manual_locked=false,
 			    last_enriched_table_structure_hash=table_structure_hash,
 			    last_enriched_structure_hash=structure_hash
 			WHERE id=$1`, id); err != nil {

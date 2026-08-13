@@ -12,12 +12,15 @@ import (
 )
 
 var (
-	ErrNotFound            = errors.New("metadata AI resource not found")
-	ErrConflict            = errors.New("metadata AI resource conflict")
-	ErrInvalidTargetScope  = errors.New("metadata AI target scope is invalid")
-	ErrStructureChanged    = errors.New("metadata table structure changed during AI completion")
-	ErrProcessingLeaseLost = errors.New("metadata processing lease was lost")
-	ErrSourceChanged       = errors.New("metadata source changed during AI completion")
+	ErrNotFound           = errors.New("metadata AI resource not found")
+	ErrConflict           = errors.New("metadata AI resource conflict")
+	ErrInvalidTargetScope = errors.New("metadata AI target scope is invalid")
+	// ErrNoRefreshableTargets 表示本次字段范围全部锁定人工定义且不包含表目标，没有需要
+	// 模型处理的对象。它是正常结果而不是错误，调用方应按成功的空操作处理。
+	ErrNoRefreshableTargets = errors.New("every metadata AI target is locked for manual definition")
+	ErrStructureChanged     = errors.New("metadata table structure changed during AI completion")
+	ErrProcessingLeaseLost  = errors.New("metadata processing lease was lost")
+	ErrSourceChanged        = errors.New("metadata source changed during AI completion")
 )
 
 type Store interface {
@@ -27,7 +30,7 @@ type Store interface {
 	SaveResult(context.Context, string, string, Job, CompletionInput, ProviderResult, float64) (Job, []Suggestion, error)
 	SavePartialResult(context.Context, string, string, Job, CompletionInput, ProviderResult, float64) (Job, []Suggestion, error)
 	ListSuggestions(context.Context, string, string, string, int) ([]Suggestion, error)
-	DecideSuggestion(context.Context, string, string, string, string) (Suggestion, error)
+	DecideSuggestion(context.Context, string, string, string, string, bool) (Suggestion, error)
 }
 
 type Service struct {
@@ -81,7 +84,8 @@ func (s *Service) CompleteTable(ctx context.Context, tenantID, actorID, tableID 
 		samples = samples[:maxMetadataSampleRows]
 	}
 	_, err := s.generate(ctx, tenantID, actorID, tableID, samples, targetTable, targetColumnIDs, expectedStructureHash, processingItemID, processingWorkerID, processingSourceVersion)
-	if err == nil {
+	// 目标全部锁定时没有任何模型调用需要执行，该表本轮刷新按成功结束。
+	if err == nil || errors.Is(err, ErrNoRefreshableTargets) {
 		return nil
 	}
 	return metadataCompletionFailure{code: metadataCompletionFailureCode(err), cause: err}
@@ -137,7 +141,15 @@ func (s *Service) generate(ctx context.Context, tenantID, actorID, tableID strin
 		return GenerateResult{}, err
 	}
 	input = scopePendingCompletionInput(input)
+	// 字段级保护：锁定字段保留在 ContextColumns 中作为表级识别材料，但从
+	// Columns 输出目标中移除，确保模型结果不会覆盖该字段。表级元数据没有锁。
+	locked := lockedTargetCount(input)
+	input = scopeUnlockedCompletionInput(input)
 	if !input.TargetTable && len(input.Columns) == 0 {
+		if locked > 0 {
+			// 本次范围内全部目标都被锁定：这是一次合法的空操作，不是失败。
+			return GenerateResult{}, ErrNoRefreshableTargets
+		}
 		return GenerateResult{}, ErrInvalidTargetScope
 	}
 	input.ContextColumns = contextColumns
@@ -248,6 +260,30 @@ func scopePendingCompletionInput(input CompletionInput) CompletionInput {
 	return input
 }
 
+// scopeUnlockedCompletionInput 移除已锁定字段的输出目标。它们仍已在调用前复制到
+// ContextColumns，因而会参与表级识别，但模型不能为它们返回更新结果。
+func scopeUnlockedCompletionInput(input CompletionInput) CompletionInput {
+	columns := make([]Target, 0, len(input.Columns))
+	for _, column := range input.Columns {
+		if !column.ManualLocked {
+			columns = append(columns, column)
+		}
+	}
+	input.Columns = columns
+	return input
+}
+
+// lockedTargetCount 统计本次范围内因锁定而被跳过的目标数量。
+func lockedTargetCount(input CompletionInput) int {
+	locked := 0
+	for _, column := range input.Columns {
+		if column.ManualLocked {
+			locked++
+		}
+	}
+	return locked
+}
+
 // scopeCompletionInput 按稳定字段 ID 收缩模型输出目标；顺序仍沿用技术字段顺序以保持输入哈希稳定。
 func scopeCompletionInput(input CompletionInput, targetTable bool, targetColumnIDs []string) (CompletionInput, error) {
 	input.TargetTable = targetTable
@@ -283,12 +319,14 @@ func (s *Service) ListSuggestions(ctx context.Context, tenantID, jobID, status s
 	return s.store.ListSuggestions(ctx, tenantID, jobID, status, limit)
 }
 
-// DecideSuggestion 接受或拒绝待人工确认的建议。
-func (s *Service) DecideSuggestion(ctx context.Context, tenantID, actorID, suggestionID, decision string) (Suggestion, error) {
+// DecideSuggestion 接受或拒绝待人工确认的建议。force 只用于用户已确认要覆盖
+// 建议生成后被改写的业务定义；其余冲突原因不受 force 影响。
+func (s *Service) DecideSuggestion(ctx context.Context, tenantID, actorID, suggestionID, decision string, force bool) (Suggestion, error) {
 	if decision != "ACCEPT" && decision != "REJECT" {
 		return Suggestion{}, ErrInvalidDecision
 	}
-	return s.store.DecideSuggestion(ctx, tenantID, actorID, suggestionID, decision)
+	// 拒绝只改建议自身状态，不写目标资产，因此没有需要覆盖的冲突。
+	return s.store.DecideSuggestion(ctx, tenantID, actorID, suggestionID, decision, force && decision == "ACCEPT")
 }
 
 // recordFailure 脱离已取消的请求上下文，在短超时内尽力持久化任务失败状态。

@@ -36,7 +36,7 @@ func loadMetadataJobLogs(
 		events = appendMetadataJobLog(events, startedAt.Time, "INFO", "DISCOVERY", "后台处理器已领取任务", "", "", 0)
 	}
 
-	itemRows, err := tx.Query(ctx, `SELECT table_name,status,stage,
+	itemRows, err := tx.Query(ctx, `SELECT table_name,status,stage,error_code,
 			COALESCE(completed_at,started_at,created_at)
 		FROM platform.data_source_metadata_job_items
 		WHERE job_id=$1 AND status<>'QUEUED'
@@ -45,13 +45,13 @@ func loadMetadataJobLogs(
 		return nil, err
 	}
 	for itemRows.Next() {
-		var tableName, status, stage string
+		var tableName, status, stage, errorCode string
 		var eventAt time.Time
-		if err := itemRows.Scan(&tableName, &status, &stage, &eventAt); err != nil {
+		if err := itemRows.Scan(&tableName, &status, &stage, &errorCode, &eventAt); err != nil {
 			itemRows.Close()
 			return nil, err
 		}
-		level, message := metadataJobItemLogMessage(status, stage)
+		level, message := metadataJobItemLogMessage(status, stage, errorCode)
 		events = appendMetadataJobLog(events, eventAt, level, stage, message, tableName, "", 0)
 	}
 	if err := itemRows.Err(); err != nil {
@@ -191,12 +191,22 @@ func appendMetadataJobLog(
 	})
 }
 
-func metadataJobItemLogMessage(status, stage string) (string, string) {
+func metadataJobItemLogMessage(status, stage, errorCode string) (string, string) {
 	if status == "SUCCEEDED" {
+		if errorCode == "SOURCE_TABLE_REMOVED" {
+			return "WARN", "源库中已不存在该表，资产已停用"
+		}
 		return "SUCCESS", "数据表处理完成"
 	}
 	if status == "SKIPPED" {
-		return "INFO", "结构未变化，已跳过 LLM"
+		switch errorCode {
+		case "ASSET_NOT_MANAGED":
+			return "WARN", "表资产已删除或不再受管，已跳过"
+		case "STRUCTURE_SUPERSEDED":
+			return "WARN", "表结构已被更新版本取代，已跳过"
+		default:
+			return "INFO", "结构未变化，已跳过 LLM"
+		}
 	}
 	if status == "FAILED" {
 		return "ERROR", "数据表处理失败"

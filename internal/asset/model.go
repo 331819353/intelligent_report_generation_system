@@ -22,15 +22,26 @@ type Table struct {
 	Tags                []string `json:"tags"`
 	SensitivityLevel    string   `json:"sensitivityLevel"`
 	Visibility          string   `json:"visibility"`
-	ManualLocked        bool     `json:"manualLocked"`
-	AssetStatus         string   `json:"assetStatus"`
-	ManagementStatus    string   `json:"managementStatus"`
-	EnrichmentStatus    string   `json:"enrichmentStatus"`
-	StructureHash       string   `json:"structureHash"`
-	MetadataVersion     int64    `json:"metadataVersion"`
-	BusinessVersion     int64    `json:"businessVersion"`
-	ColumnCount         int      `json:"columnCount"`
-	LastSyncAt          string   `json:"lastSyncAt"`
+	// ManualLocked 仅用于兼容历史表记录的数据库扫描，不再作为表级业务能力暴露。
+	ManualLocked     bool   `json:"-"`
+	AssetStatus      string `json:"assetStatus"`
+	ManagementStatus string `json:"managementStatus"`
+	EnrichmentStatus string `json:"enrichmentStatus"`
+	StructureHash    string `json:"structureHash"`
+	MetadataVersion  int64  `json:"metadataVersion"`
+	BusinessVersion  int64  `json:"businessVersion"`
+	ColumnCount      int    `json:"columnCount"`
+	// LockedColumnCount 是已锁定人工定义的字段数。锁定是字段级保护：这些字段在
+	// 刷新时保留人工定义并跳过 AI 覆盖，同表其余字段照常刷新。
+	LockedColumnCount int    `json:"lockedColumnCount"`
+	LastSyncAt        string `json:"lastSyncAt"`
+	// RefreshState / RefreshStage / RefreshNote 只在该表参与一个尚未结束的元数据
+	// 批任务时非空。它们让页面在整批完成之前就能逐表展示排队、处理中、成功、
+	// 失败和跳过（例如已锁定人工定义）的真实进度，而 EnrichmentStatus 仍然只表达
+	// 已落库的完善结果，下游建模判断不受运行中任务影响。
+	RefreshState string `json:"refreshState,omitempty"`
+	RefreshStage string `json:"refreshStage,omitempty"`
+	RefreshNote  string `json:"refreshNote,omitempty"`
 }
 type Column struct {
 	ID                  string   `json:"id"`
