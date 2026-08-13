@@ -66,20 +66,31 @@ func (repository *Repository) List(ctx context.Context, identity Identity, queue
 				identity.TenantID, limit)
 			return collectTickets(rows, err, &items)
 		}
-		filter := "AND ticket.reporter_user_id=$3"
-		if queue {
-			filter = ""
-		}
-		rows, err := tx.Query(ctx, `SELECT `+ticketColumns+` FROM platform.support_tickets AS ticket
-			JOIN platform.users AS reporter ON reporter.tenant_id=ticket.tenant_id AND reporter.id=ticket.reporter_user_id
-			LEFT JOIN platform.users AS assignee ON assignee.tenant_id=ticket.tenant_id AND assignee.id=ticket.assignee_user_id
-			WHERE ticket.tenant_id=$1 AND ticket.domain_id=$2 `+filter+`
-			ORDER BY CASE ticket.status WHEN 'OPEN' THEN 0 WHEN 'IN_PROGRESS' THEN 1 WHEN 'RESOLVED' THEN 2 ELSE 3 END,
-			CASE ticket.priority WHEN 'URGENT' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END,ticket.updated_at DESC LIMIT $4`,
-			identity.TenantID, identity.DomainID, identity.ActorID, limit)
+		statement, args := domainTicketQuery(identity, queue, limit)
+		rows, err := tx.Query(ctx, statement, args...)
 		return collectTickets(rows, err, &items)
 	})
 	return items, mapError(err)
+}
+
+// domainTicketQuery 构造领域范围内的工单查询。
+//
+// 领域受理队列不按提交人过滤，因此比「我的工单」少一个占位符。占位符编号必须
+// 连续：一旦去掉 $3 却仍然写死 LIMIT $4，Postgres 无法推断 $3 的类型，整个领域
+// 受理队列都会返回 500。查询在这里单独构造，便于用测试守住这条约束。
+func domainTicketQuery(identity Identity, queue bool, limit int) (string, []any) {
+	filter, limitPlaceholder := "AND ticket.reporter_user_id=$3", "$4"
+	args := []any{identity.TenantID, identity.DomainID, identity.ActorID, limit}
+	if queue {
+		filter, limitPlaceholder = "", "$3"
+		args = []any{identity.TenantID, identity.DomainID, limit}
+	}
+	return `SELECT ` + ticketColumns + ` FROM platform.support_tickets AS ticket
+		JOIN platform.users AS reporter ON reporter.tenant_id=ticket.tenant_id AND reporter.id=ticket.reporter_user_id
+		LEFT JOIN platform.users AS assignee ON assignee.tenant_id=ticket.tenant_id AND assignee.id=ticket.assignee_user_id
+		WHERE ticket.tenant_id=$1 AND ticket.domain_id=$2 ` + filter + `
+		ORDER BY CASE ticket.status WHEN 'OPEN' THEN 0 WHEN 'IN_PROGRESS' THEN 1 WHEN 'RESOLVED' THEN 2 ELSE 3 END,
+		CASE ticket.priority WHEN 'URGENT' THEN 0 WHEN 'HIGH' THEN 1 ELSE 2 END,ticket.updated_at DESC LIMIT ` + limitPlaceholder, args
 }
 
 func collectTickets(rows pgx.Rows, err error, items *[]Ticket) error {

@@ -1323,21 +1323,46 @@
 .report-editor-blank-hint svg { color: #8caae3; }
 @keyframes report-caret-blink { 50% { opacity: .15; } }
 
-.report-editor-new-panel { grid-template-rows: auto auto minmax(0, 1fr) auto auto; }
-.report-editor-template-center { display: grid; gap: 10px; min-height: 0; overflow-y: auto; border-top: 1px solid #e4e8ee; border-bottom: 1px solid #e4e8ee; padding: 12px; background: #f8faff; }
+/* 新建面板整体作为一列滚动，避免模板区与操作区互相挤压到不可用高度。 */
+.report-editor-new-panel { display: flex; flex-direction: column; align-content: start; overflow-y: auto; }
+.report-editor-new-panel > * { flex: none; }
+.report-editor-new-panel > header { position: sticky; top: 0; z-index: 1; }
+.report-editor-new-form { display: grid; gap: 11px; padding: 13px 13px 14px; background: #fff; }
+.report-editor-new-form label { display: grid; gap: 6px; color: #56637a; font-size: 12px; font-weight: 620; }
+.report-editor-new-form input,
+.report-editor-new-form select { width: 100%; min-width: 0; min-height: 34px; border: 1px solid #dfe4eb; border-radius: 6px; padding: 0 9px; background: #fff; color: #2e394a; font: inherit; font-size: 13px; font-weight: 500; }
+.report-editor-new-form input::placeholder { color: #a3adbb; }
+.report-editor-new-form input:focus,
+.report-editor-new-form select:focus { border-color: #6f9bea; outline: 0; box-shadow: 0 0 0 3px #2864dc12; }
+.report-editor-new-form select:disabled { background: #f4f6f9; color: #97a2b1; }
+.report-editor-new-hint { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 7px; align-items: start; margin: 0; color: #77839a; font-size: 12px; line-height: 1.6; }
+.report-editor-new-hint svg { margin-top: 3px; color: #97a3b6; }
+.report-editor-new-hint.is-error { color: #a13d38; }
+.report-editor-new-hint.is-error svg { color: #c1544b; }
+.report-editor-new-actions { display: grid; gap: 10px; padding: 12px 13px 14px; background: #fff; }
+.report-editor-new-actions > article { display: grid; gap: 9px; border: 1px solid #e4e8ee; border-radius: 8px; padding: 11px 12px; background: #fbfcfe; }
+.report-editor-new-actions > article > div { display: grid; gap: 4px; }
+.report-editor-new-actions > article strong { color: #35445a; font-size: 13px; }
+.report-editor-new-actions > article small { color: #7b8798; font-size: 12px; line-height: 1.55; }
+.report-editor-new-actions textarea { width: 100%; min-width: 0; height: 62px; resize: vertical; border: 1px solid #dfe4eb; border-radius: 6px; padding: 8px 9px; background: #fff; color: #2e394a; font: inherit; font-size: 12px; line-height: 1.55; }
+.report-editor-new-actions textarea::placeholder { color: #a3adbb; }
+.report-editor-new-actions textarea:focus { border-color: #6f9bea; outline: 0; box-shadow: 0 0 0 3px #2864dc12; }
+.report-editor-new-actions .primary-button,
+.report-editor-new-actions .quiet-button { min-height: 36px; justify-content: center; }
+.report-editor-template-center { display: grid; gap: 10px; min-height: 0; border-top: 1px solid #e4e8ee; border-bottom: 1px solid #e4e8ee; padding: 12px; background: #f8faff; }
 .report-editor-template-center > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .report-editor-template-center > header div { display: grid; gap: 3px; }
 .report-editor-template-center > header strong { color: #334258; font-size: 14px; }
 .report-editor-template-center > header small { color: #7e8b9d; font-size: 12px; }
-.report-editor-template-center > header span { border-radius: 999px; padding: 3px 8px; background: #eaf1ff; color: #2864dc; font-size: 12px; }
-.report-editor-template-center > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-.report-editor-template-center > div > button { position: relative; min-height: 116px; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; border: 1px solid #dce4ef; border-radius: 8px; padding: 11px; background: #fff; color: #647287; text-align: left; }
+.report-editor-template-center > header span { flex: none; border-radius: 999px; padding: 3px 8px; background: #eaf1ff; color: #2864dc; font-size: 12px; }
+.report-editor-template-center > div { display: grid; align-content: start; gap: 8px; }
+.report-editor-template-center > div > button { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 3px 10px; border: 1px solid #dce4ef; border-radius: 8px; padding: 10px 11px; background: #fff; color: #647287; text-align: left; }
 .report-editor-template-center > div > button:hover { border-color: #9eb9ea; box-shadow: 0 5px 14px #2864dc0d; }
 .report-editor-template-center > div > button.is-selected { border-color: #4b83e4; background: #f3f7ff; box-shadow: inset 0 0 0 1px #4b83e4; }
-.report-editor-template-center > div > button span { color: #2864dc; font-size: 11px; font-weight: 700; }
-.report-editor-template-center > div > button strong { color: #35445a; font-size: 14px; }
-.report-editor-template-center > div > button small { color: #768397; font-size: 12px; line-height: 1.45; }
-.report-editor-template-center > div > button em { margin-top: auto; color: #8b97a7; font-size: 11px; font-style: normal; }
+.report-editor-template-center > div > button span { grid-column: 1; color: #2864dc; font-size: 11px; font-weight: 700; }
+.report-editor-template-center > div > button strong { grid-column: 1; grid-row: 2; color: #35445a; font-size: 14px; }
+.report-editor-template-center > div > button small { grid-column: 1 / -1; grid-row: 3; color: #768397; font-size: 12px; line-height: 1.5; }
+.report-editor-template-center > div > button em { grid-column: 2; grid-row: 1 / 3; align-self: center; flex: none; color: #8b97a7; font-size: 11px; font-style: normal; white-space: nowrap; }
 .report-editor-template-center > .primary-button { min-height: 36px; justify-content: center; }
 .report-editor-new-conversation { display: grid; gap: 9px; border-bottom: 1px solid #e4e8ee; padding: 11px 12px; background: #fff; }
 .report-editor-human-message { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 8px; }
@@ -1634,6 +1659,10 @@
 .report-library-thumb-tile.is-dashboard { background: var(--blue-soft); color: var(--blue); border-color: #d5e3fb; }
 .report-drawer-structure-preview { display: flex; flex-direction: column; gap: 10px; }
 .report-drawer-preview-note { margin: 0; font-size: 11px; color: var(--muted); }
+/* 缩略图框：内部按 880px 的报告设计宽度渲染，再整体缩放到抽屉宽度。 */
+.report-drawer-preview-frame { position: relative; max-height: 300px; overflow: hidden; border: 1px solid #e4e8ee; border-radius: 8px; background: #fff; }
+.report-drawer-preview-frame > .report-render-page { width: 880px; zoom: .41; }
+.report-drawer-preview-frame::after { position: absolute; right: 0; bottom: 0; left: 0; height: 46px; background: linear-gradient(#fff0, #fff); content: ""; pointer-events: none; }
 .publish-preview-note { margin: 10px 0 0; font-size: 11px; color: var(--muted); }
 .runtime-filter-empty { margin: 0; font-size: 12px; color: var(--muted); }
 .report-editor-selection-hint { font-size: 11px; color: var(--muted); }

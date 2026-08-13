@@ -77,8 +77,18 @@ const statusLabels: Record<string, string> = {
   FAILED: '失败',
   READY: '已送达',
   PAUSED: '已暂停',
+  DONE: '已完成',
+  BLOCKED: '已阻塞',
+  // 反馈工单的处理阶段（internal/askdata/feedback/ticket.go）。缺一个状态就会
+  // 把 IN_RELEASE 这样的枚举原样显示给业务用户。
   NEW: '待分诊',
   TRIAGED: '已分诊',
+  ACCEPTED: '已受理',
+  FIX_PROPOSED: '待评审修复方案',
+  FIX_APPROVED: '修复方案已通过',
+  IN_RELEASE: '随版本发布中',
+  VERIFIED: '已验证',
+  CLOSED: '已关闭',
 }
 
 function snapshotItem(input: Partial<WorkInboxItem> & Pick<WorkInboxItem, 'type' | 'objectId' | 'summary'>): WorkInboxItem {
@@ -344,7 +354,9 @@ function WorkCenterPage({ mode }: { mode: WorkCenterMode }) {
             <div><dt><Clock size={17} />SLA</dt><dd className={dueGroup(selected, now) === 'overdue' ? 'is-overdue' : ''}><strong>{dueLabel(selected, now)}</strong><span>{exactDue(selected)}</span></dd></div>
             <div><dt><CalendarBlank size={17} />更新时间</dt><dd>{formatHomeTime(selected.updatedAt, now)}</dd></div>
             <div><dt><Database size={17} />来源模块</dt><dd>{typeMeta[selected.type]?.source ?? workTypeLabel(selected.type)}</dd></div>
-            <div><dt><LinkSimple size={17} />来源页面</dt><dd className="tasks-source-href">{selected.sourceHref || '由来源模块生成'}</dd></div>
+            {/* 原来这里直接显示内部路由（如 /operations/feedback/<uuid>）：对业务用户
+                没有意义，且与「来源模块」重复。改为说明能否跳转，跳转本身交给下方按钮。 */}
+            <div><dt><LinkSimple size={17} />处理入口</dt><dd>{workItemDestination(selected) ? '可在来源模块中打开处理' : '可直接在本页处理'}</dd></div>
           </dl>
           <div className="tasks-detail-description"><strong>说明</strong><p>{selected.summary}。该工作箱只展示受权摘要，具体业务信息与处理状态以来源模块为准。</p></div>
           {actionMode && <form className={`tasks-action-confirm is-${actionMode.toLocaleLowerCase()}`} onSubmit={event => { event.preventDefault(); void executeAction(selected, actionMode) }}>

@@ -98,10 +98,12 @@
 .data-source-empty strong { color: var(--ink); font-size: 18px; }
 .data-source-feedback { border-radius: 8px; padding: 10px 12px; font-size: 12px; }
 .data-source-feedback.error { border: 1px solid #fecaca; background: #fef2f2; color: #b42318; }
-.data-source-toast { position: fixed; top: 24px; right: 24px; z-index: 260; display: grid; grid-template-columns: 28px minmax(220px, 1fr) 24px; gap: 10px; align-items: center; width: min(420px, calc(100vw - 48px)); padding: 14px 14px 14px 16px; border: 1px solid; border-radius: 12px; background: white; box-shadow: 0 18px 45px #10182826; font-size: 13px; font-weight: 700; animation: data-source-toast-in .18s ease-out; }
+.data-source-toast { position: fixed; top: 24px; right: 24px; z-index: 260; display: grid; grid-template-columns: 28px minmax(0, 1fr) 28px; gap: 10px; align-items: center; width: min(420px, calc(100vw - 48px)); padding: 14px 14px 14px 16px; border: 1px solid; border-radius: 12px; background: white; box-shadow: 0 18px 45px #10182826; font-size: 13px; font-weight: 700; animation: data-source-toast-in .18s ease-out; }
 .data-source-toast.success { border-color: #a7f3d0; color: #047857; }
 .data-source-toast.error { border-color: #fecaca; color: #b42318; }
-.data-source-toast-icon { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; background: currentColor; color: white; }
+/* 数据源名称是无空格长串，必须允许任意位置断行才不会撑破弹框。 */
+.data-source-toast > span:not(.data-source-toast-icon) { min-width: 0; overflow-wrap: anywhere; line-height: 1.5; }
+.data-source-toast-icon { width: 28px; height: 28px; flex: none; display: grid; place-items: center; border-radius: 50%; background: currentColor; color: white; }
 .data-source-toast > button { width: 28px; min-width: 28px; height: 28px; border: 0; background: transparent; color: currentColor; opacity: .65; }
 @keyframes data-source-toast-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 .data-source-dialog-backdrop { position: fixed; inset: 0; z-index: 240; display: grid; place-items: center; padding: 24px; background: #10182899; backdrop-filter: blur(1px); }
@@ -626,15 +628,20 @@
 .data-source-type-cell,
 .data-source-health-cell,
 .data-source-test-cell,
-.data-source-readiness-cell { flex-direction: column; align-items: flex-start; justify-content: center; gap: 4px; }
+.data-source-readiness-cell { flex-direction: column; align-items: flex-start; justify-content: center; gap: 3px; }
+/* 单元格一律单行截断：主值在上、辅助说明在下，列宽变窄时用省略号而不是换行。 */
+.data-source-type-cell > *,
+.data-source-health-cell > *,
+.data-source-test-cell > *,
+.data-source-readiness-cell > * { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .data-source-type-cell strong,
 .data-source-health-cell strong,
 .data-source-test-cell strong,
-.data-source-readiness-cell strong { color: #46576d; font-size: 12px; font-weight: 680; }
+.data-source-readiness-cell strong { color: #35445a; font-size: 13px; font-weight: 660; }
 .data-source-type-cell small,
 .data-source-health-cell small,
 .data-source-test-cell small,
-.data-source-readiness-cell small { color: #8390a2; font-size: 14px; }
+.data-source-readiness-cell small { color: #8a97ab; font-size: 12px; line-height: 1.4; }
 .data-source-health-cell strong { display: inline-flex; align-items: center; gap: 7px; }
 .data-source-health-cell i { width: 7px; height: 7px; border-radius: 50%; background: #18a874; }
 .data-source-health-cell.is-warning i { background: #e99b22; }
@@ -643,8 +650,7 @@
 .data-source-test-cell strong.is-passed { color: #15966a; }
 .data-source-test-cell strong.is-failed { color: #cf433c; }
 .data-source-test-cell strong.is-untested { color: #b7791f; }
-.data-source-readiness-cell progress,
-.metadata-card progress {
+.data-source-readiness-cell progress {
   width: 96px;
   height: 6px;
   overflow: hidden;
@@ -652,10 +658,8 @@
   border-radius: 999px;
   accent-color: #1677ff;
 }
-.data-source-readiness-cell progress::-webkit-progress-bar,
-.metadata-card progress::-webkit-progress-bar { border-radius: 999px; background: #e4ebf3; }
-.data-source-readiness-cell progress::-webkit-progress-value,
-.metadata-card progress::-webkit-progress-value { border-radius: 999px; background: #1677ff; }
+.data-source-readiness-cell progress::-webkit-progress-bar { border-radius: 999px; background: #e4ebf3; }
+.data-source-readiness-cell progress::-webkit-progress-value { border-radius: 999px; background: #1677ff; }
 .data-source-actions {
   grid-column: 6;
   min-width: 0;
@@ -679,6 +683,7 @@
   font-size: 12px;
 }
 
+/* 详情检查器：浅底抽屉 + 白色卡片，取代早期版本的密集描边与直角面板。 */
 .data-source-inspector {
   position: fixed;
   top: 72px;
@@ -688,58 +693,124 @@
   width: 463px;
   min-width: 0;
   display: grid;
-  grid-template-rows: 64px 64px minmax(0, 1fr) auto;
-  border-left: 1px solid #dfe6ef;
-  background: #fff;
-  box-shadow: -6px 0 20px #253a5c0a;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  border-left: 1px solid #e7ecf4;
+  background: #f5f8fc;
+  box-shadow: -20px 0 48px #1c2f4f0f;
+  animation: data-source-inspector-in .18s ease-out;
+}
+@keyframes data-source-inspector-in {
+  from { opacity: .55; transform: translateX(14px); }
+  to { opacity: 1; transform: none; }
 }
 .data-source-inspector > header {
   min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 22px;
-}
-.data-source-inspector > header > div { min-width: 0; display: grid; gap: 3px; }
-.data-source-inspector > header strong { overflow: hidden; color: #26354a; font-size: 19px; font-weight: 720; text-overflow: ellipsis; white-space: nowrap; }
-.data-source-inspector > header small { color: #7b899d; font-size: 14px; }
-.data-source-inspector > header .app-button { width: 32px; min-width: 32px; height: 32px; padding: 0; color: #718096; }
-.data-source-inspector-actions {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: 40px minmax(0, 1fr) 32px;
+  gap: 12px;
   align-items: center;
-  padding: 9px 22px 13px;
-  border-bottom: 1px solid #e5ebf2;
+  padding: 15px 18px 14px;
+  border-bottom: 1px solid #eaeff7;
+  background: #fff;
 }
-.data-source-inspector-actions .app-button { height: 40px; gap: 7px; border-radius: 5px; box-shadow: none; font-size: 13px; font-weight: 650; }
+.data-source-inspector-avatar {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: #eef4ff;
+  color: #1677ff;
+}
+.data-source-inspector-avatar.oracle { background: #fff1f2; color: #be123c; }
+.data-source-inspector-avatar.excel { background: #ecfdf3; color: #047857; }
+.data-source-inspector > header > div { min-width: 0; display: grid; gap: 2px; }
+/* 标题与编码都单行截断，避免长名称压到关闭按钮上。 */
+.data-source-inspector > header strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #1d2a3d;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.data-source-inspector > header small {
+  min-width: 0;
+  overflow: hidden;
+  color: #8a97ab;
+  font-size: 12px;
+  font-weight: 520;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.data-source-inspector-close.app-button {
+  justify-self: end;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: #f1f4fa;
+  color: #64748b;
+  box-shadow: none;
+}
+.data-source-inspector-close.app-button:hover { background: #e6ecf6; color: #1d2a3d; }
+.data-source-inspector-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 12px 18px;
+  border-bottom: 1px solid #eaeff7;
+  background: #fff;
+}
+.data-source-inspector-actions .app-button {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 36px;
+  gap: 6px;
+  border-radius: 10px;
+  padding-inline: 12px;
+  box-shadow: none;
+  font-size: 13px;
+  font-weight: 620;
+  white-space: nowrap;
+}
 .data-source-inspector-actions .action-edit,
-.data-source-inspector-actions .action-assets { border: 1px solid #cbd7e5; background: #fff; color: #526176; }
-.data-source-inspector-actions .action-retire { border: 1px solid #efc2be; background: #fff; color: #bd403a; }
+.data-source-inspector-actions .action-assets { border: 1px solid #dde5ef; background: #fff; color: #4d5c72; }
+.data-source-inspector-actions .action-edit:hover:not(:disabled),
+.data-source-inspector-actions .action-assets:hover:not(:disabled) { border-color: #b6cbe8; background: #f6faff; color: #1677ff; }
+/* 下架是低频破坏性操作：换行到第二排时按内容宽度靠左，不与主操作等宽。 */
+.data-source-inspector-actions .action-retire { flex: 0 1 auto; border: 1px solid #f0d8d6; background: #fff; color: #c04b45; }
+.data-source-inspector-actions .action-retire:hover:not(:disabled) { border-color: #e2b3ae; background: #fff7f6; }
 .data-source-inspector-scroll {
   min-height: 0;
   display: grid;
   align-content: start;
-  gap: 8px;
+  gap: 10px;
   overflow-y: auto;
-  padding: 8px 20px 14px;
+  padding: 14px 16px 16px;
   scrollbar-gutter: stable;
 }
 .data-source-inspector-card {
   min-width: 0;
   display: grid;
-  gap: 11px;
-  border: 1px solid #dfe6ef;
-  border-radius: 6px;
-  padding: 13px 14px;
+  gap: 12px;
+  border: 1px solid #e8edf5;
+  border-radius: 14px;
+  padding: 14px 16px;
   background: #fff;
+  box-shadow: 0 1px 2px #1c2f4f08;
 }
 .data-source-inspector-card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.data-source-inspector-card > header > strong { color: #33455d; font-size: 13px; font-weight: 700; }
-.data-source-inspector-card > header > span { color: #65809d; font-size: 14px; font-weight: 650; }
+.data-source-inspector-card > header > strong { color: #6d7c92; font-size: 12px; font-weight: 680; letter-spacing: .03em; }
+.data-source-inspector-card > header > span { color: #4d5c72; font-size: 12px; font-weight: 650; }
 .data-source-inspector-card .data-source-status,
-.receipt-status { border-radius: 4px; padding: 3px 7px; font-size: 14px; font-weight: 700; }
+.receipt-status { flex: none; border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 650; }
 .receipt-status.is-passed { background: #eaf8f1; color: #15966a; }
 .receipt-status.is-failed { background: #fff0ef; color: #c94640; }
 .receipt-status.is-untested { background: #fff7e8; color: #b7791f; }
@@ -753,53 +824,71 @@
 }
 .lifecycle-card ol::before {
   position: absolute;
-  top: 13px;
-  right: 11%;
-  left: 11%;
+  top: 12px;
+  right: 12%;
+  left: 12%;
   height: 2px;
-  background: #d8e1eb;
+  border-radius: 999px;
+  background: #e5ebf4;
   content: '';
 }
-.lifecycle-card li { position: relative; z-index: 1; display: grid; justify-items: center; gap: 6px; color: #aab5c3; text-align: center; }
-.lifecycle-card li > svg { border-radius: 50%; background: #fff; color: #bdc7d3; }
-.lifecycle-card li.is-complete { color: #15966a; }
+.lifecycle-card li { position: relative; z-index: 1; display: grid; justify-items: center; gap: 7px; color: #aab5c3; text-align: center; }
+.lifecycle-card li > svg { border-radius: 50%; background: #fff; color: #c6d0dd; }
 .lifecycle-card li.is-complete > svg { color: #18a874; }
-.lifecycle-card li > span { display: grid; gap: 2px; color: #5f6f83; font-size: 14px; font-weight: 650; }
-.lifecycle-card li small { color: #8c98a9; font-size: 12px; font-weight: 520; white-space: nowrap; }
+.lifecycle-card li > span { min-width: 0; display: grid; gap: 2px; color: #5f6f83; font-size: 12px; font-weight: 620; }
+.lifecycle-card li.is-complete > span { color: #35445a; }
+.lifecycle-card li small { overflow: hidden; color: #97a3b4; font-size: 11px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+/* 事实行：左标签右取值，单行截断（完整值走 title）。 */
 .connection-facts,
 .receipt-facts,
-.sharing-card dl { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px 18px; margin: 0; }
+.sharing-card dl { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; margin: 0; }
 .connection-facts > div,
 .receipt-facts > div,
-.sharing-card dl > div { min-width: 0; display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 6px; }
-.data-source-inspector-card dt { color: #7b899c; font-size: 14px; }
-.data-source-inspector-card dd { min-width: 0; overflow-wrap: anywhere; margin: 0; color: #40536b; font-size: 14px; font-weight: 620; }
-.connection-facts > div:last-child { grid-column: auto; }
-.metadata-card { grid-template-columns: minmax(0, 1fr) 220px; align-items: center; }
-.metadata-card > header { grid-column: 1 / -1; }
-.metadata-card > progress { width: 100%; }
-.metadata-card > dl { min-width: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; }
-.metadata-card > dl > div { min-width: 0; display: grid; gap: 3px; padding-left: 12px; border-left: 1px solid #e3e9f0; }
-.metadata-card > dl dt { font-size: 13px; }
-.metadata-card > dl dd { font-size: 12px; }
-.sharing-card .asset-sharing-select { min-height: 24px; }
+.sharing-card dl > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 7px 0;
+  border-top: 1px solid #f1f4f9;
+}
+.connection-facts > div:first-child,
+.receipt-facts > div:first-child,
+.sharing-card dl > div:first-child { border-top: 0; padding-top: 0; }
+.connection-facts > div:last-child,
+.receipt-facts > div:last-child,
+.sharing-card dl > div:last-child { padding-bottom: 0; }
+.data-source-inspector-card dt { color: #8a97ab; font-size: 12px; font-weight: 520; }
+.data-source-inspector-card dd {
+  min-width: 0;
+  overflow: hidden;
+  margin: 0;
+  color: #2b3a50;
+  font-size: 13px;
+  font-weight: 620;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sharing-card dd { display: flex; justify-content: flex-end; overflow: visible; white-space: normal; }
+.sharing-card .asset-sharing-select { min-height: 26px; }
 .data-source-next-action {
-  min-height: 100px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin: 0 20px 18px;
-  border: 1px solid #cfe1fa;
-  border-radius: 6px;
-  padding: 13px 14px;
-  background: #f2f8ff;
+  margin: 0 16px 16px;
+  border: 1px solid #dbe8fb;
+  border-radius: 14px;
+  padding: 14px 16px;
+  background: linear-gradient(180deg, #f4f9ff, #eef5ff);
 }
-.data-source-next-action > div { min-width: 0; display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: 8px; align-items: start; color: #1677ff; }
+.data-source-next-action > div { min-width: 0; display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 10px; align-items: start; color: #1677ff; }
 .data-source-next-action > div > span { min-width: 0; display: grid; gap: 4px; }
-.data-source-next-action strong { color: #1677ff; font-size: 12px; }
-.data-source-next-action small { color: #6f8196; font-size: 13px; line-height: 1.5; }
-.data-source-next-action > .app-button { flex: none; min-width: 72px; height: 36px; border-radius: 5px; box-shadow: none; font-size: 12px; }
+.data-source-next-action strong { color: #145fcb; font-size: 13px; font-weight: 680; }
+.data-source-next-action small { color: #62748b; font-size: 12px; line-height: 1.5; }
+.data-source-next-action > .app-button { flex: none; min-width: 76px; height: 36px; border-radius: 10px; box-shadow: none; font-size: 13px; font-weight: 620; }
 
 .data-source-ai.without-launcher .data-source-ai-launcher-wrap { display: none; }
 .data-source-ai.without-launcher .data-source-ai-panel { right: 20px; bottom: 20px; }

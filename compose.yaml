@@ -587,6 +587,12 @@ services:
     restart: unless-stopped
     environment:
       VITE_API_PROXY_TARGET: http://api:8080
+    # 源码挂载进容器，否则容器只会持续提供镜像构建时拷贝的旧代码。
+    volumes:
+      - ./web:/app/web
+      - /app/web/node_modules
+      - ./api/examples:/app/api/examples:ro
+      - ./api/schemas:/app/api/schemas:ro
     ports:
       - "127.0.0.1:5173:5173"
     depends_on:

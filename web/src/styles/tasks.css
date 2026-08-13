@@ -89,7 +89,7 @@
 .tasks-action-confirm .primary-button { border-color: #2864dc; background: #2864dc; color: #fff; }
 .tasks-action-confirm.is-reject .primary-button { border-color: #d74b45; background: #d74b45; }
 .tasks-detail-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: auto; padding: 20px 17px 0; }
-.tasks-detail-actions button { min-height: 42px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid #9cbcf2; border-radius: 7px; background: #fff; color: #2864dc; font-size: 14px; font-weight: 750; }
+.tasks-detail-actions button { min-height: 42px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid #9cbcf2; border-radius: 7px; padding: 0 8px; background: #fff; color: #2864dc; font-size: 13px; font-weight: 750; white-space: nowrap; }
 .tasks-detail-actions .primary-button { border: 0; background: #2864dc; color: #fff; }
 .tasks-detail-actions .danger-button { border-color: #e9aaa6; color: #c9443e; }
 .tasks-detail-actions .danger-button:hover { background: #fff6f5; }

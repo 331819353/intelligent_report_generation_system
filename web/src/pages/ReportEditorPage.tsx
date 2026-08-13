@@ -160,7 +160,10 @@ function NewReportTaskPanel({
       {contextsError && <p className="report-editor-new-hint is-error"><WarningCircle size={14} />{contextsError}</p>}
       {ready && selected && <p className="report-editor-new-hint">
         <Info size={14} />
-        {selected.description || '已发布数据集版本'}·可用字段 {selected.fields.length} 个（已按你的列权限裁剪）
+        <span>
+          {(selected.description || '已发布数据集版本').replace(/[。;；]\s*$/, '')}。
+          可用字段 {selected.fields.length} 个（已按你的列权限裁剪）。
+        </span>
       </p>}
       {!contextsLoading && !contextsError && contexts.length === 0 && <p className="report-editor-new-hint is-error">
         <WarningCircle size={14} />当前业务领域还没有已发布的数据集版本，请先在「数据集」中发布一个版本。

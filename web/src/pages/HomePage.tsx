@@ -225,7 +225,10 @@ export function HomePage() {
     setQuestionError('')
     if (attachments.length > 0) saveAskDataAttachmentDraft(attachments)
     else clearAskDataAttachmentDraft()
-    navigate(`/ask-data?q=${encodeURIComponent(value)}${attachments.length > 0 ? '&attachments=1' : ''}${snapshot ? '&snapshot=home-question' : ''}`)
+    const params = new URLSearchParams({ q: value, autoSubmit: '1' })
+    if (attachments.length > 0) params.set('attachments', '1')
+    if (snapshot) params.set('snapshot', 'home-question')
+    navigate(`/ask-data?${params.toString()}`)
   }
 
   const acceptAttachments = async (files: File[]) => {
@@ -419,7 +422,7 @@ export function HomePage() {
           <div className="home-task-list">
             {visibleTasks.map(task => <article className="home-task-item" key={task.id}>
               <span className={`home-task-dot is-${task.priority}`} aria-label={`${task.priority === 'high' ? '高' : task.priority === 'medium' ? '中' : '低'}优先级`} />
-              <div className="home-task-copy"><h3>{task.title}</h3><p>{task.due} <span>·</span> {task.owner.replace('发起人 ', '')}</p></div>
+              <div className="home-task-copy"><h3>{task.title}</h3><p>{task.due}{task.owner && <> <span>·</span> {task.owner.replace('发起人 ', '')}</>}</p></div>
               <AppButton link type="button" onClick={() => openTask(task)}>去处理<ArrowRight size={14} /></AppButton>
             </article>)}
             {taskState.status === 'loading' && <div className="home-task-empty"><span className="home-loading-dot" /><strong>正在加载待办</strong><span>仅查询当前用户与领域</span></div>}

@@ -17,6 +17,7 @@ import {
   Timer,
   Gauge,
   UsersThree,
+  WarningCircle,
   X,
 } from '@phosphor-icons/react'
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
@@ -80,6 +81,8 @@ export function ManagementCenterPage() {
   const [dialog, setDialog] = useState<DialogState>(null)
   const [loading, setLoading] = useState(true)
   const [busyKey, setBusyKey] = useState('')
+  const [failedModules, setFailedModules] = useState<Record<string, boolean>>({})
+  const currentSectionFailed = Boolean(failedModules[sectionModule[view] ?? view])
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const signedInUserID = currentSubject()
@@ -105,18 +108,18 @@ export function ManagementCenterPage() {
       if (supportResult.status === 'fulfilled') setSupportTickets(supportResult.value)
       if (observabilityResult.status === 'fulfilled') setObservability(observabilityResult.value)
 
-      const unavailableModules = [
-        domainResult.status === 'rejected' ? '领域管理' : '',
-        userResult.status === 'rejected' ? '用户与权限' : '',
-        approvalResult.status === 'rejected' ? '平台审批' : '',
-        taskResult.status === 'rejected' ? '后台任务' : '',
-        auditResult.status === 'rejected' ? '平台日志' : '',
-        supportResult.status === 'rejected' ? '支持工单' : '',
-        observabilityResult.status === 'rejected' ? '运行观测' : '',
-      ].filter(Boolean)
-      if (unavailableModules.length > 0) {
-        setError(`部分平台数据暂时无法加载：${unavailableModules.join('、')}。其他已就绪的管理功能仍可正常使用。`)
-      }
+      // 每个分区只关心自己那份数据。以前把所有失败拼成一条横幅，结果在「领域管理」
+      // 上也会看到「支持工单加载失败」，而支持工单页又同时显示错误横幅和
+      // 「当前没有支持工单」空态，互相矛盾。这里按模块记录失败，由各分区自行呈现。
+      setFailedModules({
+        domains: domainResult.status === 'rejected',
+        users: userResult.status === 'rejected',
+        approvals: approvalResult.status === 'rejected',
+        tasks: taskResult.status === 'rejected',
+        logs: auditResult.status === 'rejected',
+        support: supportResult.status === 'rejected',
+        observability: observabilityResult.status === 'rejected',
+      })
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '平台管理数据加载失败')
     } finally {
@@ -502,6 +505,11 @@ export function ManagementCenterPage() {
           <button type="button" aria-label="关闭提示" onClick={() => { setError(''); setNotice('') }}><X size={15} /></button>
         </div>}
 
+        {!loading && !error && currentSectionFailed && <div className="administration-feedback error" role="alert">
+          {`${sectionLabels[view]}数据暂时无法加载，其他管理功能仍可正常使用。`}
+          <button type="button" onClick={() => void load()}>重新加载</button>
+        </div>}
+
         <div className="platform-module-page">
           <section className="administration-panel platform-module-panel">
             {loading
@@ -531,10 +539,13 @@ export function ManagementCenterPage() {
                       : view === 'tasks'
                         ? <BackgroundTaskCenter tasks={tasks} busyKey={busyKey} onOperate={(task, operation) => void operateTask(task, operation)} />
                         : view === 'observability'
-                          ? observability && <OperationalObservabilityCenter snapshot={observability} window={operationalWindow} onWindowChange={setOperationalWindow} />
+                          ? observability
+                            ? <OperationalObservabilityCenter snapshot={observability} window={operationalWindow} onWindowChange={setOperationalWindow} />
+                            : <div className="platform-module-empty"><WarningCircle size={30} weight="duotone" /><strong>运行观测数据暂时无法读取</strong><span>指标聚合服务未返回结果，稍后重试即可。</span><button className="quiet-button" type="button" onClick={() => void load()}>重新加载</button></div>
                         : view === 'support'
                           ? <SupportTicketCenter
                             tickets={supportTickets}
+                            unavailable={Boolean(failedModules.support)}
                             busyKey={busyKey}
                             onStart={ticket => void transitionSupportTicket(ticket, 'IN_PROGRESS')}
                             onReopen={ticket => void transitionSupportTicket(ticket, 'IN_PROGRESS')}
@@ -597,11 +608,50 @@ export function ManagementCenterPage() {
   )
 }
 
+// 分区名 → 它依赖的数据模块与展示用名称。加载失败只提示当前分区。
+const sectionModule: Record<string, string> = {
+  domains: 'domains', permissions: 'users', approvals: 'approvals',
+  tasks: 'tasks', logs: 'logs', support: 'support', observability: 'observability',
+}
+const sectionLabels: Record<string, string> = {
+  domains: '领域管理', permissions: '角色配置', approvals: '审批中心',
+  tasks: '后台任务', logs: '平台日志', support: '支持工单', observability: '运行观测',
+}
+
 const operationalHealthLabel = { HEALTHY: '运行健康', ATTENTION: '需要关注', CRITICAL: '存在异常' } as const
 const queueHealthLabel = { HEALTHY: '正常', ATTENTION: '有积压', CRITICAL: '需处理' } as const
+// 必须覆盖 internal/ai/service.go 里的全部 Purpose 常量：漏掉一个，运行观测里
+// 就会把 SEMANTIC_QUESTION 这样的枚举原样显示，和已翻译的条目混排。
 const purposeLabel: Record<string, string> = {
-  METADATA_COMPLETION: '元数据补全', REPORT_GENERATION: '报告生成', BLOCK_EDIT: '内容块编辑',
-  CONCLUSION_GENERATION: '结论生成', DATA_SOURCE_CONFIG: '数据源配置', ASKDATA_NARRATIVE: '问数解读',
+  METADATA_COMPLETION: '元数据补全',
+  DATASET_DAG_GENERATION: '数据集建模生成',
+  DATASET_TAG_SUGGESTION: '数据集标签建议',
+  DATASET_SEMANTIC_NAMING: '数据集语义命名',
+  DATA_SOURCE_CONFIGURATION: '数据源配置',
+  SEMANTIC_QUESTION: '智能问数',
+  REPORT_GENERATION: '报告生成',
+  BLOCK_EDIT: '内容块编辑',
+  CONCLUSION_GENERATION: '结论生成',
+}
+
+// 错误码保持原样（告警与检索都靠它），但同时给出中文含义，避免值班人员
+// 只能对着一串大写英文猜测发生了什么。
+const failureCodeLabel: Record<string, string> = {
+  AI_PROVIDER_UNAVAILABLE: '模型服务不可用',
+  AI_REQUEST_INVALID: '请求参数不合法',
+  AI_REQUEST_CANCELED: '请求已取消',
+  AI_PROVIDER_TIMEOUT: '模型服务超时',
+  AI_RATE_LIMITED: '触发限流',
+  AI_PROVIDER_AUTH_FAILED: '模型服务鉴权失败',
+  AI_PROVIDER_REJECTED: '模型服务拒绝请求',
+  AI_RESPONSE_TOO_LARGE: '响应超出大小上限',
+  AI_INVALID_RESPONSE: '响应格式不合法',
+  AI_PROVIDER_REFUSAL: '模型拒绝作答',
+  AI_INVALID_OUTPUT: '输出未通过结构校验',
+  AI_TOOL_NO_PROGRESS: '工具调用无进展',
+  AI_TOOL_EXECUTION_BLOCKED: '工具调用被治理拦截',
+  AI_COMPLETION_FAILED: '生成失败',
+  QUESTION_LOOP_FAILED: '问数推理循环失败',
 }
 
 function compactNumber(value: number) {
@@ -675,7 +725,7 @@ function OperationalObservabilityCenter({ snapshot, window, onWindowChange }: {
         {snapshot.purposes.length ? snapshot.purposes.map(item => <article key={item.purpose}><div><strong>{purposeLabel[item.purpose] ?? item.purpose}</strong><small>{item.count} 次请求</small></div><span>{compactNumber(item.tokens)} Token</span></article>) : <p className="operational-empty">当前窗口内没有 AI 请求</p>}
       </div></section>
       <section className="operational-card"><header><div><strong>失败原因</strong><span>稳定错误码可直接用于定位与告警</span></div></header><div className="operational-failure-list">
-        {snapshot.failureCodes.length ? snapshot.failureCodes.map(item => <article key={`${item.source}:${item.code}`}><span>{item.source === 'ASK_DATA' ? '问数' : 'AI'}</span><code>{item.code}</code><strong>{item.count}</strong></article>) : <p className="operational-empty is-healthy"><CheckCircle size={20} />当前窗口内没有记录到失败</p>}
+        {snapshot.failureCodes.length ? snapshot.failureCodes.map(item => <article key={`${item.source}:${item.code}`}><span>{item.source === 'ASK_DATA' ? '问数' : 'AI'}</span><div className="operational-failure-copy"><strong>{failureCodeLabel[item.code] ?? '未分类失败'}</strong><code>{item.code}</code></div><strong>{item.count}</strong></article>) : <p className="operational-empty is-healthy"><CheckCircle size={20} />当前窗口内没有记录到失败</p>}
       </div></section>
     </div>
   </div>
@@ -1007,8 +1057,9 @@ const supportCategoryLabels: Record<SupportTicket['category'], string> = {
   QUESTION: '问数分析', DATA: '数据资产', REPORT: '报告中心', ACCESS: '账号权限', SYSTEM: '平台运行', OTHER: '其他问题',
 }
 
-function SupportTicketCenter({ tickets, busyKey, onStart, onReopen, onResolve, onClose }: {
+function SupportTicketCenter({ tickets, unavailable, busyKey, onStart, onReopen, onResolve, onClose }: {
   tickets: SupportTicket[]
+  unavailable: boolean
   busyKey: string
   onStart: (ticket: SupportTicket) => void
   onReopen: (ticket: SupportTicket) => void
@@ -1028,7 +1079,10 @@ function SupportTicketCenter({ tickets, busyKey, onStart, onReopen, onResolve, o
         <button className={filter === 'ALL' ? 'active' : ''} type="button" onClick={() => setFilter('ALL')}>全部</button>
       </div>
     </header>
-    {visible.length === 0
+    {/* 加载失败时绝不能显示「当前没有支持工单」：那会把一次读取失败说成业务事实。 */}
+    {unavailable
+      ? <div className="platform-module-empty"><WarningCircle size={30} weight="duotone" /><strong>支持工单暂时无法读取</strong><span>这里显示的不是真实工单数量，请稍后重新加载。</span></div>
+      : visible.length === 0
       ? <div className="platform-module-empty"><Lifebuoy size={30} weight="duotone" /><strong>当前没有支持工单</strong><span>用户从帮助中心提交的问题会自动进入这里。</span></div>
       : <div className="platform-support-list">{visible.map(ticket => <article key={ticket.id}>
         <span className={`support-priority is-${ticket.priority.toLowerCase()}`}>{ticket.priority === 'URGENT' ? '紧急' : ticket.priority === 'HIGH' ? '较高' : '普通'}</span>

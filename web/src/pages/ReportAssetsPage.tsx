@@ -58,9 +58,14 @@ function AssetStructurePreview({ asset }: { asset: ReportAsset }) {
     </p>
   }
   const page = orderedPages(loaded.definition)[0]
+  // 抽屉只有约 370px，直接按 1:1 渲染会把 24 栏栅格压成每块 110px，正文被迫
+  // 逐字换行。这里按报告的真实设计宽度渲染，再整体缩放成缩略图：结构、比例
+  // 和组件位置都还是已发布版本的真身，只是尺寸不足以逐字阅读。
   return <div className="report-drawer-structure-preview">
-    <p className="report-drawer-preview-note">已发布 v{loaded.versionNo} 的真实结构，数值需打开报告后按你的权限执行。</p>
-    {page && <ReportPageView definition={loaded.definition} page={page} manifests={manifests} designMode />}
+    <p className="report-drawer-preview-note">已发布 v{loaded.versionNo} 的真实结构缩略图，数值需打开报告后按你的权限执行。</p>
+    <div className="report-drawer-preview-frame" aria-label={`报告 v${loaded.versionNo} 结构缩略图`}>
+      {page && <ReportPageView definition={loaded.definition} page={page} manifests={manifests} designMode />}
+    </div>
   </div>
 }
 

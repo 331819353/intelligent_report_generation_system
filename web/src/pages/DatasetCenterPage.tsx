@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
-import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowDownIcon, ArrowUpIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DotsSixVerticalIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MagnifyingGlassIcon, MathOperationsIcon, PlusIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTSlashIcon, TreeStructureIcon, WarningCircleIcon, XIcon, type Icon } from '@phosphor-icons/react'
+import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowDownIcon, ArrowUpIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DotsSixVerticalIcon, DotsThreeVerticalIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MagnifyingGlassIcon, MathOperationsIcon, PlusIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTSlashIcon, TreeStructureIcon, WarningCircleIcon, XIcon, type Icon } from '@phosphor-icons/react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import '../styles/dataset-designer.css'
@@ -1383,6 +1383,9 @@ export function DatasetCenterPage() {
   const [dialog, setDialog] = useState<DialogState | null>(null)
   const [selectedDatasetIDs, setSelectedDatasetIDs] = useState<Set<string>>(new Set())
   const [batchAction, setBatchAction] = useState<DatasetBatchAction | null>(null)
+  // 行内只保留建模与当前状态下的主操作，其余进入溢出菜单，避免破坏性的「删除」
+  // 与「版本」「停用」等日常操作等权重并排。
+  const [rowMenuID, setRowMenuID] = useState('')
   const [dagRuns, setDAGRuns] = useState<Record<string, DatasetDAGRun>>(designSnapshot ? {
     'snapshot-customer-dim': {
       id: 'snapshot-run-customer', datasetId: 'snapshot-customer-dim', datasetVersionId: 'snapshot-customer-v6', layer: 'DIM',
@@ -1677,6 +1680,20 @@ export function DatasetCenterPage() {
     const timer = window.setTimeout(() => setNotice(null), 4500)
     return () => window.clearTimeout(timer)
   }, [notice])
+
+  useEffect(() => {
+    if (!rowMenuID) return
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!(event.target as HTMLElement).closest('.dataset-asset-actions')) setRowMenuID('')
+    }
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') setRowMenuID('') }
+    document.addEventListener('mousedown', closeOnOutsideClick)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [rowMenuID])
 
   useEffect(() => {
     const syncFullscreen = () => setCanvasFullscreen(document.fullscreenElement === canvasFullscreenTarget.current)
@@ -4081,24 +4098,39 @@ export function DatasetCenterPage() {
           <label className="dataset-asset-select"><input type="checkbox" aria-label={`选择数据集 ${dataset.name}`} checked={selectedDatasetIDs.has(dataset.id)} disabled={actionBusy} onChange={() => toggleDatasetSelection(dataset.id)} /></label>
           <div className="dataset-asset-open" role="button" tabIndex={actionBusy ? -1 : 0} aria-disabled={actionBusy} aria-label={`打开数据集 ${dataset.name}`} onClick={() => { if (!actionBusy) void openView(dataset) }} onKeyDown={event => { if (!actionBusy && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); void openView(dataset) } }}>
             <div className="dataset-asset-icon" aria-hidden="true"><RowsIcon size={22} weight="duotone" /></div>
-            <div className="dataset-asset-main"><div><h3>{dataset.name}</h3>{(dataset.tags || []).slice(0, 2).map(tag => <span className="dataset-asset-tag" key={tag}>{tag}</span>)}</div><p>{dataset.description || '暂无说明'}</p><small>{dataset.code}{dataset.originDataSourceName ? ` · ${dataset.originDataSourceName}` : ''}</small></div>
+            <div className="dataset-asset-main"><div><h3>{dataset.name}</h3>{(dataset.tags || []).slice(0, 2).map(tag => <span className="dataset-asset-tag" key={tag}>{tag}</span>)}</div><p>{dataset.description || '暂无说明'}</p><small title={`${dataset.code}${dataset.originDataSourceName ? ` · 来源：${dataset.originDataSourceName}` : ''}`}>{dataset.code}{dataset.originDataSourceName ? ` · ${dataset.originDataSourceName}` : ''}</small></div>
             <div className="dataset-catalog-state"><span className={`dataset-asset-layer ${dataset.layer.toLowerCase()}`}>{dataset.layer}</span><span className={`dataset-asset-status ${dataset.status.toLowerCase()}`}>{statusLabels[dataset.status] ?? dataset.status}</span></div>
             <div className={`dataset-catalog-version ${dagRuns[dataset.id]?.status.toLowerCase() || ''} ${dagRuns[dataset.id]?.slaBreached ? 'sla-breached' : ''}`}><strong>V{dataset.version}</strong><small>{dagRuns[dataset.id] ? dagRunLabel(dagRuns[dataset.id]) : dataset.currentPublishedVersionId ? '已冻结发布版本' : '草稿版本'}</small>{dagRuns[dataset.id]?.errorCode && <em>{dagRuns[dataset.id].errorCode}</em>}</div>
             <time>{new Date(dataset.updatedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })}</time>
           </div>
+          {/* 行内只留「建模」和当前状态下唯一的主操作（停止 / 运行 / 发布），
+              其余转入溢出菜单；删除单独分组并保持破坏性样式。可用性判断与拆分前
+              完全一致，只是位置不同。 */}
           <div className="dataset-asset-actions">
             {datasetManagePermissions[dataset.id] && <button className="action-edit" type="button" disabled={actionBusy} onClick={() => void openEdit(dataset)}><TreeStructureIcon size={15} />建模</button>}
             {datasetManagePermissions[dataset.id] && dagRuns[dataset.id] && activeDAGRunStatuses.has(dagRuns[dataset.id].status)
               ? <button className="action-pause" type="button" disabled={actionBusy} title={`停止本次 DAG${dagRuns[dataset.id]?.status === 'QUEUED' ? '排队' : '执行'}`} onClick={() => void stopDatasetDAG(dataset)}><DropSlashIcon size={15} />停止</button>
               : datasetManagePermissions[dataset.id] && dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId && <button className={`action-resume ${isRetryableDAGRun(dagRuns[dataset.id]) ? 'is-retry' : ''}`} type="button" disabled={actionBusy} title="锁定当前发布版本并创建一次新的可审计运行" onClick={() => void runDatasetDAG(dataset)}><ArrowClockwiseIcon size={15} />{isRetryableDAGRun(dagRuns[dataset.id]) ? '重试' : '运行'}</button>}
-            {dagRuns[dataset.id] && <button className="action-diagnose" type="button" disabled={actionBusy} onClick={() => void openMaterialization(dataset)}><WarningCircleIcon size={15} />诊断</button>}
-            {dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId
-              ? <button className="action-history" type="button" disabled={actionBusy} onClick={() => void openHistory(dataset)}><CalendarDotsIcon size={15} />版本</button>
-              : <button className="action-publish" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title="提交校验与发布审批" onClick={() => void openPublication(dataset)}><ArrowUpIcon size={15} />发布</button>}
-            {datasetManagePermissions[dataset.id] && dataset.status === 'DISABLED'
-              ? <button className="action-resume" type="button" disabled={actionBusy} onClick={() => void openLifecycle(dataset, 'restore')}><ArrowCounterClockwiseIcon size={15} />恢复</button>
-              : datasetManagePermissions[dataset.id] && ['DRAFT', 'PUBLISHED', 'STALE'].includes(dataset.status) && <button className="action-pause" type="button" disabled={actionBusy} onClick={() => void openLifecycle(dataset, 'disable')}><DropSlashIcon size={15} />停用</button>}
-            {datasetManagePermissions[dataset.id] && <button className="action-delete" type="button" disabled={actionBusy} onClick={() => void openLifecycle(dataset, 'delete')}><XIcon size={15} />删除</button>}
+            {!(dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId) && <button className="action-publish" type="button" disabled={actionBusy || dataset.status === 'DISABLED' || dataset.status === 'DEPRECATED'} title="提交校验与发布审批" onClick={() => void openPublication(dataset)}><ArrowUpIcon size={15} />发布</button>}
+
+            <button
+              className="dataset-asset-more"
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded={rowMenuID === dataset.id}
+              aria-label={`${dataset.name}更多操作`}
+              disabled={actionBusy}
+              onClick={() => setRowMenuID(current => current === dataset.id ? '' : dataset.id)}
+            ><DotsThreeVerticalIcon size={17} weight="bold" /></button>
+
+            {rowMenuID === dataset.id && <div className="dataset-asset-menu" role="menu">
+              {dagRuns[dataset.id] && <button type="button" role="menuitem" disabled={actionBusy} onClick={() => { setRowMenuID(''); void openMaterialization(dataset) }}><WarningCircleIcon size={15} />运行诊断</button>}
+              {dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId && <button type="button" role="menuitem" disabled={actionBusy} onClick={() => { setRowMenuID(''); void openHistory(dataset) }}><CalendarDotsIcon size={15} />版本记录</button>}
+              {datasetManagePermissions[dataset.id] && dataset.status === 'DISABLED'
+                ? <button type="button" role="menuitem" disabled={actionBusy} onClick={() => { setRowMenuID(''); void openLifecycle(dataset, 'restore') }}><ArrowCounterClockwiseIcon size={15} />恢复启用</button>
+                : datasetManagePermissions[dataset.id] && ['DRAFT', 'PUBLISHED', 'STALE'].includes(dataset.status) && <button type="button" role="menuitem" disabled={actionBusy} onClick={() => { setRowMenuID(''); void openLifecycle(dataset, 'disable') }}><DropSlashIcon size={15} />停用数据集</button>}
+              {datasetManagePermissions[dataset.id] && <button className="is-destructive" type="button" role="menuitem" disabled={actionBusy} onClick={() => { setRowMenuID(''); void openLifecycle(dataset, 'delete') }}><XIcon size={15} />删除数据集</button>}
+            </div>}
           </div>
         </article>)}</div>}
       </section>

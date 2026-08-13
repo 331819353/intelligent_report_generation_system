@@ -136,6 +136,7 @@ const snapshotSourceMetrics: Record<string, { readiness: number; tables: string;
   'snapshot-supplier-oracle': { readiness: 70, tables: '56 / 80', fields: '486 / 690', business: '38 / 60', latency: '45 ms' },
   'snapshot-store-excel': { readiness: 45, tables: '9 / 20', fields: '82 / 180', business: '12 / 36', latency: '—' },
 }
+type MetadataAssetStats = { readiness: number }
 type ConnectionDraft = {
   code: string
   name: string
@@ -270,19 +271,19 @@ const connectionHealth = (source: DataSourceRecord) => {
   if (validationStatusOf(source) === 'PASSED') return { tone: 'healthy', label: '健康', detail: snapshotSourceMetrics[source.id]?.latency || '验证通过' }
   return { tone: 'warning', label: '待验证', detail: '尚无测试收据' }
 }
-const metadataSummary = (source: DataSourceRecord) => snapshotSourceMetrics[source.id] || {
-  readiness: null,
-  tables: '查看资产', fields: '查看资产', business: '待完善', latency: effectiveValidationStatus(source) === 'PASSED' ? '验证通过' : '—',
+const metadataAssetStats = (tables: DataSourceTableRecord[]): MetadataAssetStats => {
+  const managed = tables.filter(table => table.assetStatus === 'ACTIVE' && table.managementStatus !== 'DISABLED')
+  const enriched = managed.filter(table => table.enrichmentStatus === 'SUCCEEDED')
+  return { readiness: managed.length === 0 ? 0 : Math.round(enriched.length / managed.length * 100) }
 }
-const lifecycleSteps = (source: DataSourceRecord) => {
-  const summary = metadataSummary(source)
-  return [
-    { label: '已连接', complete: Boolean(source.configVersionId || source.fileAssetId) },
-    { label: '已验证', complete: effectiveValidationStatus(source) === 'PASSED' },
-    { label: '已发布', complete: publicationStatusOf(source) === 'PUBLISHED' },
-    { label: '完善元数据', complete: summary.readiness === 100 },
-  ]
-}
+const metadataReadiness = (source: DataSourceRecord, stats?: MetadataAssetStats) =>
+  snapshotSourceMetrics[source.id]?.readiness ?? stats?.readiness ?? null
+const lifecycleSteps = (source: DataSourceRecord, stats?: MetadataAssetStats) => [
+  { label: '已连接', complete: Boolean(source.configVersionId || source.fileAssetId) },
+  { label: '已验证', complete: effectiveValidationStatus(source) === 'PASSED' },
+  { label: '已发布', complete: publicationStatusOf(source) === 'PUBLISHED' },
+  { label: '完善元数据', complete: metadataReadiness(source, stats) === 100 },
+]
 const formatFileSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
 const fileSourceIdentity = (filename: string) => {
   const extensionMatch = filename.match(/\.([^.]+)$/)
@@ -408,8 +409,8 @@ export function DataSourceCenterPage() {
   const [keyword, setKeyword] = useState('')
   const [typeFilter, setTypeFilter] = useState<DataSourceType | 'ALL'>('ALL')
   const [statusFilter, setStatusFilter] = useState<DataSourceStatus | 'ALL'>('ALL')
-  const [selectedSourceId, setSelectedSourceId] = useState(designSnapshot ? snapshotSources[0].id : '')
-  const [detailDismissed, setDetailDismissed] = useState(false)
+  const [selectedSourceId, setSelectedSourceId] = useState('')
+  const [assetStats, setAssetStats] = useState<Record<string, MetadataAssetStats>>({})
   const [assistantOpen, setAssistantOpen] = useState(false)
   const [metadataTables, setMetadataTables] = useState<DataSourceTableRecord[]>([])
   const [metadataColumns, setMetadataColumns] = useState<Record<string, DataSourceColumnRecord[]>>({})
@@ -456,6 +457,18 @@ export function DataSourceCenterPage() {
     return () => window.clearTimeout(timeout)
   }, [notice])
 
+  // 生命周期的“完善元数据”必须反映真实表资产完善度，展开详情时按需拉取。
+  useEffect(() => {
+    if (designSnapshot || !selectedSourceId) return undefined
+    let active = true
+    dataSourceAPI.tables(selectedSourceId)
+      .then(result => {
+        if (active) setAssetStats(current => ({ ...current, [selectedSourceId]: metadataAssetStats(result.items) }))
+      })
+      .catch(() => undefined)
+    return () => { active = false }
+  }, [designSnapshot, selectedSourceId])
+
   const filteredSources = useMemo(() => {
     const query = keyword.trim().toLocaleLowerCase()
     return sources.filter(source => {
@@ -469,9 +482,10 @@ export function DataSourceCenterPage() {
     drafts: sources.filter(source => hasUnpublishedDraft(source) && reviewStatusOf(source) !== 'PENDING').length,
     attention: sources.filter(source => source.status === 'ERROR' || reviewStatusOf(source) === 'REJECTED').length,
   }), [sources])
+  // 详情面板只由行点击打开：默认收起，再次点击同一行收起。
   const selectedSource = useMemo(
-    () => sources.find(source => source.id === selectedSourceId) || (!detailDismissed ? sources[0] || null : null),
-    [detailDismissed, selectedSourceId, sources],
+    () => sources.find(source => source.id === selectedSourceId) || null,
+    [selectedSourceId, sources],
   )
   const selectedCanManage = Boolean(selectedSource && sourceManagePermissions[selectedSource.id])
   const replacingFileSource = useMemo(() => {
@@ -543,6 +557,7 @@ export function DataSourceCenterPage() {
     setColumnLoading({})
     try {
       const result = await dataSourceAPI.tables(sourceId)
+      setAssetStats(current => ({ ...current, [sourceId]: metadataAssetStats(result.items) }))
       if (request === metadataRequest.current) setMetadataTables(result.items)
     } catch (cause) {
       if (request === metadataRequest.current) setMetadataError(cause instanceof Error ? cause.message : '加载表结构失败')
@@ -1331,9 +1346,10 @@ export function DataSourceCenterPage() {
   const selectedPendingDraft = selectedSource ? hasUnpublishedDraft(selectedSource) : false
   const selectedCanTest = Boolean(selectedSource && selectedCanManage && !selectedUnavailable && selectedReviewStatus !== 'PENDING')
   const selectedCanPublish = Boolean(selectedSource && selectedCanManage && !selectedUnavailable && selectedPendingDraft && selectedReviewStatus !== 'PENDING' && effectiveValidationStatus(selectedSource) === 'PASSED')
-  const selectedSummary = selectedSource ? metadataSummary(selectedSource) : null
+  const selectedReadiness = selectedSource ? metadataReadiness(selectedSource, assetStats[selectedSource.id]) : null
   const selectedHealth = selectedSource ? connectionHealth(selectedSource) : null
-  const selectedLifecycle = selectedSource ? lifecycleSteps(selectedSource) : []
+  const selectedLifecycle = selectedSource ? lifecycleSteps(selectedSource, assetStats[selectedSource.id]) : []
+  const selectedMetadataComplete = selectedReadiness === 100
   const selectedIsRequester = Boolean(selectedSource && (!signedInSubject || selectedSource.reviewRequesterId === signedInSubject))
   const selectedNextAction = !selectedSource
     ? ''
@@ -1347,7 +1363,9 @@ export function DataSourceCenterPage() {
           ? '重新测试连接'
           : selectedPendingDraft
             ? '提交发布审批'
-            : '完善业务元数据'
+            : selectedMetadataComplete
+              ? '进入数据集建模'
+              : '完善业务元数据'
   const openAssetWorkspace = (source: DataSourceRecord) => navigate(`/data-sources/${source.id}/assets${designSnapshot ? '?snapshot=data-source-assets' : ''}`)
   return (
     <AppShell
@@ -1401,19 +1419,19 @@ export function DataSourceCenterPage() {
                 const canTest = canManage && !unavailable && reviewStatus !== 'PENDING'
                 const subtitle = `${typeLabels[source.type]} · ${source.code}${source.description ? ` · ${source.description}` : ''}`
                 const health = connectionHealth(source)
-                const summary = metadataSummary(source)
+                const readiness = metadataReadiness(source, assetStats[source.id])
                 const isSelected = selectedSource?.id === source.id
                 return <article className={`data-source-card${isSelected ? ' is-selected' : ''}${reviewLocked ? ' review-locked' : ''}`} role="row" aria-selected={isSelected} key={source.id}>
-                  <AppButton className="data-source-card-open" type="button" aria-label={`查看${source.name}详情`} onClick={() => { setSelectedSourceId(source.id); setDetailDismissed(false) }}>
+                  <AppButton className="data-source-card-open" type="button" aria-expanded={isSelected} aria-label={`${isSelected ? '收起' : '查看'}${source.name}详情`} onClick={() => setSelectedSourceId(current => current === source.id ? '' : source.id)}>
                     <span className="data-source-name-cell" role="cell">
                       <span className={`data-source-selection-indicator${isSelected ? ' is-selected' : ''}`} aria-hidden="true">{isSelected ? '✓' : ''}</span>
                       <span className={`data-source-icon ${source.type.toLowerCase()}`}>{source.type === 'EXCEL' ? <FileXls size={23} weight="duotone" /> : <Database size={23} weight="duotone" />}</span>
                       <span className="data-source-main"><strong title={source.name}>{source.name}</strong><small title={subtitle}>{subtitle}</small></span>
                     </span>
                     <span className="data-source-type-cell" role="cell"><strong>{source.type === 'EXCEL' ? '文件数据源' : '数据库'}</strong><small>{typeLabels[source.type]}</small></span>
-                    <span className={`data-source-health-cell is-${health.tone}`} role="cell"><strong><i />{health.label}</strong><small>{health.detail}</small></span>
+                    <span className={`data-source-health-cell is-${health.tone}`} role="cell"><strong><i />{health.label}</strong><small title={health.detail}>{health.detail}</small></span>
                     <span className="data-source-test-cell" role="cell"><strong className={`is-${effectiveValidationStatus(source).toLowerCase()}`}>{validationLabel(source)}</strong><small>{formatDataSourceTime(source.lastTestedAt || source.updatedAt)}</small></span>
-                    <span className="data-source-readiness-cell" role="cell"><strong>{summary.readiness === null ? publicationLabels[publicationStatusOf(source)] : `${summary.readiness}%`}</strong>{summary.readiness === null ? <small>进入资产查看进度</small> : <progress aria-label={`${source.name}元数据完善度`} max="100" value={summary.readiness} />}</span>
+                    <span className="data-source-readiness-cell" role="cell"><strong>{readiness === null ? publicationLabels[publicationStatusOf(source)] : `${readiness}%`}</strong>{readiness === null ? <small title="进入数据表资产查看元数据完善进度">查看进度</small> : <progress aria-label={`${source.name}元数据完善度`} max="100" value={readiness} />}</span>
                   </AppButton>
                   <div className="data-source-actions" role="cell">
                     {canManage && <AppButton className="action-test" type="button" disabled={actionBusy || !canTest} onClick={() => void testConnection(source)}>{busyAction === `test:${source.id}` ? '测试中…' : '测试连接'}</AppButton>}
@@ -1427,10 +1445,14 @@ export function DataSourceCenterPage() {
         </section>
       </section>
 
-      {selectedSource && selectedSummary && selectedHealth && <aside className="data-source-inspector" aria-label={`${selectedSource.name}详情`}>
+      {selectedSource && selectedHealth && <aside className="data-source-inspector" aria-label={`${selectedSource.name}详情`}>
         <header>
-          <div><strong>{selectedSource.name}</strong><small>{selectedSource.code}</small></div>
-          <AppButton text circle type="button" aria-label="关闭数据源详情" onClick={() => { setDetailDismissed(true); setSelectedSourceId('') }}><X size={19} /></AppButton>
+          <span className={`data-source-inspector-avatar ${selectedSource.type.toLowerCase()}`} aria-hidden="true">{selectedSource.type === 'EXCEL' ? <FileXls size={20} weight="duotone" /> : <Database size={20} weight="duotone" />}</span>
+          <div>
+            <strong title={selectedSource.name}>{selectedSource.name}</strong>
+            <small title={selectedSource.code}>{selectedSource.code}</small>
+          </div>
+          <AppButton text circle className="data-source-inspector-close" type="button" aria-label="关闭数据源详情" title="关闭" onClick={() => setSelectedSourceId('')}><X size={17} /></AppButton>
         </header>
         <div className="data-source-inspector-actions">
           {selectedCanManage && <AppButton variant="primary" className="action-test" type="button" disabled={actionBusy || !selectedCanTest} onClick={() => void testConnection(selectedSource)}>{busyAction === `test:${selectedSource.id}` ? '测试中…' : '测试连接'}</AppButton>}
@@ -1442,36 +1464,34 @@ export function DataSourceCenterPage() {
         <div className="data-source-inspector-scroll">
           <section className="data-source-inspector-card lifecycle-card">
             <header><strong>生命周期状态</strong><span className={`data-source-status ${selectedReviewStatus === 'PENDING' ? 'review-pending' : selectedReviewStatus === 'REJECTED' ? 'review-rejected' : selectedSource.status.toLowerCase()}`}>{lifecycleLabel(selectedSource)}</span></header>
-            <ol>{selectedLifecycle.map((step, index) => <li className={step.complete ? 'is-complete' : ''} key={step.label}>{step.complete ? <CheckCircle size={21} weight="fill" /> : <Circle size={21} />}<span>{step.label}<small>{index === 0 ? '连接配置' : index === 1 ? formatDataSourceTime(selectedSource.lastTestedAt) : index === 2 ? publicationLabels[publicationStatusOf(selectedSource)] : selectedSummary.readiness === null ? '进入资产查看' : `${selectedSummary.readiness}%`}</small></span></li>)}</ol>
+            <ol>{selectedLifecycle.map((step, index) => <li className={step.complete ? 'is-complete' : ''} key={step.label}>{step.complete ? <CheckCircle size={21} weight="fill" /> : <Circle size={21} />}<span>{step.label}<small>{index === 0 ? '连接配置' : index === 1 ? formatDataSourceTime(selectedSource.lastTestedAt) : index === 2 ? publicationLabels[publicationStatusOf(selectedSource)] : selectedReadiness === null ? '进入资产查看' : `${selectedReadiness}%`}</small></span></li>)}</ol>
           </section>
 
           <section className="data-source-inspector-card">
             <header><strong>连接信息</strong></header>
             <dl className="connection-facts">
-              <div><dt>数据源类型</dt><dd>{typeLabels[selectedSource.type]}</dd></div>
-              <div><dt>Host / IP</dt><dd>{configText(selectedSource, 'host') || (selectedSource.type === 'EXCEL' ? '文件数据源' : '—')}</dd></div>
-              <div><dt>端口</dt><dd>{configText(selectedSource, 'port') || '—'}</dd></div>
-              <div><dt>数据库</dt><dd>{configText(selectedSource, 'database') || '—'}</dd></div>
-              <div><dt>用户名</dt><dd>{configText(selectedSource, 'username') || '—'}</dd></div>
-              <div><dt>描述</dt><dd>{selectedSource.description || '未填写'}</dd></div>
+              {[
+                { label: '数据源类型', value: typeLabels[selectedSource.type] },
+                { label: 'Host / IP', value: configText(selectedSource, 'host') || (selectedSource.type === 'EXCEL' ? '文件数据源' : '—') },
+                { label: '端口', value: configText(selectedSource, 'port') || '—' },
+                { label: '数据库', value: configText(selectedSource, 'database') || '—' },
+                { label: '用户名', value: configText(selectedSource, 'username') || '—' },
+                { label: '描述', value: selectedSource.description || '未填写' },
+              ].map(fact => <div key={fact.label}><dt>{fact.label}</dt><dd title={fact.value}>{fact.value}</dd></div>)}
             </dl>
           </section>
 
           <section className="data-source-inspector-card">
             <header><strong>最近测试结果</strong><span className={`receipt-status is-${effectiveValidationStatus(selectedSource).toLowerCase()}`}>{validationLabel(selectedSource)}</span></header>
             <dl className="receipt-facts">
-              <div><dt>测试时间</dt><dd>{formatDataSourceTime(selectedSource.lastTestedAt || selectedSource.updatedAt)}</dd></div>
-              <div><dt>连接健康</dt><dd>{selectedHealth.label}</dd></div>
-              <div><dt>响应延迟</dt><dd>{selectedHealth.detail}</dd></div>
-              <div><dt>配置版本</dt><dd>v{selectedSource.configVersion || selectedSource.version}</dd></div>
-              <div><dt>有效期至</dt><dd>{selectedSource.testExpiresAt ? formatDataSourceTime(selectedSource.testExpiresAt) : '需要重新测试'}</dd></div>
+              {[
+                { label: '测试时间', value: formatDataSourceTime(selectedSource.lastTestedAt || selectedSource.updatedAt) },
+                { label: '连接健康', value: selectedHealth.label },
+                { label: '响应延迟', value: selectedHealth.detail },
+                { label: '配置版本', value: `v${selectedSource.configVersion || selectedSource.version}` },
+                { label: '有效期至', value: selectedSource.testExpiresAt ? formatDataSourceTime(selectedSource.testExpiresAt) : '需要重新测试' },
+              ].map(fact => <div key={fact.label}><dt>{fact.label}</dt><dd title={fact.value}>{fact.value}</dd></div>)}
             </dl>
-          </section>
-
-          <section className="data-source-inspector-card metadata-card">
-            <header><strong>元数据资产</strong><span>{selectedSummary.readiness === null ? '查看实际进度' : `${selectedSummary.readiness}%`}</span></header>
-            {selectedSummary.readiness !== null && <progress aria-label="元数据完善度" max="100" value={selectedSummary.readiness} />}
-            <dl><div><dt>数据表</dt><dd>{selectedSummary.tables}</dd></div><div><dt>字段</dt><dd>{selectedSummary.fields}</dd></div><div><dt>业务指标</dt><dd>{selectedSummary.business}</dd></div></dl>
           </section>
 
           <section className="data-source-inspector-card sharing-card">
@@ -1481,15 +1501,16 @@ export function DataSourceCenterPage() {
         </div>
 
         <footer className="data-source-next-action">
-          <div><Sparkle size={18} weight="fill" /><span><strong>下一步：{selectedNextAction}</strong><small>{!selectedCanManage ? '以只读方式查看已共享的数据表、字段定义与治理状态。' : selectedReviewStatus === 'PENDING' ? '审核通过后继续元数据发现与资产完善。' : selectedReviewStatus === 'REJECTED' ? (selectedSource.reviewNote || '根据审核意见修改配置后重新提交。') : effectiveValidationStatus(selectedSource) !== 'PASSED' ? '生成新的连接测试收据，确认当前配置可用。' : selectedPendingDraft ? '固定当前已验证版本并进入发布审核。' : '补充业务定义、指标口径与血缘关系。'}</small></span></div>
+          <div><Sparkle size={18} weight="fill" /><span><strong>下一步：{selectedNextAction}</strong><small>{!selectedCanManage ? '以只读方式查看已共享的数据表、字段定义与治理状态。' : selectedReviewStatus === 'PENDING' ? '审核通过后继续元数据发现与资产完善。' : selectedReviewStatus === 'REJECTED' ? (selectedSource.reviewNote || '根据审核意见修改配置后重新提交。') : effectiveValidationStatus(selectedSource) !== 'PASSED' ? '生成新的连接测试收据，确认当前配置可用。' : selectedPendingDraft ? '固定当前已验证版本并进入发布审核。' : selectedMetadataComplete ? '表与字段业务元数据已完善，可作为稳定输入创建数据集。' : '补充业务定义、指标口径与血缘关系。'}</small></span></div>
           <AppButton variant="primary" type="button" disabled={actionBusy || (selectedReviewStatus === 'PENDING' && !selectedIsRequester)} onClick={() => {
             if (!selectedCanManage) openAssetWorkspace(selectedSource)
             else if (selectedReviewStatus === 'PENDING') void withdrawReview(selectedSource)
             else if (selectedReviewStatus === 'REJECTED') openExisting('edit', selectedSource)
             else if (effectiveValidationStatus(selectedSource) !== 'PASSED') void testConnection(selectedSource)
             else if (selectedCanPublish) void publishSource(selectedSource)
+            else if (selectedMetadataComplete) navigate(`/datasets${designSnapshot ? '?snapshot=assets' : `?sourceId=${encodeURIComponent(selectedSource.id)}`}`)
             else openAssetWorkspace(selectedSource)
-          }}>{!selectedCanManage ? '查看资产' : selectedReviewStatus === 'PENDING' ? selectedIsRequester ? '撤销申请' : '等待审批' : selectedReviewStatus === 'REJECTED' ? '去修改' : effectiveValidationStatus(selectedSource) !== 'PASSED' ? '重新测试' : selectedCanPublish ? '提交审批' : '去完善'}</AppButton>
+          }}>{!selectedCanManage ? '查看资产' : selectedReviewStatus === 'PENDING' ? selectedIsRequester ? '撤销申请' : '等待审批' : selectedReviewStatus === 'REJECTED' ? '去修改' : effectiveValidationStatus(selectedSource) !== 'PASSED' ? '重新测试' : selectedCanPublish ? '提交审批' : selectedMetadataComplete ? '去建模' : '去完善'}</AppButton>
         </footer>
       </aside>}
 
@@ -1728,7 +1749,6 @@ export function DataSourceCenterPage() {
             const exists = current.some(item => item.id === source.id)
             return exists ? current.map(item => item.id === source.id ? source : item) : [source, ...current]
           })
-          setDetailDismissed(false)
           setSelectedSourceId(source.id)
         }}
         onReload={loadSources}

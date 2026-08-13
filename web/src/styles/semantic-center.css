@@ -89,7 +89,12 @@
 .semantic-tabs button.is-active strong { color: #1c63c8; }
 .semantic-tabs button.is-active em { background: #dbe9ff; color: #1763d2; }
 
-.semantic-content { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
+/* 分区内的固定块数量会变（指标中心多一块可加性补录），固定三行的栅格会把
+   多出来的那块挤成 0px 高并与表格重叠。改用弹性列：除最后的表格外都取自然
+   高度，表格占据剩余空间，空间不足时整列滚动。 */
+.semantic-content { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
+.semantic-content > * { flex: none; }
+.semantic-content > :last-child { flex: 1 1 auto; min-height: 180px; }
 .semantic-content > header { min-height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid #e8edf3; padding: 12px 18px; }
 .semantic-content > header > div { min-width: 0; display: grid; gap: 2px; }
 .semantic-content > header h3 { margin: 0; color: #26364d; font-size: 18px; }
@@ -103,8 +108,8 @@
 .semantic-toolbar > span { color: #8290a3; font-size: 12px; }
 
 .semantic-object-table { min-height: 0; overflow: auto; }
-.semantic-object-head { min-height: 42px; display: grid; grid-template-columns: minmax(360px, 1.5fr) minmax(190px, .75fr) 140px 150px 180px; align-items: center; gap: 16px; border-bottom: 1px solid #e6ecf3; padding: 0 18px; background: #f8fafc; color: #718096; font-size: 12px; font-weight: 720; }
-.semantic-object-table article { min-height: 88px; display: grid; grid-template-columns: minmax(360px, 1.5fr) minmax(190px, .75fr) 140px 150px 180px; align-items: center; gap: 16px; border-bottom: 1px solid #e8edf3; padding: 10px 18px; }
+.semantic-object-head { min-height: 42px; display: grid; grid-template-columns: minmax(240px, 1.5fr) minmax(150px, .75fr) 120px 140px 160px; align-items: center; gap: 16px; border-bottom: 1px solid #e6ecf3; padding: 0 18px; background: #f8fafc; color: #718096; font-size: 12px; font-weight: 720; }
+.semantic-object-table article { min-height: 88px; display: grid; grid-template-columns: minmax(240px, 1.5fr) minmax(150px, .75fr) 120px 140px 160px; align-items: center; gap: 16px; border-bottom: 1px solid #e8edf3; padding: 10px 18px; }
 .semantic-object-table article:hover { background: #fbfdff; }
 .semantic-object-name { min-width: 0; display: grid; grid-template-columns: 38px minmax(0, 1fr); align-items: start; gap: 11px; }
 .semantic-object-name > i { width: 36px; height: 36px; display: grid; place-items: center; border: 1px solid #cfe0f7; border-radius: 8px; background: #f0f6ff; color: #2471df; font-style: normal; }
@@ -289,6 +294,10 @@
 .semantic-quality-confirm p { margin: 7px 0 0; color: #718196; font-size: 13px; line-height: 1.55; }
 .semantic-quality-confirm > footer { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; margin-top: 5px; }
 .semantic-additivity-backlog { margin-bottom: 12px; overflow: hidden; border: 1px solid #d8e2ed; border-radius: 10px; background: #fff; }
+/* 没有待补录项时这是一条「无需处理」的确认信息，不应挤占下方的对象清单。 */
+.semantic-additivity-backlog .semantic-ops-state { min-height: 0; flex-direction: row; flex-wrap: wrap; justify-content: flex-start; gap: 4px 9px; padding: 11px 14px; text-align: left; }
+.semantic-additivity-backlog .semantic-ops-state svg { width: 18px; height: 18px; }
+.semantic-additivity-backlog .semantic-ops-state small { max-width: none; }
 .semantic-additivity-backlog > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e6ecf3; padding: 11px 14px; background: #fbfcfe; }
 .semantic-additivity-backlog > header > div:first-child { min-width: 0; display: grid; gap: 2px; }
 .semantic-additivity-backlog > header > div:first-child > span { color: #2471df; font-size: 11px; font-weight: 760; }

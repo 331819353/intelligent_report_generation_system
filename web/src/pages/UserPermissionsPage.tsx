@@ -547,7 +547,7 @@ export function UserPermissionsPage() {
       <div className="user-permissions-workspace">
         <section className="user-permissions-table-panel" aria-label="用户目录">
           <div className="user-permissions-table-header" role="row">
-            <span aria-hidden="true" /><span>姓名</span><span>工号</span><span>邮箱</span><span>所属领域</span><span>角色</span><span>领域数量</span><span>状态</span><span>最近登录时间</span><span>操作</span>
+            <span aria-hidden="true" /><span>姓名</span><span>工号</span><span>邮箱</span><span>所属领域</span><span>角色</span><span>状态</span><span>最近登录</span><span>操作</span>
           </div>
           <div className="user-permissions-table-body">
             {loading && <div className="user-permissions-state"><SpinnerGap className="spin" size={28} /><strong>正在加载用户目录…</strong></div>}
@@ -558,9 +558,14 @@ export function UserPermissionsPage() {
                 <span className="user-row-person"><img src={avatarFor(user)} alt="" /><strong>{user.displayName}</strong></span>
                 <code>{user.employeeNo || '—'}</code>
                 <span className="user-row-email" title={user.email}>{user.email}</span>
-                <span className="user-row-domains" title={user.domains.map(domain => domain.name).join('、')}>{user.domains[0]?.name ?? '暂未加入'}{user.domains.length > 1 ? ` 等 ${user.domains.length} 个` : ''}</span>
+                {/* 「所属领域」已经带出数量，原来的独立「领域数量」列是重复信息；
+                    平台管理员没有领域归属，这里直接说明它可进入全部领域。 */}
+                <span className="user-row-domains" title={user.platformAdministrator ? '可进入全部领域' : user.domains.map(domain => domain.name).join('、')}>
+                  {user.platformAdministrator
+                    ? '全部领域'
+                    : `${user.domains[0]?.name ?? '暂未加入'}${user.domains.length > 1 ? ` 等 ${user.domains.length} 个` : ''}`}
+                </span>
                 <span>{primaryRole(user)}</span>
-                <span>{user.platformAdministrator ? '全部' : user.domains.length}</span>
                 <span className={`user-status-dot is-${user.status.toLocaleLowerCase()}`}><i />{statusLabels[user.status]}</span>
                 <time dateTime={user.lastLoginAt}>{formatDateTime(user.lastLoginAt)}</time>
                 <AppButton link type="button" onClick={event => { event.stopPropagation(); chooseUser(user.id) }}>编辑</AppButton>

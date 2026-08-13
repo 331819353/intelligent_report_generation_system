@@ -459,6 +459,7 @@ export function AskDataPage() {
   const incomingQuestion = searchParams.get('q')?.trim() || ''
   const incomingRunId = searchParams.get('runId')?.trim() || ''
   const incomingAttachmentsEnabled = searchParams.get('attachments') === '1'
+  const incomingAutoSubmit = searchParams.get('autoSubmit') === '1'
   const dataRequestSnapshot = snapshot === 'data-requests'
   const dataRequestWorkspace = dataRequestSnapshot || searchParams.get('workspace') === 'data-requests'
   const scopeDetailSnapshot = snapshot === 'scope-detail'
@@ -473,6 +474,7 @@ export function AskDataPage() {
   const domainName = designSnapshot ? '企业经营' : liveDomainName
   const [question, setQuestion] = useState(scopeDetailSnapshot ? '导出本月订单明细' : resultSnapshot ? MARGIN_QUESTION : incomingQuestion)
   const [incomingAttachments, setIncomingAttachments] = useState<AskDataAttachmentDraftItem[]>(() => designSnapshot || !incomingAttachmentsEnabled ? [] : readAskDataAttachmentDraft())
+  const autoSubmitRef = useRef('')
   const [followUp, setFollowUp] = useState('')
   const [mode, setMode] = useState<WorkbenchMode>(() => {
     if (incomingRunId) return 'live'
@@ -540,6 +542,49 @@ export function AskDataPage() {
     })
     return () => { cancelled = true }
   }, [designSnapshot, incomingRunId, resumeQuestion, routeConversationId])
+
+  useEffect(() => {
+    if (!incomingAutoSubmit || !incomingQuestion || incomingRunId || routeConversationId || dataRequestWorkspace) return
+    const requestKey = `${incomingQuestion}:${incomingAttachments.map(item => item.id).join(',')}`
+    if (autoSubmitRef.current === requestKey) return
+    autoSubmitRef.current = requestKey
+
+    const attachmentContext = buildAskDataAttachmentContext(incomingAttachments)
+    const submittedPayload = attachmentContext ? `${incomingQuestion}\n\n${attachmentContext}` : incomingQuestion
+    const consumedParams = new URLSearchParams(window.location.search)
+    consumedParams.delete('autoSubmit')
+    navigate(`/ask-data?${consumedParams.toString()}`, { replace: true })
+
+    setMode('live')
+    setToast('')
+    setFeedback(null)
+    setFeedbackDialogOpen(false)
+    setFeedbackError('')
+    setExpandedResult(false)
+    setActiveConversationLabel(incomingQuestion)
+    setQuestion('')
+
+    void createQuestion(submittedPayload).then(run => {
+      if (!run) return
+      if (attachmentContext) {
+        clearAskDataAttachmentDraft()
+        setIncomingAttachments([])
+      }
+      setActiveConversationID(run.conversationId)
+      setHistoryRefreshKey(value => value + 1)
+      if (!designSnapshot) navigate(`/ask-data/conversations/${run.conversationId}`)
+    })
+  }, [
+    createQuestion,
+    dataRequestWorkspace,
+    designSnapshot,
+    incomingAttachments,
+    incomingAutoSubmit,
+    incomingQuestion,
+    incomingRunId,
+    navigate,
+    routeConversationId,
+  ])
 
   const activeReleaseDrift = mode === 'snapshot-release-drift'
     ? DEMO_RELEASE_DRIFT

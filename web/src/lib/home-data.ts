@@ -148,7 +148,9 @@ export function workItemToHomeTask(item: WorkInboxItem, now = new Date()): HomeT
     : remaining !== undefined && remaining <= 7 * 24 * 60 * 60_000
       ? 'medium'
       : 'low'
-  const requester = item.requesterUserId ? `${item.requesterUserId.slice(0, 8)}…` : '系统'
+  // 待办卡片面向业务用户，只展示可读的发起人姓名。没有姓名时宁可留空，
+  // 也不要把内部用户 ID 的前 8 位当作「发起人」显示出来。
+  const requester = item.requesterDisplayName?.trim() ?? ''
   return {
     id: `${item.type}:${item.objectId}`,
     source: item,
@@ -156,8 +158,8 @@ export function workItemToHomeTask(item: WorkInboxItem, now = new Date()): HomeT
     summary: item.summary,
     due: due && !Number.isNaN(due.getTime())
       ? `${item.overdue ? '已逾期' : '截止'}：${new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(due)}`
-      : '未设置 SLA 截止时间',
-    owner: `发起人 ${requester}`,
+      : '无截止时间',
+    owner: requester ? `发起人 ${requester}` : '',
     priority,
     href: workItemDestination(item),
   }

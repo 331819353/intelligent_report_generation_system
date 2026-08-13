@@ -33,7 +33,8 @@ func NewService(pool *pgxpool.Pool, admins AdminAuthorizer) (*Service, error) {
 	return &Service{pool: pool, admins: admins, now: time.Now}, nil
 }
 func DeploymentParameters() []DeploymentParameter {
-	definitions := []struct{ name, category, env, guidance string }{{"database.controlPlane", "DEPLOYMENT_PARAMETER", "DATABASE_URL", "Change through the deployment system and restart affected services"}, {"warehouse.database", "DEPLOYMENT_PARAMETER", "WAREHOUSE_DATABASE_URL", "Change through the deployment system and restart workers"}, {"objectStorage.endpoint", "DEPLOYMENT_PARAMETER", "MINIO_ENDPOINT", "Change through the deployment system"}, {"auth.accessSigningSecret", "SECRET_REFERENCE", "AUTH_ACCESS_SECRET", "Rotate through the secret manager; plaintext is never readable here"}, {"dataSource.encryptionKey", "SECRET_REFERENCE", "DATA_SOURCE_CREDENTIAL_KEY", "Rotate through the secret manager using the documented key-rotation runbook"}}
+	// ChangeGuidance 会原样显示在运行配置中心的卡片上，因此和其余界面文案一样使用中文。
+	definitions := []struct{ name, category, env, guidance string }{{"database.controlPlane", "DEPLOYMENT_PARAMETER", "DATABASE_URL", "通过部署系统修改，并重启受影响的服务"}, {"warehouse.database", "DEPLOYMENT_PARAMETER", "WAREHOUSE_DATABASE_URL", "通过部署系统修改，并重启 Worker"}, {"objectStorage.endpoint", "DEPLOYMENT_PARAMETER", "MINIO_ENDPOINT", "通过部署系统修改"}, {"auth.accessSigningSecret", "SECRET_REFERENCE", "AUTH_ACCESS_SECRET", "通过密钥管理系统轮换；平台内不会读取或展示明文"}, {"dataSource.encryptionKey", "SECRET_REFERENCE", "DATA_SOURCE_CREDENTIAL_KEY", "通过密钥管理系统轮换，并遵循既定的密钥轮换手册"}}
 	result := make([]DeploymentParameter, 0, len(definitions))
 	for _, definition := range definitions {
 		_, configured := os.LookupEnv(definition.env)

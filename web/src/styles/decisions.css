@@ -39,7 +39,9 @@
 
 .decisions-table-wrap { min-width: 0; min-height: 0; overflow: auto; scrollbar-width: thin; }
 .decisions-table-header,
-.decisions-table-row { min-width: 1120px; display: grid; grid-template-columns: 30px minmax(250px, 2.1fr) 86px 104px minmax(140px, 1fr) 92px 116px 118px 94px; align-items: center; gap: 10px; padding: 0 16px; }
+/* 列的最小宽度之和原本超过 min-width，导致最右侧的「操作」列即使横向滚动到底
+   仍被裁掉。收紧到能在 1440 视口下不横向滚动即可完整显示。 */
+.decisions-table-row { min-width: 1016px; display: grid; grid-template-columns: 30px minmax(200px, 2.1fr) 78px 96px minmax(120px, 1fr) 84px 100px 108px 88px; align-items: center; gap: 10px; padding: 0 16px; }
 .decisions-table-header { position: sticky; z-index: 2; top: 0; height: 45px; border-bottom: 1px solid #e3e7ed; background: #f8f9fb; color: #5f6b7e; font-size: 12px; font-weight: 760; }
 .decisions-table-header input,
 .decisions-table-row input { width: 14px; height: 14px; accent-color: #2864dc; }

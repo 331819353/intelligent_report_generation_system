@@ -3,8 +3,7 @@ import {
   ArrowClockwise,
   ArrowLeft,
   ArrowRight,
-  CaretRight,
-  Check,
+  ArrowsClockwise,
   CheckCircle,
   Circle,
   Database,
@@ -32,6 +31,7 @@ import {
   type MetadataAISuggestion,
   type MetadataDiff,
   type MetadataJob,
+  type MetadataRefreshMode,
   type MetadataSampleMode,
 } from '../lib/data-sources'
 
@@ -148,6 +148,17 @@ const semanticTypes = ['', 'DATE', 'TIME', 'DATETIME', 'REGION', 'COMPANY_NAME',
 const sensitivityLabels: Record<DataSourceTableRecord['sensitivityLevel'], string> = { PUBLIC: '公开', INTERNAL: '内部', CONFIDENTIAL: '机密', RESTRICTED: '受限' }
 const enrichmentLabels: Record<DataSourceTableRecord['enrichmentStatus'], string> = { PENDING: '待完善', RUNNING: '处理中', SUCCEEDED: '已完善', FAILED: '需处理' }
 const stageLabels: Record<string, string> = { QUEUED: '等待执行', DISCOVERY: '结构发现', DIFF: '结构比对', SAMPLE: '样本处理', PERSISTENCE: '技术元数据', LLM: '业务元数据', COMPLETE: '完成', FAILED: '失败' }
+const jobStatusLabels: Record<MetadataJob['status'], string> = { QUEUED: '排队中', RUNNING: '处理中', SUCCEEDED: '已完成', PARTIAL: '部分完成', FAILED: '失败' }
+const jobStages = ['DISCOVERY', 'PERSISTENCE', 'LLM', 'COMPLETE'] as const
+const jobStageDetails: Record<string, string> = { DISCOVERY: '读取源库表与字段', PERSISTENCE: '保存稳定技术标识', LLM: '生成业务定义建议', COMPLETE: '资产可进入数据集建模' }
+const diffChangeLabels: Record<string, string> = { REMOVED: '已移除', ADDED: '新增字段', REACTIVATED: '重新启用' }
+const renderJobStages = (job: MetadataJob) => <ol className="asset-job-stages">{jobStages.map((stage, index) => {
+  const activeIndex = ['QUEUED', 'DISCOVERY', 'DIFF', 'SAMPLE', 'PERSISTENCE', 'LLM', 'COMPLETE'].indexOf(job.stage)
+  const stageIndex = [1, 4, 5, 6][index]
+  const complete = activeIndex > stageIndex || job.status === 'SUCCEEDED'
+  const current = activeIndex === stageIndex
+  return <li className={`${complete ? 'is-complete' : ''}${current ? ' is-current' : ''}`} key={stage}>{complete ? <CheckCircle size={18} weight="fill" /> : current ? <Circle size={18} weight="fill" /> : <Circle size={18} />}<span><strong>{stageLabels[stage]}</strong><small>{jobStageDetails[stage]}</small></span></li>
+})}</ol>
 
 const tagsFromText = (value: string) => [...new Set(value.split(',').map(item => item.trim()).filter(Boolean))]
 const tableKey = (table: Pick<DiscoveredTableRecord, 'catalogName' | 'schemaName' | 'name'>) => `${table.catalogName}\u001f${table.schemaName}\u001f${table.name}`
@@ -169,23 +180,6 @@ const querySuffix = (snapshot: boolean, qa: boolean, extra = '') => {
     values.forEach((value, key) => query.set(key, value))
   }
   return `?${query.toString()}`
-}
-
-function AssetFlow({ current, hasTables }: { current: AssetMode; hasTables: boolean }) {
-  const steps = [
-    { label: '连接已发布', detail: '配置与测试收据', complete: true },
-    { label: '发现并导入', detail: '选择源表与样本策略', complete: hasTables && current !== 'discover' },
-    { label: '业务元数据', detail: '完善表与字段定义', complete: current === 'detail' },
-    { label: '数据集建模', detail: '使用可用资产', complete: false },
-  ]
-  const currentIndex = current === 'discover' ? 1 : current === 'detail' ? 2 : hasTables ? 2 : 1
-  return <section className="asset-flow" aria-label="数据源资产化进度">
-    {steps.map((step, index) => <article className={`${step.complete ? 'is-complete' : ''}${index === currentIndex ? ' is-current' : ''}`} key={step.label}>
-      <span>{step.complete ? <Check size={14} weight="bold" /> : index + 1}</span>
-      <div><strong>{step.label}</strong><small>{step.detail}</small></div>
-      {index < steps.length - 1 && <CaretRight size={16} aria-hidden="true" />}
-    </article>)}
-  </section>
 }
 
 function PageNotice({ notice, onClose }: { notice: Notice | null; onClose: () => void }) {
@@ -226,6 +220,7 @@ export function DataSourceAssetsPage() {
   const [sampleMode, setSampleMode] = useState<MetadataSampleMode>('MASK')
   const [tableForm, setTableForm] = useState({ businessName: snapshotTableForRoute.businessName, businessDescription: snapshotTableForRoute.businessDescription, tags: snapshotTableForRoute.tags.join(', '), sensitivityLevel: snapshotTableForRoute.sensitivityLevel, visibility: snapshotTableForRoute.visibility, manualLocked: snapshotTableForRoute.manualLocked })
   const [preview, setPreview] = useState<DataSourceTablePreview | null>(null)
+  const [sidePanel, setSidePanel] = useState<'diffs' | 'job' | null>(null)
   const visibleJob = designSnapshot && params.get('job') === 'importing' ? snapshotJob : job
   const breakingDiffs = diffs.filter(diff => diff.breaking)
 
@@ -348,16 +343,25 @@ export function DataSourceAssetsPage() {
     }
   }
 
-  const refreshAssets = async () => {
-    setBusy('refresh')
+  // 全量 / 单表刷新都走 FULL，否则结构未变的字段会被增量模式跳过。
+  const refreshAssets = async (mode: MetadataRefreshMode, table?: DataSourceTableRecord) => {
+    setBusy(table ? `refresh:${table.id}` : `refresh:${mode}`)
     try {
       if (designSnapshot) {
-        setJob({ ...snapshotJob, kind: 'REFRESH', mode: 'INCREMENTAL' })
-        setNotice({ tone: 'success', message: '已提交增量刷新任务' })
+        setJob({ ...snapshotJob, kind: 'REFRESH', mode })
+        setNotice({ tone: 'success', message: `已提交${mode === 'INCREMENTAL' ? '增量' : '全量'}刷新任务` })
         return
       }
-      const created = await dataSourceAPI.refreshTables(sourceId, 'INCREMENTAL', undefined, 'MASK')
+      const created = await dataSourceAPI.refreshTables(sourceId, mode, table ? [table.id] : undefined, 'MASK')
       setJob(created)
+      setNotice({
+        tone: 'success',
+        message: table
+          ? `已提交“${table.businessName || table.tableName}”的单表刷新任务`
+          : mode === 'INCREMENTAL'
+            ? '已提交增量刷新任务，仅处理新增或结构变化的字段'
+            : '已提交全量刷新任务，将重新处理全部活动表和字段',
+      })
     } catch (cause) {
       setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : '提交刷新任务失败' })
     } finally {
@@ -460,6 +464,15 @@ export function DataSourceAssetsPage() {
   const shellClass = `data-source-assets-shell mode-${mode}${qaViewport1920 ? ' qa-viewport-1920' : ''}`
   const title = mode === 'discover' ? '发现并导入数据表' : mode === 'detail' ? (tableRecord?.businessName || tableRecord?.tableName || '完善数据资产') : `${source?.name || '数据源'} · 数据表资产`
   const titleMeta = mode === 'discover' ? '选择源表、样本策略并启动后台元数据处理' : mode === 'detail' ? `${tableRecord?.schemaName || ''}.${tableRecord?.tableName || ''} · 完善表与字段的业务定义` : '将已发布连接转换为可检索、可治理、可建模的数据资产'
+  const refreshBlocked = busy.startsWith('refresh:') || isJobActive(visibleJob)
+  const renderDiff = (diff: MetadataDiff) => <article className={diff.breaking ? 'is-breaking' : 'is-safe'} key={diff.id}>
+    <span>{diff.breaking ? <WarningCircle size={17} weight="fill" /> : <CheckCircle size={17} weight="fill" />}</span>
+    <div><strong>{diff.objectKey}</strong><small>{diffChangeLabels[diff.changeType] || '结构已变化'} · {formatTime(diff.createdAt)}</small></div>
+    <em>{diff.breaking ? `${diff.staleCount || diff.impactCount} 个下游已冻结` : '兼容'}</em>
+    {diff.breaking && diff.impact && diff.impact.length > 0 && <div className="asset-change-impact">
+      {diff.impact.map(item => <AppButton link key={item.id} onClick={() => navigate(`/datasets/${item.downstreamId}/edit`)}>{item.downstreamName}<ArrowRight size={13} /></AppButton>)}
+    </div>}
+  </article>
 
   return <AppShell
     className={shellClass}
@@ -468,21 +481,23 @@ export function DataSourceAssetsPage() {
     titleMeta={<span className="asset-page-title-meta">{titleMeta}</span>}
     actions={<>
       <AppButton className="asset-back-button" onClick={mode === 'catalog' ? () => navigate(`/data-sources${suffix}`) : goCatalog}><ArrowLeft size={16} />{mode === 'catalog' ? '返回数据源' : '返回资产目录'}</AppButton>
-      {mode === 'catalog' && canManage && <><AppButton onClick={() => void refreshAssets()} disabled={busy === 'refresh' || isJobActive(visibleJob)}><ArrowClockwise size={16} />{busy === 'refresh' ? '提交中…' : '增量刷新'}</AppButton><AppButton variant="primary" onClick={goDiscover}><Plus size={16} weight="bold" />发现数据表</AppButton></>}
+      {mode === 'catalog' && canManage && <>
+        <AppButton title="只重新处理新增或结构变化的字段" disabled={refreshBlocked} onClick={() => void refreshAssets('INCREMENTAL')}><ArrowClockwise size={16} />{busy === 'refresh:INCREMENTAL' ? '提交中…' : '增量刷新'}</AppButton>
+        <AppButton title="重新处理全部活动表和字段，耗时和模型调用量更高" disabled={refreshBlocked} onClick={() => void refreshAssets('FULL')}><ArrowsClockwise size={16} />{busy === 'refresh:FULL' ? '提交中…' : '全量刷新'}</AppButton>
+        <AppButton variant="primary" onClick={goDiscover}><Plus size={16} weight="bold" />发现数据表</AppButton>
+      </>}
       {mode === 'discover' && canManage && <AppButton variant="primary" disabled={busy === 'import' || selectedKeys.length === 0} onClick={() => void importSelected()}><ArrowRight size={16} />{busy === 'import' ? '正在提交…' : `导入 ${selectedKeys.length} 张表`}</AppButton>}
       {mode === 'detail' && <><AppButton onClick={() => void openPreview()} disabled={busy === 'preview'}><Eye size={16} />预览样本</AppButton>{canManage && <><AppButton onClick={() => void saveMetadata()} disabled={busy === 'save'}><FloppyDisk size={16} />{busy === 'save' ? '保存中…' : '保存'}</AppButton><AppButton variant="primary" onClick={() => void completeMetadata()} disabled={busy === 'complete' || tableReadiness < 100}><CheckCircle size={16} />完成资产化</AppButton></>}</>}
     </>}
   >
     <PageNotice notice={notice} onClose={() => setNotice(null)} />
     <main className="asset-page-content">
-      <AssetFlow current={mode} hasTables={tables.length > 0} />
-
       {loading ? <section className="asset-page-state">正在加载数据源资产…</section> : !source ? <section className="asset-page-state is-error">数据源不存在或无权访问</section> : mode === 'catalog' ? <>
         <section className="asset-summary-strip" aria-label="资产概览">
-          <article><span className="is-blue"><Table size={19} weight="duotone" /></span><small>数据表</small><strong>{tables.length}</strong></article>
-          <article><span className="is-green"><CheckCircle size={19} weight="duotone" /></span><small>已完善</small><strong>{tables.filter(item => item.enrichmentStatus === 'SUCCEEDED').length}</strong></article>
-          <article><span className="is-orange"><Sparkle size={19} weight="duotone" /></span><small>处理中</small><strong>{tables.filter(item => item.enrichmentStatus === 'RUNNING' || item.enrichmentStatus === 'PENDING').length}</strong></article>
-          <article><span className="is-red"><WarningCircle size={19} weight="duotone" /></span><small>需要处理</small><strong>{tables.filter(item => item.enrichmentStatus === 'FAILED').length}</strong></article>
+          <article title="已从源库导入并纳管的表资产数量，不含尚未导入的源表"><span className="is-blue"><Table size={19} weight="duotone" /></span><small>已纳管表</small><strong>{tables.length}</strong></article>
+          <article title="业务元数据已完成且与当前表结构一致"><span className="is-green"><CheckCircle size={19} weight="duotone" /></span><small>已完善</small><strong>{tables.filter(item => item.enrichmentStatus === 'SUCCEEDED').length}</strong></article>
+          <article title="排队或正在后台处理的表"><span className="is-orange"><Sparkle size={19} weight="duotone" /></span><small>处理中</small><strong>{tables.filter(item => item.enrichmentStatus === 'RUNNING' || item.enrichmentStatus === 'PENDING').length}</strong></article>
+          <article title="元数据处理失败，需要重试刷新或手工完善"><span className="is-red"><WarningCircle size={19} weight="duotone" /></span><small>处理失败</small><strong>{tables.filter(item => item.enrichmentStatus === 'FAILED').length}</strong></article>
         </section>
         <div className="asset-catalog-layout">
           <section className="asset-table-catalog" aria-label="数据表资产目录">
@@ -503,7 +518,10 @@ export function DataSourceAssetsPage() {
                     <span role="cell"><em className={`asset-status is-${item.enrichmentStatus.toLowerCase()}`}>{enrichmentLabels[item.enrichmentStatus]}</em><small>{formatTime(item.lastSyncAt)}</small></span>
                     <span role="cell"><em className={`asset-sensitivity is-${item.sensitivityLevel.toLowerCase()}`}>{sensitivityLabels[item.sensitivityLevel]}</em><small>{item.visibility === 'TENANT_PUBLIC' ? '领域内共享' : '仅自己'}</small></span>
                   </AppButton>
-                  <AppButton link className="asset-row-action" aria-label={`进入${item.businessName || item.tableName}${canManage ? '完善' : '查看'}页`} onClick={() => goDetail(item.id)}>{canManage ? '去完善' : '查看'}<ArrowRight size={14} /></AppButton>
+                  <div className="asset-row-actions" role="cell">
+                    {canManage && <AppButton className="asset-row-refresh" aria-label={`刷新${item.businessName || item.tableName}的结构与业务元数据`} title="重新采集该表结构并重新生成业务元数据" disabled={refreshBlocked} onClick={() => void refreshAssets('FULL', item)}><ArrowClockwise size={15} /></AppButton>}
+                    <AppButton link className="asset-row-action" aria-label={`进入${item.businessName || item.tableName}${canManage ? '完善' : '查看'}页`} onClick={() => goDetail(item.id)}>{canManage ? '去完善' : '查看'}<ArrowRight size={14} /></AppButton>
+                  </div>
                 </article>)}
                 {filteredTables.length === 0 && <div className="asset-page-state"><strong>没有符合条件的数据表</strong><span>调整筛选条件或从源库发现新表。</span></div>}
               </div>
@@ -512,37 +530,25 @@ export function DataSourceAssetsPage() {
 
           <div className="asset-catalog-side">
           {diffs.length > 0 && <section className={`asset-change-governance${breakingDiffs.length > 0 ? ' has-breaking' : ''}`} aria-label="结构变更治理">
-            <header>
+            <button className="asset-panel-open" type="button" aria-label="展开结构变更治理详情" onClick={() => setSidePanel('diffs')}>
               <span><WarningCircle size={18} weight="duotone" /></span>
               <div><strong>结构变更治理</strong><small>{breakingDiffs.length > 0 ? `${breakingDiffs.length} 项破坏性变更已触发下游保护` : '最近变更均可向后兼容'}</small></div>
               <em>{diffs.length} 项</em>
-            </header>
-            <div className="asset-change-list">
-              {diffs.slice(0, 3).map(diff => <article className={diff.breaking ? 'is-breaking' : 'is-safe'} key={diff.id}>
-                <span>{diff.breaking ? <WarningCircle size={17} weight="fill" /> : <CheckCircle size={17} weight="fill" />}</span>
-                <div><strong>{diff.objectKey}</strong><small>{diff.changeType === 'REMOVED' ? '已移除' : diff.changeType === 'ADDED' ? '新增字段' : diff.changeType === 'REACTIVATED' ? '重新启用' : '结构已变化'} · {formatTime(diff.createdAt)}</small></div>
-                <em>{diff.breaking ? `${diff.staleCount || diff.impactCount} 个下游已冻结` : '兼容'}</em>
-                {diff.breaking && diff.impact && diff.impact.length > 0 && <div className="asset-change-impact">
-                  {diff.impact.slice(0, 2).map(item => <AppButton link key={item.id} onClick={() => navigate(`/datasets/${item.downstreamId}/edit`)}>{item.downstreamName}<ArrowRight size={13} /></AppButton>)}
-                  {diff.impact.length > 2 && <small>另有 {diff.impact.length - 2} 个受影响下游</small>}
-                </div>}
-              </article>)}
-            </div>
+            </button>
+            <div className="asset-change-list">{diffs.map(renderDiff)}</div>
           </section>}
 
-          <aside className="asset-job-panel" aria-label="元数据处理任务">
-            <header><div><span className="is-blue"><Sparkle size={18} weight="duotone" /></span><div><strong>元数据处理任务</strong><small>{visibleJob ? `任务 ${visibleJob.id.slice(-8)}` : '后台任务可断线恢复'}</small></div></div>{visibleJob && <em className={`asset-job-status is-${visibleJob.status.toLowerCase()}`}>{visibleJob.status === 'RUNNING' ? '处理中' : visibleJob.status === 'QUEUED' ? '排队中' : visibleJob.status === 'SUCCEEDED' ? '已完成' : visibleJob.status === 'PARTIAL' ? '部分完成' : '失败'}</em>}</header>
-            {!visibleJob ? <div className="asset-job-empty"><CheckCircle size={34} weight="duotone" /><strong>当前没有运行中的任务</strong><p>{canManage ? '发现数据表或增量刷新后，可在这里持续查看处理阶段。' : '这是其他成员共享的数据源，当前以只读方式展示资产状态。'}</p>{canManage && <AppButton onClick={goDiscover}>发现新数据表</AppButton>}</div> : <>
+          <aside className={`asset-job-panel${visibleJob ? ' has-job' : ''}`} aria-label="元数据处理任务">
+            <button className="asset-panel-open" type="button" aria-label="展开元数据处理任务详情" onClick={() => setSidePanel('job')}>
+              <span className="is-blue"><Sparkle size={18} weight="duotone" /></span>
+              <div><strong>元数据处理任务</strong><small>{visibleJob ? `任务 ${visibleJob.id.slice(-8)}` : '后台任务可断线恢复'}</small></div>
+              {visibleJob && <em className={`asset-job-status is-${visibleJob.status.toLowerCase()}`}>{jobStatusLabels[visibleJob.status]}</em>}
+            </button>
+            {!visibleJob ? <div className="asset-job-empty"><CheckCircle size={34} weight="duotone" /><strong>当前没有运行中的任务</strong><p>{canManage ? '发现数据表或增量刷新后，可在这里持续查看处理阶段。' : '这是其他成员共享的数据源，当前以只读方式展示资产状态。'}</p>{canManage && <AppButton onClick={goDiscover}>发现新数据表</AppButton>}</div> : <div className="asset-job-scroll">
               <section className="asset-job-progress"><div><strong>{visibleJob.kind === 'IMPORT' ? '导入并完善元数据' : '增量刷新元数据'}</strong><span>{visibleJob.total ? Math.round(visibleJob.completed / visibleJob.total * 100) : 0}%</span></div><progress max={Math.max(1, visibleJob.total)} value={visibleJob.completed} /><p>已处理 {visibleJob.completed} / {visibleJob.total} 张 · 成功 {visibleJob.succeeded} · 失败 {visibleJob.failed}</p>{visibleJob.currentTable && <small>当前：{visibleJob.currentTable}</small>}</section>
-              <ol className="asset-job-stages">{['DISCOVERY', 'PERSISTENCE', 'LLM', 'COMPLETE'].map((stage, index) => {
-                const activeIndex = ['QUEUED', 'DISCOVERY', 'DIFF', 'SAMPLE', 'PERSISTENCE', 'LLM', 'COMPLETE'].indexOf(visibleJob.stage)
-                const stageIndex = [1, 4, 5, 6][index]
-                const complete = activeIndex > stageIndex || visibleJob.status === 'SUCCEEDED'
-                const current = activeIndex === stageIndex
-                return <li className={`${complete ? 'is-complete' : ''}${current ? ' is-current' : ''}`} key={stage}>{complete ? <CheckCircle size={18} weight="fill" /> : current ? <Circle size={18} weight="fill" /> : <Circle size={18} />}<span><strong>{stageLabels[stage]}</strong><small>{stage === 'DISCOVERY' ? '读取源库表与字段' : stage === 'PERSISTENCE' ? '保存稳定技术标识' : stage === 'LLM' ? '生成业务定义建议' : '资产可进入数据集建模'}</small></span></li>
-              })}</ol>
-              <section className="asset-job-log"><strong>安全运行摘要</strong>{(visibleJob.logs || []).slice(-4).map((entry, index) => <p key={`${entry.timestamp}-${index}`}><time>{formatTime(entry.timestamp)}</time><span>{entry.tableName ? `${entry.tableName} · ` : ''}{entry.message}</span></p>)}</section>
-            </>}
+              {renderJobStages(visibleJob)}
+              <section className="asset-job-log"><strong>安全运行摘要</strong>{(visibleJob.logs || []).map((entry, index) => <p key={`${entry.timestamp}-${index}`}><time>{formatTime(entry.timestamp)}</time><span>{entry.tableName ? `${entry.tableName} · ` : ''}{entry.message}</span></p>)}</section>
+            </div>}
             <footer><Sparkle size={16} weight="fill" /><span><strong>下一步：完善业务元数据</strong><small>处理完成后逐表确认名称、口径与敏感级。</small></span></footer>
           </aside>
           </div>
@@ -617,5 +623,29 @@ export function DataSourceAssetsPage() {
     </main>
 
     {preview && <div className="asset-preview-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setPreview(null) }}><section className="asset-preview-dialog" role="dialog" aria-modal="true" aria-label="脱敏样本预览"><header><div><span className="eyebrow">只读样本</span><h2>{tableRecord?.businessName || tableRecord?.tableName}</h2><p>最多 5 行；敏感字段按当前权限与策略处理。</p></div><AppButton text circle aria-label="关闭样本预览" onClick={() => setPreview(null)}><X size={18} /></AppButton></header><div><table><thead><tr>{preview.columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{preview.rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((value, index) => <td key={`${rowIndex}-${index}`}>{String(value ?? '—')}</td>)}</tr>)}</tbody></table></div><footer><span>返回 {preview.rowCount} 行脱敏样本</span><AppButton variant="primary" onClick={() => setPreview(null)}>完成查看</AppButton></footer></section></div>}
+    {sidePanel && <div className="asset-preview-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) setSidePanel(null) }}>
+      <section className="asset-preview-dialog asset-side-dialog" role="dialog" aria-modal="true" aria-label={sidePanel === 'diffs' ? '结构变更治理' : '元数据处理任务'}>
+        <header>
+          <div>
+            <span className="eyebrow">{sidePanel === 'diffs' ? '结构变更' : '后台任务'}</span>
+            <h2>{sidePanel === 'diffs' ? '结构变更治理' : '元数据处理任务'}</h2>
+            <p>{sidePanel === 'diffs'
+              ? `共 ${diffs.length} 项变更，其中破坏性变更 ${breakingDiffs.length} 项`
+              : visibleJob ? `任务 ${visibleJob.id.slice(-8)} · ${jobStatusLabels[visibleJob.status]}` : '当前没有运行中的任务'}</p>
+          </div>
+          <AppButton text circle aria-label="关闭详情" onClick={() => setSidePanel(null)}><X size={18} /></AppButton>
+        </header>
+        <div>
+          {sidePanel === 'diffs'
+            ? <div className="asset-change-list is-dialog">{diffs.map(renderDiff)}</div>
+            : !visibleJob ? <div className="asset-job-empty"><CheckCircle size={34} weight="duotone" /><strong>当前没有运行中的任务</strong><p>发现数据表或增量刷新后，可在这里查看完整处理阶段与运行日志。</p></div> : <>
+              <section className="asset-job-progress"><div><strong>{visibleJob.kind === 'IMPORT' ? '导入并完善元数据' : '增量刷新元数据'}</strong><span>{visibleJob.total ? Math.round(visibleJob.completed / visibleJob.total * 100) : 0}%</span></div><progress max={Math.max(1, visibleJob.total)} value={visibleJob.completed} /><p>已处理 {visibleJob.completed} / {visibleJob.total} 张 · 成功 {visibleJob.succeeded} · 跳过 {visibleJob.skipped} · 失败 {visibleJob.failed}</p>{visibleJob.currentTable && <small>当前：{visibleJob.currentTable}</small>}</section>
+              {renderJobStages(visibleJob)}
+              <section className="asset-job-log"><strong>安全运行摘要</strong>{(visibleJob.logs || []).map((entry, index) => <p key={`${entry.timestamp}-${index}`}><time>{formatTime(entry.timestamp)}</time><span>{entry.tableName ? `${entry.tableName} · ` : ''}{entry.message}</span></p>)}</section>
+            </>}
+        </div>
+        <footer><span>{sidePanel === 'diffs' ? '破坏性变更会冻结下游数据集，确认后再重新发布。' : '任务在后台执行，可断线恢复。'}</span><AppButton variant="primary" onClick={() => setSidePanel(null)}>知道了</AppButton></footer>
+      </section>
+    </div>}
   </AppShell>
 }

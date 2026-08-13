@@ -446,14 +446,15 @@
   background: #fff;
   box-shadow: 0 8px 24px #2d5d8d0a;
 }
-.domain-access-workspace.has-detail { grid-template-columns: minmax(720px, 1fr) 420px; }
+/* 详情栏打开时表格列必须能收窄，否则最小宽度之和会把「操作」列挤出容器。 */
+.domain-access-workspace.has-detail { grid-template-columns: minmax(0, 1fr) 400px; }
 .domain-access-table-panel { min-width: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: #fff; }
 .domain-catalog-header,
 .domain-catalog-row {
   display: grid;
-  grid-template-columns: minmax(160px, 1.05fr) minmax(230px, 1.55fr) minmax(92px, .65fr) minmax(90px, .62fr) minmax(120px, .76fr) 94px;
+  grid-template-columns: minmax(140px, 1.05fr) minmax(170px, 1.55fr) minmax(76px, .65fr) minmax(84px, .62fr) minmax(104px, .76fr) 94px;
   align-items: center;
-  gap: 18px;
+  gap: 14px;
 }
 .domain-catalog-header {
   min-height: 54px;
