@@ -12,7 +12,7 @@ import (
 // sourceConnectionIdentity identifies one logical database login inside a
 // business domain. Password rotation does not create a different connection.
 func sourceConnectionIdentity(source Source) string {
-	if source.Type != TypeMySQL && source.Type != TypeOracle {
+	if !IsDatabaseType(source.Type) {
 		return ""
 	}
 	port := connectionIdentityPort(source.Config["port"])

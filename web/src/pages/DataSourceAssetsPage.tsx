@@ -284,19 +284,20 @@ export function DataSourceAssetsPage() {
   const params = useMemo(() => new URLSearchParams(location.search), [location.search])
   const designSnapshot = import.meta.env.DEV && params.has('snapshot')
   const qaViewport1920 = designSnapshot && params.get('qa') === '1920'
+  const emptySnapshot = designSnapshot && params.get('state') === 'empty'
   const mode: AssetMode = location.pathname.endsWith('/discover') ? 'discover' : tableId ? 'detail' : 'catalog'
   const suffix = querySuffix(designSnapshot, qaViewport1920)
   const snapshotTableForRoute = snapshotTables.find(item => item.id === tableId) || snapshotTables[0]
   const snapshotColumnsForRoute = snapshotTableForRoute.id === snapshotTables[0].id ? snapshotColumns : snapshotColumns.slice(0, 6).map((column, index) => ({ ...column, id: `${snapshotTableForRoute.id}-column-${index}`, tableId: snapshotTableForRoute.id }))
   const [source, setSource] = useState<DataSourceRecord | null>(designSnapshot ? snapshotSource : null)
   const [canManage, setCanManage] = useState(designSnapshot)
-  const [tables, setTables] = useState<DataSourceTableRecord[]>(designSnapshot ? snapshotTables : [])
+  const [tables, setTables] = useState<DataSourceTableRecord[]>(designSnapshot && !emptySnapshot ? snapshotTables : [])
   const [tableRecord, setTableRecord] = useState<DataSourceTableRecord | null>(designSnapshot ? snapshotTableForRoute : null)
   const [columns, setColumns] = useState<DataSourceColumnRecord[]>(designSnapshot ? snapshotColumnsForRoute : [])
   const [originalColumns, setOriginalColumns] = useState<DataSourceColumnRecord[]>(designSnapshot ? snapshotColumnsForRoute : [])
   const [discovered, setDiscovered] = useState<DiscoveredTableRecord[]>(designSnapshot ? snapshotDiscovered : [])
   const [job, setJob] = useState<MetadataJob | null>(designSnapshot && params.get('job') === 'importing' ? snapshotJob : null)
-  const [diffs, setDiffs] = useState<MetadataDiff[]>(designSnapshot ? snapshotDiffs : [])
+  const [diffs, setDiffs] = useState<MetadataDiff[]>(designSnapshot && !emptySnapshot ? snapshotDiffs : [])
   const [loading, setLoading] = useState(!designSnapshot)
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState<Notice | null>(null)
@@ -308,6 +309,7 @@ export function DataSourceAssetsPage() {
   const [preview, setPreview] = useState<DataSourceTablePreview | null>(null)
   const [sidePanel, setSidePanel] = useState<'diffs' | 'job' | null>(null)
   const jobSignature = useRef('')
+  const selectAllRef = useRef<HTMLInputElement>(null)
   const visibleJob = designSnapshot && params.get('job') === 'importing' ? snapshotJob : job
   const breakingDiffs = diffs.filter(diff => diff.breaking)
 
@@ -421,14 +423,34 @@ export function DataSourceAssetsPage() {
   const filteredDiscovered = useMemo(() => discovered.filter(table => {
     const query = keyword.trim().toLocaleLowerCase()
     return !query || table.name.toLocaleLowerCase().includes(query) || table.sourceComment.toLocaleLowerCase().includes(query)
-  }), [discovered, keyword])
+  }).sort((left, right) => Number(imported.has(tableKey(left))) - Number(imported.has(tableKey(right)))), [discovered, imported, keyword])
+  const selectedKeySet = useMemo(() => new Set(selectedKeys), [selectedKeys])
+  const selectableDiscoveredKeys = useMemo(() => filteredDiscovered
+    .filter(table => !imported.has(tableKey(table)))
+    .map(tableKey), [filteredDiscovered, imported])
+  const selectedSelectableCount = selectableDiscoveredKeys.filter(key => selectedKeySet.has(key)).length
+  const allSelectableDiscoveredSelected = selectableDiscoveredKeys.length > 0
+    && selectedSelectableCount === selectableDiscoveredKeys.length
+  const someSelectableDiscoveredSelected = selectedSelectableCount > 0 && !allSelectableDiscoveredSelected
+
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = someSelectableDiscoveredSelected
+  }, [someSelectableDiscoveredSelected])
+
+  const toggleAllDiscovered = (checked: boolean) => {
+    setSelectedKeys(current => {
+      const visibleKeys = new Set(selectableDiscoveredKeys)
+      return checked
+        ? Array.from(new Set([...current, ...selectableDiscoveredKeys]))
+        : current.filter(key => !visibleKeys.has(key))
+    })
+  }
   const tableReadiness = useMemo(() => {
     if (!tableRecord || columns.length === 0) return 0
     const tableComplete = Boolean(tableForm.businessName.trim() && tableForm.businessDescription.trim())
     const completeColumns = columns.filter(column => column.businessName.trim() && column.businessDescription.trim() && column.semanticType.trim()).length
     return Math.round(((tableComplete ? 1 : 0) + completeColumns) / (columns.length + 1) * 100)
   }, [columns, tableForm.businessDescription, tableForm.businessName, tableRecord])
-
   const goCatalog = () => navigate(`/data-sources/${sourceId}/assets${suffix}`)
   const goDiscover = () => navigate(`/data-sources/${sourceId}/assets/discover${suffix}`)
   const goDetail = (id: string) => navigate(`/data-sources/${sourceId}/assets/${id}${suffix}`)
@@ -558,8 +580,8 @@ export function DataSourceAssetsPage() {
   }
 
   const shellClass = `data-source-assets-shell mode-${mode}${qaViewport1920 ? ' qa-viewport-1920' : ''}`
-  const title = mode === 'discover' ? '发现并导入数据表' : mode === 'detail' ? (tableRecord?.businessName || tableRecord?.tableName || '完善数据资产') : `${source?.name || '数据源'} · 数据表资产`
-  const titleMeta = mode === 'discover' ? '选择源表、样本策略并启动后台元数据处理' : mode === 'detail' ? `${tableRecord?.schemaName || ''}.${tableRecord?.tableName || ''}` : '将已发布连接转换为可检索、可治理、可建模的数据资产'
+  const title = mode === 'discover' ? '发现数据表' : mode === 'detail' ? (tableRecord?.businessName || tableRecord?.tableName || '完善数据资产') : (source?.name || '数据源')
+  const titleMeta = mode === 'discover' ? '选择源表并设置样本策略' : mode === 'detail' ? `${tableRecord?.schemaName || ''}.${tableRecord?.tableName || ''}` : [source?.type, source?.code].filter(Boolean).join(' · ')
   const refreshBlocked = busy.startsWith('refresh:') || isJobActive(visibleJob)
   const renderDiff = (diff: MetadataDiff) => <article className={diff.breaking ? 'is-breaking' : 'is-safe'} key={diff.id}>
     <span>{diff.breaking ? <WarningCircle size={17} weight="fill" /> : <CheckCircle size={17} weight="fill" />}</span>
@@ -573,34 +595,46 @@ export function DataSourceAssetsPage() {
   return <AppShell
     className={shellClass}
     title={title}
-    eyebrow={mode === 'detail' ? '数据资产 · 业务元数据' : '数据源资产化'}
-    titleMeta={mode === 'detail'
-      ? <span className="asset-page-title-meta"><span className="asset-title-table"><Database size={13} weight="duotone" />{titleMeta}</span><span className="asset-title-description">表与字段的业务语义</span></span>
-      : <span className="asset-page-title-meta">{titleMeta}</span>}
+    titleMeta={mode === 'discover'
+      ? <span className="asset-page-title-meta">{titleMeta}</span>
+      : <span className="asset-page-title-meta">{titleMeta && <span className="asset-title-table"><Database size={13} weight="duotone" />{titleMeta}</span>}</span>}
+    leading={<AppButton
+      className="asset-back-button"
+      aria-label={mode === 'catalog' ? '返回数据源' : '返回资产目录'}
+      title={mode === 'catalog' ? '返回数据源' : '返回资产目录'}
+      onClick={mode === 'catalog' ? () => navigate(`/data-sources${suffix}`) : goCatalog}
+    ><ArrowLeft size={18} /></AppButton>}
     actions={<>
-      <AppButton className="asset-back-button" onClick={mode === 'catalog' ? () => navigate(`/data-sources${suffix}`) : goCatalog}><ArrowLeft size={16} />{mode === 'catalog' ? '返回数据源' : '返回资产目录'}</AppButton>
       {mode === 'catalog' && canManage && <>
         <AppButton title="只重新处理新增或结构变化的字段" disabled={refreshBlocked} onClick={() => void refreshAssets('INCREMENTAL')}><ArrowClockwise size={16} />{busy === 'refresh:INCREMENTAL' ? '提交中…' : '增量刷新'}</AppButton>
         <AppButton title="重新处理全部活动表和字段，耗时和模型调用量更高" disabled={refreshBlocked} onClick={() => void refreshAssets('FULL')}><ArrowsClockwise size={16} />{busy === 'refresh:FULL' ? '提交中…' : '全量刷新'}</AppButton>
         <AppButton variant="primary" onClick={goDiscover}><Plus size={16} weight="bold" />发现数据表</AppButton>
       </>}
-      {mode === 'discover' && canManage && <AppButton variant="primary" disabled={busy === 'import' || selectedKeys.length === 0} onClick={() => void importSelected()}><ArrowRight size={16} />{busy === 'import' ? '正在提交…' : `导入 ${selectedKeys.length} 张表`}</AppButton>}
       {mode === 'detail' && <><AppButton onClick={() => void openPreview()} disabled={busy === 'preview'}><Eye size={16} />预览样本</AppButton>{canManage && <><AppButton onClick={() => void saveMetadata()} disabled={busy === 'save'}><FloppyDisk size={16} />{busy === 'save' ? '保存中…' : '保存'}</AppButton><AppButton variant="primary" onClick={() => void completeMetadata()} disabled={busy === 'complete' || tableReadiness < 100}><CheckCircle size={16} />完成资产化</AppButton></>}</>}
     </>}
   >
     <PageNotice notice={notice} onClose={() => setNotice(null)} />
     <main className="asset-page-content">
       {loading ? <section className="asset-page-state">正在加载数据源资产…</section> : !source ? <section className="asset-page-state is-error">数据源不存在或无权访问</section> : mode === 'catalog' ? <>
+        {/* 计数为 0 的指标整体降噪（is-zero），让真正发生的规模和异常先被看到。 */}
         <section className="asset-summary-strip" aria-label="资产概览">
-          <article title="已从源库导入并纳管的表资产数量，不含尚未导入的源表"><span className="is-blue"><Table size={18} weight="duotone" /></span><small>已纳管表</small><strong>{tables.length}</strong></article>
-          <article title="业务元数据已完成且与当前表结构一致"><span className="is-green"><CheckCircle size={18} weight="duotone" /></span><small>已完善</small><strong>{summary.succeeded}</strong></article>
-          <article title="排队或正在后台处理的表，刷新过程中会实时变化"><span className="is-orange"><Sparkle size={18} weight="duotone" /></span><small>处理中</small><strong>{summary.processing}</strong></article>
-          <article title="本次刷新中结构未变化或无需处理而跳过的表"><span className="is-grey"><MinusCircle size={18} weight="duotone" /></span><small>本次跳过</small><strong>{summary.skipped}</strong></article>
-          <article title="元数据处理失败，需要重试刷新或手工完善"><span className="is-red"><WarningCircle size={18} weight="duotone" /></span><small>处理失败</small><strong>{summary.failed}</strong></article>
+          {([
+            ['blue', <Table size={18} weight="duotone" />, '已纳管表', tables.length, '已从源库导入并纳管的表资产数量，不含尚未导入的源表'],
+            ['green', <CheckCircle size={18} weight="duotone" />, '已完善', summary.succeeded, '业务元数据已完成且与当前表结构一致'],
+            ['orange', <Sparkle size={18} weight="duotone" />, '处理中', summary.processing, '排队或正在后台处理的表，刷新过程中会实时变化'],
+            ['grey', <MinusCircle size={18} weight="duotone" />, '本次跳过', summary.skipped, '本次刷新中结构未变化或无需处理而跳过的表'],
+            ['red', <WarningCircle size={18} weight="duotone" />, '处理失败', summary.failed, '元数据处理失败，需要重试刷新或手工完善'],
+          ] as const).map(([tone, icon, label, value, hint]) => <article className={`is-summary-${tone}${value === 0 ? ' is-zero' : ''}`} key={label} title={hint}>
+            <span className="asset-summary-label"><span className={`is-${tone}`}>{icon}</span><small>{label}</small></span>
+            <strong>{value}</strong>
+          </article>)}
         </section>
         <div className="asset-catalog-layout">
           <section className="asset-table-catalog" aria-label="数据表资产目录">
-            <header><div><h2>数据表资产</h2><p>选择数据表继续完善表、字段与敏感级。</p></div><span>共 {filteredTables.length} 张</span></header>
+            <header>
+              <div className="asset-catalog-heading"><span><Table size={19} weight="duotone" /></span><div><h2>数据表资产</h2><p>统一维护业务语义、字段定义与敏感级。</p></div></div>
+              <span className="asset-catalog-count"><strong>{filteredTables.length}</strong> / {tables.length} 张</span>
+            </header>
             <div className="asset-table-filters">
               <label><MagnifyingGlass size={17} /><input aria-label="搜索数据表资产" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索业务名、物理表名或说明" /></label>
               <select aria-label="按完善状态筛选" value={statusFilter} onChange={event => setStatusFilter(event.target.value)}><option value="ALL">全部状态</option><option value="SUCCEEDED">已完善</option><option value="RUNNING">处理中</option><option value="PENDING">待完善</option><option value="SKIPPED">已跳过</option><option value="FAILED">需处理</option></select>
@@ -614,7 +648,7 @@ export function DataSourceAssetsPage() {
                   return <article className="asset-table-row" role="row" key={item.id}>
                     <AppButton className="asset-table-row-open" aria-label={`${canManage ? '完善' : '查看'}${item.businessName || item.tableName}`} onClick={() => goDetail(item.id)}>
                       <span className="asset-table-name" role="cell"><span className="asset-table-icon"><Table size={19} weight="duotone" /></span><span className="asset-table-copy"><strong title={item.businessName || item.tableName}>{item.businessName || '待补充业务名称'}</strong><small title={item.businessDescription}>{item.businessDescription || '尚未填写业务说明'}</small></span></span>
-                      <span role="cell"><strong title={`${item.schemaName}.${item.tableName}`}>{item.schemaName}.{item.tableName}</strong><small>{item.tableType}</small></span>
+                      <span role="cell"><strong title={`${item.schemaName}.${item.tableName}`}>{item.tableName}</strong><small title={`${item.catalogName}.${item.schemaName}`}>{[item.catalogName, item.schemaName].filter(Boolean).join('.') || '默认目录'} · {item.tableType}</small></span>
                       <span role="cell"><strong>{item.columnCount}</strong><small>个字段</small></span>
                       <span role="cell">
                         <span className="asset-status-line">
@@ -637,7 +671,13 @@ export function DataSourceAssetsPage() {
                     </div>
                   </article>
                 })}
-                {filteredTables.length === 0 && <div className="asset-page-state"><strong>没有符合条件的数据表</strong><span>调整筛选条件或从源库发现新表。</span></div>}
+                {filteredTables.length === 0 && <div className="asset-page-state is-catalog-empty">
+                  <span className="asset-empty-visual"><Database size={30} weight="duotone" /></span>
+                  <strong>{tables.length === 0 ? '还没有数据表资产' : '没有符合条件的数据表'}</strong>
+                  <span>{tables.length === 0 ? '从已发布的数据源发现表结构，生成可检索、可治理的资产目录。' : '调整搜索词或完善状态筛选后重试。'}</span>
+                  {canManage && tables.length === 0 && <AppButton variant="primary" onClick={goDiscover}><Plus size={15} weight="bold" />发现数据表</AppButton>}
+                  {tables.length > 0 && <AppButton onClick={() => { setKeyword(''); setStatusFilter('ALL') }}><Funnel size={15} />清除筛选</AppButton>}
+                </div>}
               </div>
             </div>
           </section>
@@ -668,14 +708,22 @@ export function DataSourceAssetsPage() {
         </div>
       </> : mode === 'discover' ? <div className="asset-discover-layout">
         <section className="asset-discover-catalog">
-          <header><div><h2>选择需要资产化的数据表</h2><p>已导入的表保持勾选锁定；本次只提交新增选择。</p></div><span>已选择 {selectedKeys.length} 张</span></header>
-          <div className="asset-discover-search"><MagnifyingGlass size={17} /><input aria-label="搜索发现的数据表" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索物理表名或源库备注" /></div>
-          <div className="asset-discovered-list" role="list">
+          <header><div className="asset-discover-heading"><span><Database size={19} weight="duotone" /></span><div><h2>选择需要资产化的数据表</h2><p>已导入表保持锁定，本次仅提交新增选择。</p></div></div><span className="asset-discover-selection"><strong>{selectedKeys.length}</strong> / {discovered.filter(item => !imported.has(tableKey(item))).length} 张</span></header>
+          <div className="asset-discover-toolbar">
+            <div className="asset-discover-search"><MagnifyingGlass size={17} /><input aria-label="搜索发现的数据表" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索物理表名或源库备注" /></div>
+            <label className="asset-discover-select-all" title={`当前结果中有 ${selectableDiscoveredKeys.length} 张尚未导入的数据表`}>
+              <input ref={selectAllRef} type="checkbox" checked={allSelectableDiscoveredSelected} disabled={selectableDiscoveredKeys.length === 0} aria-label={keyword.trim() ? '全选当前筛选结果中的可导入数据表' : '全选所有可导入数据表'} onChange={event => toggleAllDiscovered(event.target.checked)} />
+              <span>全选</span>
+            </label>
+          </div>
+          <div className="asset-discovered-table" role="table" aria-label="发现的数据表">
+            <div className="asset-discovered-head" role="row"><span role="columnheader">选择</span><span role="columnheader">数据表</span><span role="columnheader">字段</span><span role="columnheader">预估行数</span><span role="columnheader">状态</span></div>
+            <div className="asset-discovered-list" role="rowgroup">
             {filteredDiscovered.map(item => {
               const key = tableKey(item)
               const isImported = imported.has(key)
-              const checked = isImported || selectedKeys.includes(key)
-              return <label className={`${checked ? 'is-selected' : ''}${isImported ? ' is-imported' : ''}`} key={key}>
+              const checked = isImported || selectedKeySet.has(key)
+              return <label className={`${checked ? 'is-selected' : ''}${isImported ? ' is-imported' : ''}`} role="row" key={key}>
                 <input type="checkbox" checked={checked} disabled={isImported} onChange={event => setSelectedKeys(current => event.target.checked ? [...current, key] : current.filter(value => value !== key))} />
                 <span className="asset-discovered-icon"><Database size={19} weight="duotone" /></span>
                 <span><strong>{item.schemaName ? `${item.schemaName}.` : ''}{item.name}</strong><small>{item.sourceComment || '源库未提供表备注'}</small></span>
@@ -684,7 +732,9 @@ export function DataSourceAssetsPage() {
                 <em>{isImported ? '已导入' : checked ? '本次导入' : '可选择'}</em>
               </label>
             })}
+            </div>
           </div>
+          <footer><span><CheckCircle size={15} weight="fill" />已导入表已锁定，不会重复提交</span><AppButton variant="primary" disabled={busy === 'import' || selectedKeys.length === 0} onClick={() => void importSelected()}>{busy === 'import' ? '正在提交后台任务…' : `开始导入 ${selectedKeys.length} 张表`}<ArrowRight size={16} /></AppButton></footer>
         </section>
         <aside className="asset-import-policy">
           <header><span><Sparkle size={18} weight="duotone" /></span><div><strong>样本与 AI 策略</strong><small>确定业务数据是否参与元数据生成</small></div></header>
@@ -694,8 +744,7 @@ export function DataSourceAssetsPage() {
             ['RAW', '原始样本', '最多读取 10 行原值，适用于已确认无敏感信息的源表。'],
           ] as const).map(([value, label, description]) => <label className={sampleMode === value ? 'is-selected' : ''} key={value}><input type="radio" name="sample-mode" value={value} checked={sampleMode === value} onChange={() => setSampleMode(value)} /><span><strong>{label}{value === 'MASK' && <em>推荐</em>}</strong><small>{description}</small></span></label>)}</fieldset>
           <section className="asset-import-summary"><strong>本次导入</strong><dl><div><dt>新增数据表</dt><dd>{selectedKeys.length} 张</dd></div><div><dt>预计字段</dt><dd>{discovered.filter(item => selectedKeys.includes(tableKey(item))).reduce((total, item) => total + item.columns.length, 0)} 个</dd></div><div><dt>样本策略</dt><dd>{sampleMode === 'MASK' ? '脱敏样本' : sampleMode === 'DENY' ? '不读取' : '原始样本'}</dd></div></dl></section>
-          <section className="asset-import-guardrail"><WarningCircle size={18} /><span><strong>确定性门禁</strong><small>技术元数据先落库并形成结构哈希；AI 只生成建议，低置信度项必须人工确认。</small></span></section>
-          <AppButton variant="primary" disabled={busy === 'import' || selectedKeys.length === 0} onClick={() => void importSelected()}>{busy === 'import' ? '正在提交后台任务…' : `开始导入 ${selectedKeys.length} 张表`}<ArrowRight size={16} /></AppButton>
+          <section className="asset-import-guardrail"><CheckCircle size={18} weight="fill" /><span><strong>确定性门禁</strong><small>技术元数据先落库并形成结构哈希；AI 只生成建议，低置信度项必须人工确认。</small></span></section>
         </aside>
       </div> : tableRecord && <div className="asset-detail-layout">
         <aside className="asset-table-form">
@@ -731,7 +780,7 @@ export function DataSourceAssetsPage() {
               <span role="cell"><select disabled={!canManage} aria-label={`${column.columnName}敏感级`} value={column.sensitivityLevel} onChange={event => updateColumn(column.id, { sensitivityLevel: event.target.value as DataSourceColumnRecord['sensitivityLevel'] })}>{Object.entries(sensitivityLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></span>
             </div>)}</div>
           </div>
-          <footer><span><CheckCircle size={16} />{canManage ? '保存使用业务版本号进行并发冲突保护' : '共享数据源只读展示，不会修改所有者资产'}</span>{canManage && <AppButton variant="primary" disabled={busy === 'save'} onClick={() => void saveMetadata()}><FloppyDisk size={16} />保存全部变更</AppButton>}</footer>
+          <footer><span><CheckCircle size={16} />{canManage ? '保存使用业务版本号进行并发冲突保护' : '共享数据源只读展示，不会修改所有者资产'}</span></footer>
         </section>
 
       </div>}

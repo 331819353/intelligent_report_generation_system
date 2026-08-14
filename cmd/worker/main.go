@@ -196,20 +196,18 @@ func main() {
 		MaxStreamCellBytes:     cfg.ConnectorStreamMaxCellBytes,
 		MaxStreamRowBytes:      cfg.ConnectorStreamMaxRowBytes,
 	}
-	mysqlConnector := datasource.NewPythonConnectorWithLimits(
-		datasource.TypeMySQL, cfg.ConnectorURL, cfg.ConnectorToken,
-		credentialManager, connectorLimits,
-	)
-	oracleConnector := datasource.NewPythonConnectorWithLimits(
-		datasource.TypeOracle, cfg.ConnectorURL, cfg.ConnectorToken,
-		credentialManager, connectorLimits,
-	)
-	dataSourceService := datasource.NewService(
-		dataSourceRepo,
-		mysqlConnector,
-		oracleConnector,
-		datasource.NewExcelConnector(excelManager),
-	)
+	databaseConnectors := make(map[datasource.Type]*datasource.PythonConnector)
+	serviceConnectors := make([]datasource.Connector, 0, len(datasource.DatabaseDrivers())+1)
+	for _, driver := range datasource.DatabaseDrivers() {
+		connector := datasource.NewPythonConnectorWithLimits(
+			driver.Type, cfg.ConnectorURL, cfg.ConnectorToken,
+			credentialManager, connectorLimits,
+		)
+		databaseConnectors[driver.Type] = connector
+		serviceConnectors = append(serviceConnectors, connector)
+	}
+	serviceConnectors = append(serviceConnectors, datasource.NewExcelConnector(excelManager))
+	dataSourceService := datasource.NewService(dataSourceRepo, serviceConnectors...)
 	dataSourceService.SetMetadataJobRepository(datasource.NewPostgresMetadataJobRepository(pool))
 
 	providerEndpoints := make([]aiplatform.ProviderEndpoint, 0, len(cfg.AIProviderEndpoints))
@@ -246,8 +244,9 @@ func main() {
 	datasetStore.SetMappedPublicationCommitSink(materializationStore)
 	datasetStore.SetGovernedPublicationCommitSink(materializationStore)
 	datasetStore.SetMaterializationDeletionSink(materializationStore)
-	queryConnectors := map[datasource.Type]queryruntime.QueryConnector{
-		datasource.TypeMySQL: mysqlConnector, datasource.TypeOracle: oracleConnector,
+	queryConnectors := make(map[datasource.Type]queryruntime.QueryConnector, len(databaseConnectors))
+	for sourceType, connector := range databaseConnectors {
+		queryConnectors[sourceType] = connector
 	}
 	queryService := queryruntime.NewService(
 		datasetStore, dataSourceRepo, policy.NewPostgresStore(pool),
@@ -637,10 +636,14 @@ func main() {
 
 	odsResolver := materializationworker.NewODSResolver(
 		pool,
-		warehouse.NewStagerWithMaxBytes(warehousePool, mysqlConnector, cfg.WarehouseStageMaxBytes),
-		warehouse.NewStagerWithMaxBytes(warehousePool, oracleConnector, cfg.WarehouseStageMaxBytes),
 		warehouse.NewFileStagerWithMaxBytes(warehousePool, excelManager, cfg.WarehouseStageMaxBytes),
 	)
+	for sourceType, connector := range databaseConnectors {
+		odsResolver.SetDatabaseStager(
+			sourceType,
+			warehouse.NewStagerWithMaxBytes(warehousePool, connector, cfg.WarehouseStageMaxBytes),
+		)
+	}
 	odsResolver.SetFullProjector(warehouse.NewODSProjector(warehousePool))
 	postgresResolver := materializationworker.NewSeparatedPostgresResolver(pool, warehousePool)
 	postgresResolver.SetODSRehydrator(odsResolver)

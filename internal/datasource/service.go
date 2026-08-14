@@ -20,7 +20,6 @@ type Service struct {
 	jobs            MetadataJobRepository
 	connectionTests ConnectionTestJobRepository
 	now             func() time.Time
-	testTTL         time.Duration
 }
 
 // SetTableCompleter 注入 LLM 元数据完善器，保持数据源领域对具体 AI 实现解耦。
@@ -46,7 +45,7 @@ func NewService(repo Repository, connectors ...Connector) *Service {
 	for _, c := range connectors {
 		m[c.Type()] = c
 	}
-	return &Service{repo: repo, connectors: m, now: time.Now, testTTL: 30 * time.Minute}
+	return &Service{repo: repo, connectors: m, now: time.Now}
 }
 
 // Audit 将数据源操作审计转交给仓储层持久化。
@@ -163,7 +162,7 @@ func (s *Service) Update(ctx context.Context, source Source) (Source, error) {
 		}
 	}
 	// 编辑表单不回显密码；未提交新密码时沿用当前内部引用，避免迫使浏览器获取秘密。
-	if source.SecretRef == "" && (source.Type == TypeMySQL || source.Type == TypeOracle) {
+	if source.SecretRef == "" && IsDatabaseType(source.Type) {
 		source.SecretRef = current.SecretRef
 	}
 	if source.OwnerID == "" {
@@ -245,16 +244,15 @@ func (s *Service) Test(ctx context.Context, tenantID, id string) (TestResult, er
 		return TestResult{}, err
 	}
 	if supportsVersioning {
-		expiresAt := completedAt.Add(s.testTTL)
 		if _, err := versioned.RecordConnectionTest(ctx, tenantID, id, ConnectionTestRun{
 			DataSourceID: id, ConfigVersion: source.ConfigVersionID, ConfigHash: source.ConfigHash,
 			Status: ValidationPassed, ServerVersion: result.ServerVersion, LatencyMS: result.LatencyMS,
-			StartedAt: startedAt, CompletedAt: completedAt, ExpiresAt: &expiresAt,
+			StartedAt: startedAt, CompletedAt: completedAt,
 		}); err != nil {
 			return TestResult{}, err
 		}
 		result.ConfigVersionID, result.ConfigHash = source.ConfigVersionID, source.ConfigHash
-		result.TestedAt, result.ExpiresAt = &completedAt, &expiresAt
+		result.TestedAt = &completedAt
 		return result, nil
 	}
 	if err := s.repo.UpdateStatus(ctx, tenantID, id, StatusActive, ""); err != nil {
@@ -299,7 +297,8 @@ func (s *Service) GetConnectionTest(
 	return s.connectionTests.GetConnectionTest(ctx, tenantID, sourceID, jobID)
 }
 
-// Publish 将当前草稿切换为运行时版本。只有同版本、同摘要且未过期的成功测试可发布。
+// Publish 将当前草稿切换为运行时版本。只有绑定同版本、同摘要的成功测试可发布；
+// 测试结果不设有效期，配置一旦变化会生成新版本并自然使旧测试失效。
 func (s *Service) Publish(ctx context.Context, tenantID, actorID, id string) (Source, error) {
 	versioned, ok := s.repo.(VersionedRepository)
 	if !ok {
@@ -336,9 +335,6 @@ func (s *Service) Publish(ctx context.Context, tenantID, actorID, id string) (So
 	}
 	if draft.ValidationStatus != ValidationPassed {
 		return Source{}, ErrTestRequired
-	}
-	if draft.TestExpiresAt == nil || !draft.TestExpiresAt.After(now) {
-		return Source{}, ErrTestExpired
 	}
 	// 发布切换前关闭旧发布版本的连接池；失败时旧指针未变，后续请求可按旧快照重建。
 	if draft.PublishedVersionID != "" && draft.PublishedVersionID != draft.ConfigVersionID {

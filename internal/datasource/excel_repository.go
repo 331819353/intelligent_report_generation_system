@@ -73,7 +73,7 @@ func (r *PostgresRepository) SaveFileVersion(ctx context.Context, asset FileAsse
 				}
 				tag, err := tx.Exec(ctx, `UPDATE platform.data_sources AS source SET
 					current_draft_version_id=version.id,validation_status='UNTESTED',
-					last_tested_at=NULL,last_tested_version_id=NULL,last_tested_config_hash=NULL,test_expires_at=NULL,
+					last_tested_at=NULL,last_tested_version_id=NULL,last_tested_config_hash=NULL,
 					status=CASE WHEN source.current_published_version_id IS NULL
 						THEN 'DRAFT'::platform.data_source_status ELSE source.status END,
 					last_error=CASE WHEN source.current_published_version_id IS NULL THEN NULL ELSE source.last_error END,

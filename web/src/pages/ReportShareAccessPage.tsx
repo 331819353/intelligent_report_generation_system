@@ -27,7 +27,12 @@ export function ReportShareAccessPage() {
     return () => { cancelled = true }
   }, [navigate, shareToken])
 
-  return <AppShell>
+  return <AppShell
+    className="report-share-shell"
+    eyebrow="报告访问"
+    title="安全打开分享"
+    titleMeta={<span>校验接收身份、报告权限与固定版本</span>}
+  >
     <main className="report-share-access" aria-live="polite">
       {!error && <div className="report-share-access-card is-loading">
         <span className="report-share-access-spinner" aria-hidden="true" />

@@ -24,7 +24,30 @@ const (
 	MySQL      Dialect = "MYSQL"
 	Oracle     Dialect = "ORACLE"
 	PostgreSQL Dialect = "POSTGRESQL"
+	SQLServer  Dialect = "SQLSERVER"
 )
+
+// DialectForSourceType maps the shared data-source catalog to the closest
+// compiler dialect. MariaDB and ClickHouse use the MySQL-compatible SQL path;
+// PostgreSQL and SQL Server keep their own pagination and placeholder rules.
+func DialectForSourceType(sourceType string) (Dialect, bool) {
+	switch strings.ToUpper(strings.TrimSpace(sourceType)) {
+	case "MYSQL", "MARIADB", "CLICKHOUSE":
+		return MySQL, true
+	case "POSTGRESQL":
+		return PostgreSQL, true
+	case "ORACLE":
+		return Oracle, true
+	case "SQLSERVER":
+		return SQLServer, true
+	default:
+		return "", false
+	}
+}
+
+func supportedDialect(value Dialect) bool {
+	return value == MySQL || value == Oracle || value == PostgreSQL || value == SQLServer
+}
 
 // LimitKind selects which already-validated Dataset DSL ceiling applies to a
 // compilation. Existing callers default to PREVIEW; governed formal-query
@@ -75,7 +98,7 @@ type compiler struct {
 
 // Compile 仅从结构化 DSL 生成 SQL，并对全部标识符和值执行失败关闭校验。
 func Compile(input Input) (CompiledQuery, error) {
-	if input.Dialect != MySQL && input.Dialect != Oracle && input.Dialect != PostgreSQL {
+	if !supportedDialect(input.Dialect) {
 		return CompiledQuery{}, errors.New("unsupported query dialect")
 	}
 	if err := dataset.Validate(input.Document); err != nil {
@@ -152,6 +175,11 @@ func Compile(input Input) (CompiledQuery, error) {
 	// 也会因此对多行数据集稳定失败。
 	if input.Dialect == Oracle {
 		sql += " FETCH FIRST " + c.bind(input.MaxRows) + " ROWS ONLY"
+	} else if input.Dialect == SQLServer {
+		if order == "" {
+			sql += " ORDER BY (SELECT NULL)"
+		}
+		sql += " OFFSET 0 ROWS FETCH NEXT " + c.bind(input.MaxRows) + " ROWS ONLY"
 	} else {
 		sql += " LIMIT " + c.bind(input.MaxRows)
 	}
@@ -1816,7 +1844,7 @@ func (c *compiler) quote(value string) string {
 	if c.input.Dialect == MySQL {
 		return "`" + value + "`"
 	}
-	if c.input.Dialect == PostgreSQL {
+	if c.input.Dialect == PostgreSQL || c.input.Dialect == SQLServer {
 		return `"` + value + `"`
 	}
 	return `"` + strings.ToUpper(value) + `"`

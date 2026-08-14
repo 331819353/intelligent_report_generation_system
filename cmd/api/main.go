@@ -201,20 +201,18 @@ func main() {
 		MaxStreamCellBytes:     cfg.ConnectorStreamMaxCellBytes,
 		MaxStreamRowBytes:      cfg.ConnectorStreamMaxRowBytes,
 	}
-	mysqlConnector := datasource.NewPythonConnectorWithLimits(
-		datasource.TypeMySQL, cfg.ConnectorURL, cfg.ConnectorToken,
-		credentialManager, connectorLimits,
-	)
-	oracleConnector := datasource.NewPythonConnectorWithLimits(
-		datasource.TypeOracle, cfg.ConnectorURL, cfg.ConnectorToken,
-		credentialManager, connectorLimits,
-	)
-	dataSourceService := datasource.NewService(
-		dataSourceRepo,
-		mysqlConnector,
-		oracleConnector,
-		datasource.NewExcelConnector(excelManager),
-	)
+	databaseConnectors := make(map[datasource.Type]*datasource.PythonConnector)
+	serviceConnectors := make([]datasource.Connector, 0, len(datasource.DatabaseDrivers())+1)
+	for _, driver := range datasource.DatabaseDrivers() {
+		connector := datasource.NewPythonConnectorWithLimits(
+			driver.Type, cfg.ConnectorURL, cfg.ConnectorToken,
+			credentialManager, connectorLimits,
+		)
+		databaseConnectors[driver.Type] = connector
+		serviceConnectors = append(serviceConnectors, connector)
+	}
+	serviceConnectors = append(serviceConnectors, datasource.NewExcelConnector(excelManager))
+	dataSourceService := datasource.NewService(dataSourceRepo, serviceConnectors...)
 	dataSourceService.SetMetadataJobRepository(datasource.NewPostgresMetadataJobRepository(pool))
 	dataSourceService.SetConnectionTestJobRepository(datasource.NewPostgresConnectionTestRepository(pool))
 
@@ -282,8 +280,9 @@ func main() {
 		datasetsemanticnaming.NewPostgresCatalog(pool), aiService, cfg.AIRequestTimeout,
 	))
 	datasetService.SetLLMTriggerStore(datasetStore)
-	queryConnectors := map[datasource.Type]queryruntime.QueryConnector{
-		datasource.TypeMySQL: mysqlConnector, datasource.TypeOracle: oracleConnector,
+	queryConnectors := make(map[datasource.Type]queryruntime.QueryConnector, len(databaseConnectors))
+	for sourceType, connector := range databaseConnectors {
+		queryConnectors[sourceType] = connector
 	}
 	queryService := queryruntime.NewService(
 		datasetStore,

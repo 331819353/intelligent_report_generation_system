@@ -26,6 +26,7 @@ import {
   type FieldOption,
   type JoinOption,
 } from './datasets'
+export { datasetAIRequestContext } from './dataset-ai-context'
 
 export type DatasetAIInput = { kind: 'NODE' | 'JOIN' | 'GROUP' | 'TRANSFORM'; id: string }
 export type DatasetAIPlanNode = { id: string; tableId: string; alias: string; selectedColumns: string[] }
@@ -225,17 +226,6 @@ export function datasetAIPlanFromEditor(
     transforms,
     end: { name: graph.end?.name || '最终输出', input: endInput, outputs: outputs.length ? outputs : fallbackOutput },
   }
-}
-
-/** Resolve the only graph the next AI request may treat as its modification baseline. */
-export function datasetAIRequestContext(
-  liveCanvas: DatasetAIGraphPlan | undefined,
-  stagedProposal: DatasetAIGraphPlan | undefined,
-  options: { forceLiveCanvas: boolean; stagedProposalApplied: boolean },
-): DatasetAIGraphPlan | undefined {
-  if (liveCanvas) return liveCanvas
-  if (!options.forceLiveCanvas && !options.stagedProposalApplied) return stagedProposal
-  return undefined
 }
 
 export async function requestDatasetAIProposal(

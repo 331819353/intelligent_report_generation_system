@@ -25,14 +25,13 @@ func (r *PostgresRepository) SubmitPublicationRequest(
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
 		var versionID, configHash string
 		var validationStatus ValidationStatus
-		var expiresAt *time.Time
 		err := tx.QueryRow(ctx, `SELECT source.current_draft_version_id::text,version.config_hash,
-			source.validation_status,source.test_expires_at
+			source.validation_status
 			FROM platform.data_sources AS source
 			JOIN platform.data_source_versions AS version ON version.id=source.current_draft_version_id
 			WHERE source.id::text=$1 AND source.deleted_at IS NULL
 			FOR UPDATE OF source`, draft.ID).
-			Scan(&versionID, &configHash, &validationStatus, &expiresAt)
+			Scan(&versionID, &configHash, &validationStatus)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrReviewRequestNotFound
 		}
@@ -45,9 +44,6 @@ func (r *PostgresRepository) SubmitPublicationRequest(
 		if validationStatus != ValidationPassed {
 			return ErrTestRequired
 		}
-		if expiresAt == nil || !expiresAt.After(time.Now().UTC()) {
-			return ErrTestExpired
-		}
 		var valid bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(
 			SELECT 1
@@ -58,7 +54,6 @@ func (r *PostgresRepository) SubmitPublicationRequest(
 			WHERE attestation.data_source_id=$1
 			  AND attestation.data_source_version_id=$2
 			  AND attestation.config_hash=$3
-			  AND attestation.expires_at>clock_timestamp()
 			  AND attestation.attestation_version='connection-test-worker-v1'
 			  AND job.status='SUCCEEDED'
 			  AND job.data_source_id=attestation.data_source_id
@@ -282,14 +277,13 @@ func (r *PostgresRepository) ApproveAndPublish(
 			WHERE attestation.data_source_id=$1
 			  AND attestation.data_source_version_id=$2
 			  AND attestation.config_hash=$3
-			  AND attestation.expires_at>clock_timestamp()
 			  AND attestation.attestation_version='connection-test-worker-v1'
 			  AND job.status='SUCCEEDED'
 		)`, sourceID, configVersionID, configHash).Scan(&valid); err != nil {
 			return err
 		}
 		if !valid {
-			return ErrTestExpired
+			return ErrTestRequired
 		}
 		tag, err := tx.Exec(ctx, `UPDATE platform.data_sources AS source SET
 			current_published_version_id=source.current_draft_version_id,

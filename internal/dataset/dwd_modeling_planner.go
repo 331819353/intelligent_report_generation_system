@@ -345,8 +345,8 @@ const dwdDimensionDesignSystemPrompt = `你是企业数据仓库 DIM 设计师�
 设计要求：
 1. 保持输入声明的实体粒度并逐字段覆盖当前收窄后的字段，不得新增、删除或臆造字段；grainKeyFieldCodes 必须原样返回输入 outputGrain.keyFields。
 2. 提供简洁明确的中文 DIM 名称与说明；逐字段补充可维护的中文名称和业务说明，不能只复述字段编码。
-3. generation 前的卫生组件是强制合同：所有 STRING 使用 TRIM；可空 IDENTIFIER/DIMENSION/ATTRIBUTE 使用 COALESCE_DEFAULT，其固定值按规范类型为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；DATE、DATETIME 及 STRING TIME 统一使用 CAST_DATE 去除时分秒，输出逻辑类型保持 DATE，字段 format 固定为 YYYYMMDD。MEASURE 与 TIME 空值保留 NULL，不填哨兵值。
-4. standardization 只能使用 TRIM、COALESCE_DEFAULT、CAST_DATE、CAST_DATETIME；新设计不得使用 CAST_DATETIME，保留该枚举仅用于读取历史检查点。只能复制输入的精确 datasetVersionId 和字段 code。
+3. generation 前遵循最小侵害合同：关联键（role=IDENTIFIER，或 code 为 id/key/code 及以 _id/_key/_code 结尾）保持来源原值，不得默认 TRIM、转换大小写或填充缺省键。普通 STRING 与 BOOLEAN 缺失值保持 SQL NULL；非关联键 INTEGER/DECIMAL 缺失值使用 COALESCE_DEFAULT 补 0；DATE、DATETIME 及 STRING TIME 使用 CAST_DATE 去除时分秒，源值 0000-00-00/0000-00-00 00:00:00 只作为 ODS 哨兵保留，强类型目标写 NULL。来源 ODS 不可变，所有原值均可追溯。
+4. standardization 只能使用 COALESCE_DEFAULT、CAST_DATE、CAST_DATETIME；新设计不得使用 TRIM 或 CAST_DATETIME，保留旧枚举仅用于读取历史检查点。只能复制输入的精确 datasetVersionId 和字段 code。
 5. 不返回 SQL、DDL、物理表名、自由表达式、样例值、Markdown 或额外解释。
 
 输出只能是 JSON Schema 指定的对象。`
@@ -374,8 +374,8 @@ const dwdFactDesignSystemPrompt = `你是企业数据仓库 DWD 明细结构与 
 1. 生成且只生成指定 FACT 的一张 DWD，保持原子事实粒度，不得分组或聚合，并保留事实表全部字段。name 必须是完整中文业务表名，不得包含 ODS、DIM、DWD、DWS、ADS 等层级字符，也不得使用 SNAPSHOT、FACT 等英文或物理表编码。
 2. 逐一检查 IDENTIFIER/DIMENSION 及以 _id/_key 结尾的字段；只有事实字段与 DIM 字段 code 忽略大小写后完全同名、语义相同、类型兼容且 DIM 侧唯一时才能 LEFT JOIN。复合业务键必须完整放入同一 join.conditions。
 3. 每个已关联 DIM 至少扩充一个关联键之外的名称、分类、区域、状态等描述字段（只要存在）；DIM 侧关联键只用于 Join，不重复输出。
-4. generation 前的卫生组件是强制合同：所有 STRING 使用 TRIM；可空 IDENTIFIER/DIMENSION/ATTRIBUTE 使用 COALESCE_DEFAULT，固定值为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；DATE、DATETIME 及 STRING TIME 统一使用 CAST_DATE 去除时分秒，输出逻辑类型保持 DATE，字段 format 固定为 YYYYMMDD。MEASURE 与 TIME 空值保留 NULL，不填哨兵值。不得在 processing 中再用 DATE_FORMAT、DATE_TRUNC 或 CAST_DATETIME 改变该日粒度合同。
-5. 非基础卫生且真实需要时，其他字段可使用 CAST、TRIM、UPPER、LOWER、REPLACE、SUBSTRING、CONCAT、COALESCE、ADD、SUBTRACT、MULTIPLY、DIVIDE、ROUND、ABS、FLOOR、CEIL、CASE。arguments 的每项都是字符串，二元处理只能引用已经加入输出的事实或 DIM 字段。
+4. generation 前遵循最小侵害合同：关联键保持来源原值，不得默认 TRIM、转换大小写或填充；普通 STRING 与 BOOLEAN 缺失值保持 SQL NULL；非关联键 INTEGER/DECIMAL 缺失值使用 COALESCE_DEFAULT 补 0；DATE、DATETIME 及 STRING TIME 使用 CAST_DATE，源零日期哨兵在强类型目标中写 NULL。来源 ODS 不可变，所有原值均可追溯。不得在 processing 中改变该日粒度合同。
+5. 非关联键字段在真实业务需要时可使用 CAST、TRIM、UPPER、LOWER、REPLACE、SUBSTRING、CONCAT、COALESCE、ADD、SUBTRACT、MULTIPLY、DIVIDE、ROUND、ABS、FLOOR、CEIL、CASE。关联键禁止 TRIM、UPPER、LOWER、REPLACE、SUBSTRING 和 COALESCE，除非未来存在已审批的映射合同。arguments 的每项都是字符串，二元处理只能引用已经加入输出的事实或 DIM 字段。
 6. 每个输出字段必须声明 measureBehavior：非 MEASURE 固定为空字符串；普通期间发生额/数量为 FLOW；截至当前的累计/YTD/MTD/running total 为 CUMULATIVE；余额、库存、存量、期末数、在手量等时点状态为 POINT_IN_TIME；比率、均价等不可直接汇总值为 NON_ADDITIVE。不得把累计值或时点值声明成 FLOW。
 7. 只能复制输入中的精确 dataset version id 和字段 code，不得返回 SQL、DDL、表达式文本、物理表或调度命令。输出是交给受控 DAG 开发引擎的待审阅结构化设计。
 
@@ -712,7 +712,7 @@ func (planner *OrchestratedDWDModelingPlanner) DesignDimension(
 			callCtx, &invocation, baseMessages, result, invokeErr,
 			fmt.Sprintf(`上一份 DIM 设计未通过结构校验：%s
 
-请只返回修复后的 {"output": ...}：sourceDatasetVersionId 必须等于指定版本；fields 必须逐字段覆盖且不重复；中文名称和说明不能为空；所有 STRING 必须 TRIM，可空标识/维度/属性必须 COALESCE_DEFAULT，DATE/DATETIME/STRING TIME 必须 CAST_DATE；不得为 TIME/MEASURE 填充哨兵值。standardization 只能使用约定的四种枚举，新设计不得使用 CAST_DATETIME。不要返回 SQL、Markdown 或额外解释。`,
+请只返回修复后的 {"output": ...}：sourceDatasetVersionId 必须等于指定版本；fields 必须逐字段覆盖且不重复；中文名称和说明不能为空；关联键必须保留原值且不得 TRIM、转换大小写或填充；普通 STRING/BOOLEAN 保持 NULL；非关联键 INTEGER/DECIMAL 缺失补 0；DATE/DATETIME/STRING TIME 必须 CAST_DATE，源零日期哨兵在强类型目标写 NULL。新设计不得使用 CAST_DATETIME。不要返回 SQL、Markdown 或额外解释。`,
 				invokeErr.Error(),
 			),
 			attempt == dwdStageInvocationAttempts-2,
@@ -1001,7 +1001,7 @@ func dwdFactDesignRepairInstruction(validationErr error) string {
 1. factDatasetVersionId 必须是指定 FACT；保留全部事实字段且不聚合。
 2. 只能引用输入中的精确版本和字段；事实字段与维度字段 code 必须忽略大小写后完全同名且类型兼容，唯一可靠维度键必须 LEFT JOIN，复合键保持在同一个 conditions。禁止仅因类型相同而关联不同业务键。
 3. 已关联维度存在说明字段时必须扩充至少一个，维度侧关联键不得重复输出。
-4. 所有 STRING 必须 TRIM；可空标识/维度/属性必须 COALESCE_DEFAULT；DATE/DATETIME/STRING TIME 必须 CAST_DATE 并保持 YYYYMMDD 日粒度；TIME/MEASURE 不得填哨兵值，processing 不得再用 DATE_FORMAT、DATE_TRUNC 或 CAST_DATETIME 改变日期合同。
+4. 关联键保留来源原值，不得 TRIM、转换大小写或填充；普通 STRING/BOOLEAN 保持 NULL；非关联键 INTEGER/DECIMAL 缺失使用 COALESCE_DEFAULT 补 0；DATE/DATETIME/STRING TIME 必须 CAST_DATE，源零日期哨兵在强类型目标写 NULL；processing 不得改变日期合同。
 5. 名称、说明和 rationale 保持简短，不返回 classifications、SQL、Markdown 或额外解释。`,
 		validationErr.Error(),
 	)
@@ -1196,8 +1196,8 @@ const dwdModelingSystemPrompt = `你是企业数据仓库 DIM/DWD 建模设计�
 3. 对每张 ODS 判断 FACT、DIMENSION、MASTER 或 OTHER，按真实行粒度而非名称判断。FACT 内若还有可由稳定键安全去重且满足 DIM 同表边界的实体属性，可同时声明抽取 DIM；没有可靠实体不得臆造。
 4. 每张 FACT 必须且只能设计一张保持原子粒度的 DWD。逐一检查标识/维度及 _id/_key 字段；只关联语义同一、code 忽略大小写后完全同名、类型兼容、DIM 侧唯一的键。复合键必须完整放在同一 join.conditions，禁止仅按类型或近似名称猜测。
 5. DWD 保留事实全部字段；每个关联 DIM 至少输出一个关联键之外的说明属性（只要存在），DIM 侧关联键只用于 Join，不重复输出。
-6. generation 前强制应用卫生组件：所有 STRING 使用 TRIM；可空 IDENTIFIER/DIMENSION/ATTRIBUTE 使用 COALESCE_DEFAULT，固定值为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；DATE、DATETIME 和 STRING TIME 使用 CAST_DATE 去除时分秒，逻辑类型保持 DATE，字段 format 固定为 YYYYMMDD；TIME/MEASURE 空值保留 NULL。processing 不得再用 DATE_FORMAT、DATE_TRUNC 或 CAST_DATETIME 改变日期合同。
-7. 其他 processing 只在真实需要时使用 CAST、TRIM、UPPER、LOWER、REPLACE、SUBSTRING、CONCAT、COALESCE、ADD、SUBTRACT、MULTIPLY、DIVIDE、ROUND、ABS、FLOOR、CEIL、CASE。arguments 每项必须是字符串；二元处理只能引用已加入当前输出的事实或 DIM 字段；不得聚合或改变事实粒度。
+6. generation 前遵循最小侵害合同：关联键保持来源原值，不得默认 TRIM、转换大小写或填充；普通 STRING/BOOLEAN 缺失保持 SQL NULL；非关联键 INTEGER/DECIMAL 缺失补 0；DATE、DATETIME 和 STRING TIME 使用 CAST_DATE，源零日期哨兵在强类型目标写 NULL。来源 ODS 不可变，原值可追溯；processing 不得改变日期合同。
+7. 非关联键字段可在真实业务需要时使用 CAST、TRIM、UPPER、LOWER、REPLACE、SUBSTRING、CONCAT、COALESCE、ADD、SUBTRACT、MULTIPLY、DIVIDE、ROUND、ABS、FLOOR、CEIL、CASE。关联键禁止 TRIM、大小写转换、REPLACE、SUBSTRING 和 COALESCE。arguments 每项必须是字符串；二元处理只能引用已加入当前输出的事实或 DIM 字段；不得聚合或改变事实粒度。
 8. classifications 必须逐表覆盖；outputs 必须逐一覆盖所有 FACT 且不得覆盖其他角色。只能使用输入给出的精确 dataset version id 和字段 code。结果是待审阅结构化方案，不代表自动发布；不得返回 SQL、物理表、调度命令、Markdown 或额外解释。
 
 输出只能是 JSON Schema 指定的对象。`
@@ -1726,27 +1726,35 @@ func mandatoryDWDFieldCleaning(
 	_ []string,
 ) []string {
 	canonical := strings.ToUpper(strings.TrimSpace(field.CanonicalType))
-	role := strings.ToUpper(strings.TrimSpace(field.Role))
-	nullFillEligible := role == "IDENTIFIER" || role == "DIMENSION" ||
-		role == "ATTRIBUTE"
-	operations := make([]string, 0, 3)
-	// 文本卫生不应依赖 LLM 对字段角色的判断。所有 STRING 在进入 DIM/DWD
-	// 产物前都经过同一个 TRIM 组件；度量/时间只是不做哨兵空值填充。
-	if canonical == "STRING" {
-		operations = append(operations, "TRIM")
-	}
+	operations := make([]string, 0, 2)
+	// 清洗不得静默改写业务值。尤其关联键必须保留来源原值，不能把 TRIM、
+	// 大小写转换或缺省填充当成无条件卫生规则；否则可能造成键碰撞、漏关联
+	// 或 1:N 扇出。必要的规范键应在数据质量评估和人工确认后单独生成。
 	switch {
 	case dwdFieldRequiresDayNormalization(field):
 		// 数仓的统一日期合同只保留日粒度。即使源是 DATETIME，也在生成前
-		// 通过 CAST_DATE 去除时分秒，并由输出字段 format 声明 YYYYMMDD。
+		// 通过 CAST_DATE 去除时分秒。零日期只作为不可变 ODS 源值保留，
+		// 强类型目标会先把零日期转为 NULL，避免数据库拒绝非法日期。
 		operations = append(operations, "CAST_DATE")
 	}
-	if field.Nullable && nullFillEligible &&
-		dwdDefaultNullValueSupported(canonical) {
-		// CAST 先于 COALESCE，确保日期默认值进入目标日期类型，而不是保留成文本。
+	if field.Nullable && !dwdFieldIsAssociationKey(field) &&
+		(canonical == "INTEGER" || canonical == "DECIMAL") {
+		// 业务约定只对普通数值缺失补 0。关联键、文本、日期和布尔值均保持
+		// NULL；来源 ODS 不可变，因此原始空值仍可追溯。
 		operations = append(operations, "COALESCE_DEFAULT")
 	}
 	return operations
+}
+
+func dwdFieldIsAssociationKey(field dwdPlanningField) bool {
+	if strings.EqualFold(strings.TrimSpace(field.Role), "IDENTIFIER") {
+		return true
+	}
+	code := strings.ToLower(strings.TrimSpace(field.Code))
+	return code == "id" || code == "key" || code == "code" ||
+		strings.HasSuffix(code, "_id") || strings.HasSuffix(code, "_key") ||
+		strings.HasSuffix(code, "_code") || strings.HasSuffix(code, "_line_no") ||
+		code == "line_no"
 }
 
 func dwdFieldRequiresDayNormalization(field dwdPlanningField) bool {
@@ -1973,7 +1981,7 @@ func dwdModelingRepairInstruction(validationErr error, diagnostic string) string
 2. 只能复制输入中的精确 datasetVersionId 和字段 code；维度关联只允许 LEFT JOIN，且关联键类型兼容。
 3. 每个 FACT 的全部字段都必须出现在其 output.fields 中；逐一检查标识/维度及 _id/_key 字段，存在唯一同名且类型兼容的 DIMENSION/MASTER 键时必须 LEFT JOIN；复合业务键必须放入同一个 join.conditions 并完整覆盖。
 4. 每个已关联维度必须至少输出一个关联键之外的描述字段（只要该表存在），维度扩充字段必须来自该 output 已关联的 DIMENSION/MASTER；维度侧所有关联键不得出现在 output.fields。
-5. 所有 STRING 使用 TRIM；可空标识、维度和属性使用 COALESCE_DEFAULT，按类型固定为文本 UNKNOWN、日期 1970-01-01、数值 999999999、布尔 False；DATE/DATETIME/STRING TIME 使用 CAST_DATE 并保持 YYYYMMDD 日粒度；度量和时间不得补哨兵值，processing 不得再用 DATE_FORMAT、DATE_TRUNC 或 CAST_DATETIME 改变日期合同。
+5. 关联键保持来源原值，不得 TRIM、转换大小写或填充；普通 STRING/BOOLEAN 保持 NULL；非关联键 INTEGER/DECIMAL 缺失补 0；DATE/DATETIME/STRING TIME 使用 CAST_DATE，源零日期哨兵在强类型目标写 NULL；processing 不得改变日期合同。
 6. processing 可按实际需要使用全部已声明处理操作；每步只按原始提示规定填写紧凑 arguments，同类多字段分别声明规则即可，平台会合并组件。二元操作的次字段必须来自已关联输入。
 7. 每个字段必须提供 measureBehavior；非度量为空，度量只能为 FLOW、CUMULATIVE、POINT_IN_TIME 或 NON_ADDITIVE。累计、YTD/MTD、running total 不得标为 FLOW；余额、库存、存量、期末数等不得跨时间求和。
 8. grainKeyOutputCodes 和 timeOutputCode 只能引用 output.fields 的 outputCode。
@@ -2148,7 +2156,7 @@ func dwdDimensionDesignResponseSchema(
 							"items": map[string]any{
 								"type": "string",
 								"enum": []string{
-									"TRIM", "COALESCE_DEFAULT",
+									"COALESCE_DEFAULT",
 									"CAST_DATE", "CAST_DATETIME",
 								},
 							},
@@ -2482,7 +2490,7 @@ func dwdModelingResponseSchema(input dwdPlanningInput) (aiplatform.JSONSchema, e
 										"items": map[string]any{
 											"type": "string",
 											"enum": []string{
-												"TRIM", "COALESCE_DEFAULT",
+												"COALESCE_DEFAULT",
 												"CAST_DATE", "CAST_DATETIME",
 											},
 										},
@@ -4148,7 +4156,6 @@ func validateDWDLLMOutput(
 			)
 		}
 		if exists && fieldExists && roleValid {
-			sourceMeasure := strings.EqualFold(sourceField.Role, "MEASURE")
 			sourceField.Role = field.Role
 			if err := validateDWDCleaning(sourceField, field.Cleaning); err != nil {
 				appendDWDValidationIssue(
@@ -4163,13 +4170,6 @@ func validateDWDLLMOutput(
 				appendDWDValidationIssue(
 					&issues, "field %s processing is invalid: %v",
 					field.OutputCode, err,
-				)
-			}
-			if sourceMeasure && (containsString(field.Cleaning, "COALESCE_DEFAULT") ||
-				containsString(field.Cleaning, "COALESCE_UNKNOWN") ||
-				containsString(field.Cleaning, "COALESCE_NEGATIVE_ONE")) {
-				appendDWDValidationIssue(
-					&issues, "measure field %s must not fill nulls", field.OutputCode,
 				)
 			}
 		}
@@ -4319,21 +4319,6 @@ func validateDWDCleaning(field dwdPlanningField, cleaning []string) error {
 	}
 	canonical := strings.ToUpper(field.CanonicalType)
 	role := strings.ToUpper(field.Role)
-	dimensionRelated := role == "IDENTIFIER" || role == "DIMENSION" ||
-		role == "ATTRIBUTE" || role == "TIME"
-	nullFillEligible := role == "IDENTIFIER" || role == "DIMENSION" ||
-		role == "ATTRIBUTE"
-	hasTypedDefault := seen["COALESCE_DEFAULT"] ||
-		(canonical == "STRING" && seen["COALESCE_UNKNOWN"]) ||
-		((canonical == "INTEGER" || canonical == "DECIMAL") &&
-			seen["COALESCE_NEGATIVE_ONE"])
-	if canonical == "STRING" && !seen["TRIM"] {
-		return errors.New("STRING field requires TRIM")
-	}
-	if nullFillEligible && field.Nullable &&
-		dwdDefaultNullValueSupported(canonical) && !hasTypedDefault {
-		return errors.New("nullable dimension field requires COALESCE_DEFAULT")
-	}
 	if canonical == "DATE" && !seen["CAST_DATE"] {
 		return errors.New("DATE field requires CAST_DATE")
 	}
@@ -4346,13 +4331,11 @@ func validateDWDCleaning(field dwdPlanningField, cleaning []string) error {
 			"STRING date/time field requires CAST_DATE day normalization",
 		)
 	}
-	hasNullFill := seen["COALESCE_DEFAULT"] ||
-		seen["COALESCE_UNKNOWN"] || seen["COALESCE_NEGATIVE_ONE"]
-	if !dimensionRelated && hasNullFill {
-		return errors.New("non-dimension field must not fill nulls")
-	}
-	if role == "TIME" && hasNullFill {
-		return errors.New("time field must not fill nulls with a sentinel")
+	hasLegacyNullFill := seen["COALESCE_UNKNOWN"] || seen["COALESCE_NEGATIVE_ONE"]
+	hasNumericDefault := seen["COALESCE_DEFAULT"] &&
+		(canonical == "INTEGER" || canonical == "DECIMAL")
+	if dwdFieldIsAssociationKey(field) && (hasNumericDefault || hasLegacyNullFill) {
+		return errors.New("association key must not fill nulls")
 	}
 	if seen["TRIM"] || seen["COALESCE_UNKNOWN"] {
 		if canonical != "STRING" {
@@ -4454,6 +4437,12 @@ func validateDWDProcessing(
 			}
 			canonical = target
 		case "TRIM", "UPPER", "LOWER", "REPLACE", "SUBSTRING":
+			if dwdFieldIsAssociationKey(field) {
+				return fmt.Errorf(
+					"%s must not rewrite an association key without an approved mapping",
+					stepPath,
+				)
+			}
 			if operation == "REPLACE" && step.SearchValue == "" {
 				return fmt.Errorf("%s requires non-empty searchValue", stepPath)
 			}
@@ -4482,6 +4471,9 @@ func validateDWDProcessing(
 			}
 			canonical = "DECIMAL"
 		case "COALESCE":
+			if dwdFieldIsAssociationKey(field) {
+				return fmt.Errorf("%s must not fill an association key", stepPath)
+			}
 			if strings.EqualFold(field.Role, "TIME") ||
 				strings.EqualFold(field.Role, "MEASURE") {
 				return fmt.Errorf(

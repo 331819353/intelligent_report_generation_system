@@ -389,8 +389,6 @@ func NewHandler(authService *auth.Service, permissions *access.Service, service 
 				writeDSError(w, http.StatusConflict, "DATA_SOURCE_TEST_FAILED", "current data source version failed its connection test")
 			case errors.Is(err, ErrTestRequired):
 				writeDSError(w, http.StatusConflict, "DATA_SOURCE_TEST_REQUIRED", "current data source version must pass a connection test before publication")
-			case errors.Is(err, ErrTestExpired):
-				writeDSError(w, http.StatusConflict, "DATA_SOURCE_TEST_EXPIRED", "connection test has expired; test the current version again")
 			case errors.Is(err, ErrSourceVersionChanged):
 				writeDSError(w, http.StatusConflict, "DATA_SOURCE_VERSION_CHANGED", "data source configuration changed; test the current version again")
 			default:
@@ -430,7 +428,7 @@ func connectionConfigurationMessage(err error) string {
 	case strings.Contains(message, "password is required"):
 		return "新建数据源必须填写密码；修改时留空会保留原密码"
 	case strings.Contains(message, "unsupported data source type"):
-		return "当前仅支持 MySQL、Oracle 和 Excel/CSV 数据源"
+		return "当前支持 MySQL、MariaDB、PostgreSQL、Oracle、SQL Server、ClickHouse 和 Excel/CSV 数据源"
 	case strings.Contains(message, "invalid Oracle connection mode"):
 		return "Oracle 连接模式只能选择 Service Name 或 SID"
 	case strings.Contains(message, "sensitive fields are forbidden"):
@@ -479,7 +477,7 @@ func sourceFromInput(ctx context.Context, service *Service, credentials Credenti
 	if in.Type == TypeExcel {
 		return source, nil
 	}
-	if in.Type != TypeMySQL && in.Type != TypeOracle {
+	if !IsDatabaseType(in.Type) {
 		return Source{}, errors.New("unsupported data source type")
 	}
 
@@ -538,7 +536,7 @@ func sourceFromInput(ctx context.Context, service *Service, credentials Credenti
 
 // publicDataSource 补齐旧 ENV 数据源的可查看连接信息，同时确保密码和引用永不进入响应。
 func publicDataSource(ctx context.Context, source Source, credentials CredentialManager) Source {
-	if credentials == nil || (source.Type != TypeMySQL && source.Type != TypeOracle) {
+	if credentials == nil || !IsDatabaseType(source.Type) {
 		return source
 	}
 	// 新记录已持久化全部可展示字段，无需为普通列表读取解密密码；仅旧 ENV 记录按需补齐。

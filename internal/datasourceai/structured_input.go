@@ -5,25 +5,35 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	aiplatform "intelligent-report-generation-system/internal/ai"
+	"intelligent-report-generation-system/internal/datasource"
 )
 
 var (
-	markdownFieldPattern    = regexp.MustCompile(`(?m)^\s*\|\s*([^|\r\n]+?)\s*\|\s*([^|\r\n]+?)\s*\|?\s*$`)
-	inlineFieldPattern      = regexp.MustCompile(`(?m)^\s*[-*]?\s*([^:=：|\r\n]{1,40}?)\s*[:=：]\s*(.+?)\s*$`)
-	markdownPasswordPattern = regexp.MustCompile("(?im)(\\|\\s*(?:密码|口令|password|passwd)\\s*\\|\\s*`?)([^`|\\r\\n]{1,})(`?\\s*\\|)")
-	inlinePasswordPattern   = regexp.MustCompile("(?im)((?:密码|口令|password|passwd)\\s*[:=：]\\s*[\\\"'`]?)([^\\\"'`\\r\\n|]{1,})([\\\"'`]?)")
-	nonCodeCharacterPattern = regexp.MustCompile(`[^a-z0-9]+`)
-	repeatedUnderscore      = regexp.MustCompile(`_+`)
-	naturalHostPattern      = regexp.MustCompile("(?i)(?:host|主机|地址)\\s*(?:为|是|[:：=])?\\s*[`'\"]?([A-Za-z0-9.-]+)")
-	naturalPortPattern      = regexp.MustCompile("(?i)(?:port|端口)\\s*(?:为|是|[:：=])?\\s*[`'\"]?([0-9]{1,5})")
-	naturalDatabasePattern  = regexp.MustCompile("(?i)(?:database(?:[ _-]?name|/service(?:[ _-]?name)?)?|(?:oracle\\s*)?service(?:[ _-]?name)?|数据库(?:名称)?|服务(?:名(?:称)?)?|库名)\\s*(?:为|是|[:：=])?\\s*[`'\"]?([A-Za-z0-9_$#.-]+)")
-	naturalSIDPattern       = regexp.MustCompile("(?i)(?:oracle\\s*)?sid\\s*(?:为|是|[:：=])?\\s*[`'\"]?([A-Za-z0-9_$#.-]+)")
-	naturalUsernamePattern  = regexp.MustCompile("(?i)(?:username|user|用户名|用户|账号|账户)\\s*(?:为|是|[:：=])?\\s*[`'\"]?([A-Za-z0-9_$#.@-]+)")
+	markdownFieldPattern      = regexp.MustCompile(`(?m)^\s*\|\s*([^|\r\n]+?)\s*\|\s*([^|\r\n]+?)\s*\|?\s*$`)
+	inlineFieldPattern        = regexp.MustCompile(`(?m)^\s*[-*]?\s*([^:=：|\r\n]{1,40}?)\s*[:=：]\s*(.+?)\s*$`)
+	markdownPasswordPattern   = regexp.MustCompile("(?im)(\\|\\s*(?:密码|口令|password|passwd)\\s*\\|\\s*`?)([^`|\\r\\n]{1,})(`?\\s*\\|)")
+	inlinePasswordPattern     = regexp.MustCompile("(?im)((?:密码|口令|password|passwd)\\s*[:=：]\\s*[\\\"'`]?)([^\\\"'`\\r\\n|]{1,})([\\\"'`]?)")
+	uriPasswordPattern        = regexp.MustCompile(`(?i)(://[^/@\s:]+:)([^@/\s]+)(@)`)
+	connectionURIPattern      = regexp.MustCompile("(?i)(?:jdbc:)?(?:mysql|mariadb|postgresql|postgres|oracle|sqlserver|mssql|clickhouse)://[^\\s\\\"'`]+")
+	oracleJDBCThinPattern     = regexp.MustCompile(`(?i)jdbc:oracle:thin:@(?:/{2})?([A-Za-z0-9.-]+):([0-9]{1,5})[/:]([A-Za-z0-9_$#.-]+)`)
+	sqlServerJDBCPattern      = regexp.MustCompile(`(?i)jdbc:sqlserver://([A-Za-z0-9.-]+)(?::([0-9]{1,5}))?(?:;[^\s]+)?`)
+	sqlServerDatabasePattern  = regexp.MustCompile(`(?i)(?:^|;)database(?:name)?=([^;\s]+)`)
+	nonCodeCharacterPattern   = regexp.MustCompile(`[^a-z0-9]+`)
+	repeatedUnderscore        = regexp.MustCompile(`_+`)
+	naturalHostPattern        = regexp.MustCompile("(?i)(?:host|主机|地址)\\s*(?:为|是|[:：=])?\\s*[`'\"]?([A-Za-z0-9.-]+)")
+	naturalPortPattern        = regexp.MustCompile("(?i)(?:port|端口)\\s*(?:为|是|[:：=])?\\s*[`'\"]?([0-9]{1,5})")
+	naturalDatabasePattern    = regexp.MustCompile("(?i)(?:database(?:[ _-]?name|/service(?:[ _-]?name)?)?|(?:oracle\\s*)?service(?:[ _-]?name)?|数据库(?:名称)?|服务(?:名(?:称)?)?|库名)\\s*(?:为|是|[:：=])?\\s*[`'\"]?([A-Za-z0-9_$#.-]+)")
+	naturalSIDPattern         = regexp.MustCompile("(?i)(?:oracle\\s*)?sid\\s*(?:为|是|[:：=])?\\s*[`'\"]?([A-Za-z0-9_$#.-]+)")
+	naturalUsernamePattern    = regexp.MustCompile("(?i)(?:username|user|用户名|用户|账号|账户)\\s*(?:为|是|[:：=])?\\s*[`'\"]?([A-Za-z0-9_$#.@-]+)")
+	positionalEndpointPattern = regexp.MustCompile(`^\s*([A-Za-z0-9.-]+)\s*[:：]\s*([0-9]{1,5})\s*[/／]\s*([A-Za-z0-9_$#.-]+)\s*$`)
+	positionalUsernamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_$#.@-]{0,127}$`)
 )
 
 type parsedInstruction struct {
@@ -35,14 +45,64 @@ type parsedInstruction struct {
 
 func redactInstructionSecrets(value string) (string, bool) {
 	mentioned := markdownPasswordPattern.MatchString(value) || inlinePasswordPattern.MatchString(value)
+	if uriPasswordPattern.MatchString(value) {
+		mentioned = true
+	}
 	value = markdownPasswordPattern.ReplaceAllString(value, "${1}[已转入安全输入]${3}")
 	value = inlinePasswordPattern.ReplaceAllString(value, "${1}[已转入安全输入]${3}")
-	return value, mentioned
+	value = uriPasswordPattern.ReplaceAllString(value, "${1}[已转入安全输入]${3}")
+	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	for endpointIndex, line := range lines {
+		if !positionalEndpointPattern.MatchString(line) {
+			continue
+		}
+		following := followingNonEmptyLineIndexes(lines, endpointIndex, 2)
+		if len(following) < 2 || !positionalUsernamePattern.MatchString(strings.TrimSpace(lines[following[0]])) {
+			continue
+		}
+		candidate := strings.TrimSpace(lines[following[1]])
+		if !looksLikePositionalPassword(candidate) {
+			continue
+		}
+		lines[following[1]] = "[已转入安全输入]"
+		mentioned = true
+		break
+	}
+	return strings.Join(lines, "\n"), mentioned
+}
+
+func followingNonEmptyLineIndexes(lines []string, start, limit int) []int {
+	result := make([]int, 0, limit)
+	for index := start + 1; index < len(lines) && len(result) < limit; index++ {
+		if strings.TrimSpace(lines[index]) != "" {
+			result = append(result, index)
+		}
+	}
+	return result
+}
+
+func looksLikePositionalPassword(value string) bool {
+	if len(value) < 8 || len(value) > 512 || strings.IndexFunc(value, unicode.IsSpace) >= 0 {
+		return false
+	}
+	hasLetter, hasDigit, hasSymbol := false, false, false
+	for _, character := range value {
+		switch {
+		case unicode.IsLetter(character):
+			hasLetter = true
+		case unicode.IsDigit(character):
+			hasDigit = true
+		default:
+			hasSymbol = true
+		}
+	}
+	return hasLetter && (hasDigit || hasSymbol)
 }
 
 func parseStructuredInstruction(instruction string, base Draft) parsedInstruction {
 	result := parsedInstruction{Draft: base, Recognized: map[string]bool{}}
 	seen := result.Recognized
+	explicitType := structuredSourceType(instruction)
 	apply := func(rawKey, rawValue string) {
 		key := normalizeStructuredKey(rawKey)
 		value := cleanStructuredValue(rawValue)
@@ -111,6 +171,94 @@ func parseStructuredInstruction(instruction string, base Draft) parsedInstructio
 	for _, match := range inlineFieldPattern.FindAllStringSubmatch(instruction, -1) {
 		apply(match[1], match[2])
 	}
+	if match := oracleJDBCThinPattern.FindStringSubmatch(instruction); len(match) == 4 {
+		apply("type", string(datasource.TypeOracle))
+		apply("host", match[1])
+		apply("port", match[2])
+		apply("service_name", match[3])
+	}
+	if match := sqlServerJDBCPattern.FindStringSubmatch(instruction); len(match) == 3 {
+		apply("type", string(datasource.TypeSQLServer))
+		apply("host", match[1])
+		if match[2] == "" {
+			apply("port", strconv.Itoa(datasource.DefaultDatabasePort(datasource.TypeSQLServer)))
+		} else {
+			apply("port", match[2])
+		}
+		if database := sqlServerDatabasePattern.FindStringSubmatch(match[0]); len(database) == 2 {
+			apply("database", database[1])
+		}
+	}
+	for _, raw := range connectionURIPattern.FindAllString(instruction, -1) {
+		candidate := strings.TrimRight(raw, ",，。);；")
+		candidate = strings.ReplaceAll(candidate, "[已转入安全输入]", "redacted")
+		if strings.HasPrefix(strings.ToLower(candidate), "jdbc:") {
+			candidate = candidate[len("jdbc:"):]
+		}
+		parsed, err := url.Parse(candidate)
+		if err != nil || parsed.Hostname() == "" {
+			continue
+		}
+		sourceType := structuredSourceType(parsed.Scheme)
+		if sourceType == "" {
+			continue
+		}
+		apply("type", sourceType)
+		apply("host", parsed.Hostname())
+		port := parsed.Port()
+		if port == "" {
+			port = strconv.Itoa(datasource.DefaultDatabasePort(datasource.Type(sourceType)))
+		}
+		apply("port", port)
+		database := strings.Trim(parsed.Path, "/")
+		if database == "" {
+			database = parsed.Query().Get("database")
+		}
+		if database == "" {
+			database = parsed.Query().Get("databaseName")
+		}
+		if sourceType == string(datasource.TypeOracle) {
+			apply("service_name", database)
+		} else {
+			apply("database", database)
+		}
+		if parsed.User != nil {
+			apply("username", parsed.User.Username())
+		}
+	}
+	lines := strings.Split(strings.ReplaceAll(instruction, "\r\n", "\n"), "\n")
+	for endpointIndex, line := range lines {
+		match := positionalEndpointPattern.FindStringSubmatch(line)
+		if len(match) != 4 {
+			continue
+		}
+		port, err := strconv.Atoi(match[2])
+		if err != nil || port <= 0 || port > 65535 {
+			continue
+		}
+		apply("host", match[1])
+		apply("port", match[2])
+		endpointType := explicitType
+		if endpointType == "" {
+			endpointType = string(datasource.DatabaseTypeFromPort(port))
+		}
+		if endpointType != "" {
+			apply("type", endpointType)
+			if endpointType == string(datasource.TypeOracle) {
+				apply("service_name", match[3])
+			} else {
+				apply("database", match[3])
+			}
+		}
+		following := followingNonEmptyLineIndexes(lines, endpointIndex, 1)
+		if len(following) == 1 {
+			username := strings.TrimSpace(lines[following[0]])
+			if positionalUsernamePattern.MatchString(username) {
+				apply("username", username)
+			}
+		}
+		break
+	}
 	for _, item := range []struct {
 		key     string
 		pattern *regexp.Regexp
@@ -125,8 +273,8 @@ func parseStructuredInstruction(instruction string, base Draft) parsedInstructio
 			apply(item.key, match[1])
 		}
 	}
-	if sourceType := structuredSourceType(instruction); sourceType != "" {
-		result.Draft.Type = sourceType
+	if explicitType != "" {
+		result.Draft.Type = explicitType
 		seen["type"] = true
 	}
 	result.RecognizedFields = len(seen)
@@ -177,17 +325,13 @@ func cleanStructuredValue(value string) string {
 }
 
 func structuredSourceType(value string) string {
-	value = strings.ToLower(value)
-	switch {
-	case strings.Contains(value, "mysql"):
-		return "MYSQL"
-	case strings.Contains(value, "oracle"):
-		return "ORACLE"
-	case strings.Contains(value, "excel") || strings.Contains(value, "csv"):
-		return "EXCEL"
-	default:
-		return ""
+	if strings.Contains(strings.ToLower(value), "excel") || strings.Contains(strings.ToLower(value), "csv") {
+		return string(datasource.TypeExcel)
 	}
+	if value := datasource.DatabaseTypeFromText(value); value != "" {
+		return string(value)
+	}
+	return ""
 }
 
 func localTurnResult(parsed parsedInstruction, mode string, passwordProvided, fileProvided bool) (TurnResult, error) {

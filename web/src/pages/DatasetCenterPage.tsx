@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
-import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowDownIcon, ArrowUpIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DotsSixVerticalIcon, DotsThreeVerticalIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MagnifyingGlassIcon, MathOperationsIcon, PlusIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTSlashIcon, TreeStructureIcon, WarningCircleIcon, XIcon, type Icon } from '@phosphor-icons/react'
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type DragEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
+import { ApproximateEqualsIcon, ArrowClockwiseIcon, ArrowCounterClockwiseIcon, ArrowDownIcon, ArrowUpIcon, ArrowsInSimpleIcon, ArrowsLeftRightIcon, ArrowsOutSimpleIcon, CalendarDotsIcon, CaretDownIcon, CaretUpIcon, CheckCircleIcon, DotsSixVerticalIcon, DotsThreeIcon, DotsThreeVerticalIcon, DropSlashIcon, FunnelIcon, GitMergeIcon, LinkSimpleIcon, ListChecksIcon, MagicWandIcon, MagnifyingGlassIcon, MathOperationsIcon, PencilSimpleIcon, PlusIcon, PlusMinusIcon, RowsIcon, ScissorsIcon, SwapIcon, TextAaIcon, TextTSlashIcon, TrashIcon, TreeStructureIcon, WarningCircleIcon, XIcon, type Icon } from '@phosphor-icons/react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import '../styles/dataset-designer.css'
@@ -8,6 +8,7 @@ import { AssetSharingSelect } from '../components/AssetSharingSelect'
 import { DatasetAIDock } from '../components/dataset/DatasetAIDock'
 import { DatasetComponentToolbar } from '../components/dataset/DatasetComponentToolbar'
 import { DatasetDesignWorkspace } from '../components/dataset/DatasetDesignWorkspace'
+import { IntelligentModelingAdvisor } from '../components/dataset/IntelligentModelingAdvisor'
 import { RequestError } from '../lib/api'
 import { currentDomain, currentDomainID, subscribeDomainChange } from '../lib/domain-context'
 import {
@@ -18,11 +19,14 @@ import {
   type DatasetAIPlanResult,
   type DatasetAIProgressEvent,
 } from '../lib/dataset-ai'
+import { filterDatasetAICandidateTables, inferDatasetAIModelKind, type DatasetAIModelKind } from '../lib/dataset-ai-intake'
 import { hydrateDatasetDraft } from '../lib/dataset-draft'
+import { loadDatasetEditorRecovery, removeDatasetEditorRecovery, saveDatasetEditorRecovery } from '../lib/dataset-editor-recovery'
 import {
   generatedGraphFieldIdentity,
   graphContains,
   graphConnectionError,
+  graphDownstreamTargets,
   graphInputKey,
   graphLeaves,
   graphOutputKeys,
@@ -47,6 +51,7 @@ import {
   type GraphTransformFamily,
   type GraphTransformOperation,
   type GraphTransformRule,
+  type GraphTarget,
   type ProducedField,
 } from '../lib/dataset-graph'
 import {
@@ -98,6 +103,7 @@ type CanvasEdgeTarget =
   | { kind: 'TRANSFORM'; id: string }
   | { kind: 'END'; id: string }
 type PendingEdgeInsertion = { inserted: RelationInput; source: RelationInput; target: CanvasEdgeTarget }
+type CanvasValidationLock = { kind: CanvasComponentKind; id: string; message: string }
 type NodePreviewState = { loading: boolean; data?: AssetTablePreview; error?: string; suggestion?: string }
 type VersionPreviewState = { versionID: string; loading: boolean; data?: DatasetPreview; error?: string }
 type DatasetVersionDiff = {
@@ -110,13 +116,7 @@ type DatasetBatchAction = 'publish' | 'run' | 'stop' | 'delete'
 type DatasetBatchOutcome = { dataset: DatasetSummary; error?: string }
 type Notice = { tone: 'success' | 'error'; message: string }
 type DraftConflict = { currentVersion?: number; currentHash?: string }
-type ModelingLogEntry = {
-  id: string
-  timestamp: string
-  label: string
-  message: string
-  tone: 'queued' | 'running' | 'success' | 'warning' | 'error'
-}
+type DraftSaveState = 'idle' | 'pending' | 'saving' | 'saved' | 'local' | 'error'
 type ModelingMonitorState = {
   tasks: BackgroundTask[]
   ready: boolean
@@ -152,7 +152,21 @@ type DatasetEditorSnapshot = {
 }
 type DatasetAIUndo = { before: DatasetEditorSnapshot; appliedFingerprint: string }
 type DatasetAIReviewLabels = { nodes: Record<string, string>; fields: Record<string, string> }
+type DatasetAIGraphOverview = {
+  nodes: string[]
+  joins: string[]
+  transforms: string[]
+  groups: string[]
+  end?: string
+}
 type DatasetAIRetryAction = 'GENERATE' | 'APPLY' | null
+type DatasetAIConversationEntry = {
+  id: string
+  role: 'USER' | 'ASSISTANT'
+  content: string
+  result?: DatasetAIPlanResult
+  status?: 'STAGED' | 'SUPERSEDED' | 'APPLIED' | 'REVERTED'
+}
 type DatasetAIErrorView = {
   title: string
   message: string
@@ -171,6 +185,27 @@ const statusLabels: Record<string, string> = {
 }
 
 const snapshotDatasets: DatasetSummary[] = [
+  {
+    id: 'snapshot-orders-ods-published', code: 'ods_sales_order_source', name: '销售订单贴源数据',
+    description: '保留订单头、订单行、支付与履约来源字段，已完成结构核验并可进入分层建模。', type: 'MAPPING', status: 'PUBLISHED',
+    domainId: 'snapshot-enterprise-operations', originTableId: 'snapshot-table-orders', originTableName: 'fact_sales_order',
+    originDataSourceName: '销售业务核心库', layer: 'ODS', tags: ['订单', '贴源', '结构已核验'], version: 4,
+    dslHash: 'f19a10e0a02d4f24', currentPublishedVersionId: 'snapshot-orders-ods-v4', updatedAt: '2026-08-11T10:10:00+08:00',
+  },
+  {
+    id: 'snapshot-customer-ods-published', code: 'ods_crm_customer_master', name: 'CRM 客户主数据贴源表',
+    description: '保留客户编码、名称、等级、区域、注册时间和来源渠道，是 CRM 客户身份的权威贴源数据。', type: 'MAPPING', status: 'PUBLISHED',
+    domainId: 'snapshot-enterprise-operations', originTableId: 'snapshot-table-customer-master', originTableName: 'crm_customer_master',
+    originDataSourceName: 'CRM 客户中心', layer: 'ODS', tags: ['客户', '主数据', 'CRM'], version: 3,
+    dslHash: 'c8a6df6bdba1ee52', currentPublishedVersionId: 'snapshot-customer-ods-v3', updatedAt: '2026-08-11T10:02:00+08:00',
+  },
+  {
+    id: 'snapshot-orders-dwd-published', code: 'dwd_sales_order_line', name: '销售订单行明细',
+    description: '按订单行粒度沉淀商品、客户、渠道、金额与履约状态，已通过粒度和扇出校验。', type: 'MODEL', status: 'PUBLISHED',
+    domainId: 'snapshot-enterprise-operations', originTableId: 'snapshot-table-orders', originTableName: 'fact_sales_order',
+    originDataSourceName: '销售业务核心库', layer: 'DWD', tags: ['订单', '交易明细', '原子事实'], version: 5,
+    dslHash: '80d3a092c0472458', currentPublishedVersionId: 'snapshot-orders-dwd-v5', updatedAt: '2026-08-11T09:55:00+08:00',
+  },
   {
     id: 'snapshot-sales-order-detail', code: 'dwd_sales_order_detail', name: '销售订单经营明细',
     description: '统一订单、客户、商品和渠道口径，支撑经营分析与报告取数。', type: 'MODEL', status: 'DRAFT',
@@ -334,212 +369,8 @@ function dagRunLabel(run?: DatasetDAGRun) {
   if (run.status === 'FAILED') return '物化失败 · 可重试'
   return '物化已取消 · 可重试'
 }
-const backgroundTaskStatusLabels: Record<BackgroundTaskStatus, string> = {
-  QUEUED: '排队中',
-  RUNNING: '执行中',
-  SUCCEEDED: '已完成',
-  PARTIAL: '部分完成',
-  FAILED: '失败',
-  CANCELLED: '已中止',
-  SKIPPED: '已跳过',
-  STALE: '已失效',
-}
-
 const isActiveModelingTask = (task: BackgroundTask) =>
   activeBackgroundTaskStatuses.has(task.status)
-const modelingProgress = (tasks: BackgroundTask[]) => {
-  if (!tasks.length || !tasks.some(isActiveModelingTask)) return undefined
-  const values = tasks.map(task => {
-    if (!activeBackgroundTaskStatuses.has(task.status)) return 100
-    if (typeof task.progressPercent === 'number') return task.progressPercent
-    if (task.status === 'QUEUED') return 0
-    return undefined
-  })
-  if (values.some(value => value === undefined)) return undefined
-  return Math.round(values.reduce<number>((sum, value) => sum + (value ?? 0), 0) / values.length)
-}
-const modelingLogTone = (status: BackgroundTaskStatus): ModelingLogEntry['tone'] => {
-  if (status === 'SUCCEEDED' || status === 'SKIPPED') return 'success'
-  if (status === 'PARTIAL' || status === 'CANCELLED' || status === 'STALE') return 'warning'
-  if (status === 'FAILED') return 'error'
-  return status === 'RUNNING' ? 'running' : 'queued'
-}
-const modelingLogEntries = (
-  tasks: BackgroundTask[],
-  awaitingDiscovery: boolean,
-  trigger: DatasetLLMTrigger,
-): ModelingLogEntry[] => {
-  const entries: ModelingLogEntry[] = []
-  for (const task of tasks) {
-    entries.push({
-      id: `${task.id}:queued`,
-      timestamp: task.createdAt,
-      label: '已提交',
-      message: `${task.name}已进入${task.kindLabel}队列`,
-      tone: 'queued',
-    })
-    if (task.startedAt) {
-      entries.push({
-        id: `${task.id}:started`,
-        timestamp: task.startedAt,
-        label: '执行中',
-        message: `${task.name}开始执行（第 ${task.attempt} / ${task.maxAttempts} 次）`,
-        tone: 'running',
-      })
-    }
-    if (isActiveModelingTask(task) && task.updatedAt !== task.startedAt &&
-      task.updatedAt !== task.createdAt) {
-      entries.push({
-        id: `${task.id}:updated:${task.updatedAt}`,
-        timestamp: task.updatedAt,
-        label: task.status === 'QUEUED' ? '排队中' : '处理中',
-        message: `${task.name}：${task.progressText}`,
-        tone: task.status === 'QUEUED' ? 'queued' : 'running',
-      })
-    }
-    if (!activeBackgroundTaskStatuses.has(task.status)) {
-      entries.push({
-        id: `${task.id}:completed`,
-        timestamp: task.completedAt || task.updatedAt,
-        label: backgroundTaskStatusLabels[task.status],
-        message: task.errorMessage
-          ? `${task.name}：${task.errorMessage}`
-          : `${task.name}${task.progressText ? `：${task.progressText}` : ''}`,
-        tone: modelingLogTone(task.status),
-      })
-    }
-  }
-  if (awaitingDiscovery && !entries.length) {
-    entries.push({
-      id: `${trigger}:connecting`,
-      timestamp: new Date().toISOString(),
-      label: '连接中',
-      message: '任务已提交，正在读取持久化任务记录…',
-      tone: 'running',
-    })
-  }
-  return entries
-    .sort((left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime())
-    .slice(-40)
-}
-
-function DatasetModelingAction({
-  config,
-  monitor,
-  actionBusy,
-  submitting,
-  logID,
-  onTrigger,
-  onTogglePinned,
-}: {
-  config: ModelingMonitorConfig
-  monitor: ModelingMonitorState
-  actionBusy: boolean
-  submitting: boolean
-  logID: string
-  onTrigger: () => void
-  onTogglePinned: () => void
-}) {
-  const activeTasks = monitor.tasks.filter(isActiveModelingTask)
-  const busy = submitting || monitor.expected || activeTasks.length > 0
-  const progressPercent = modelingProgress(monitor.tasks)
-  const displayProgressPercent = progressPercent ??
-    (!busy && monitor.tasks.length ? 100 : undefined)
-  const progressLabel = displayProgressPercent === undefined
-    ? busy ? '执行中' : '—'
-    : `${displayProgressPercent}%`
-  const completedCount = monitor.tasks.length - activeTasks.length
-  const logs = modelingLogEntries(
-    monitor.tasks,
-    busy && !monitor.tasks.length,
-    config.trigger,
-  )
-  const hasLogs = busy || monitor.tasks.length > 0 || Boolean(monitor.syncError)
-  const buttonLabel = !monitor.ready
-    ? '状态同步中'
-    : submitting
-      ? '正在提交…'
-      : busy && progressPercent !== undefined
-        ? `${config.label} ${progressPercent}%`
-        : busy
-          ? `${config.label}中`
-          : config.label
-  const buttonStyle = progressPercent === undefined
-    ? undefined
-    : { '--dataset-modeling-progress': `${progressPercent}%` } as CSSProperties
-  const status = monitor.syncError
-    ? '同步重试中'
-    : busy
-      ? '每 3 秒刷新'
-      : `${logs.length} 条`
-
-  return <div
-    className={`dataset-modeling-action${busy ? ' is-running' : ''}${progressPercent === undefined ? ' is-indeterminate' : ' is-determinate'}${hasLogs ? ' has-logs' : ''}${monitor.logsPinned ? ' is-pinned' : ''}`}
-    onKeyDown={event => {
-      if (event.key === 'Escape' && monitor.logsPinned) onTogglePinned()
-    }}
-  >
-    <button
-      className="dataset-modeling-trigger"
-      type="button"
-      disabled={actionBusy || !monitor.ready || busy}
-      aria-busy={busy}
-      aria-describedby={hasLogs ? logID : undefined}
-      style={buttonStyle}
-      title={busy ? `${config.label}正在运行；点击右上角日志按钮查看进度` : config.idleTitle}
-      onClick={onTrigger}
-    >
-      <span>{buttonLabel}</span>
-    </button>
-    {hasLogs && <button
-      className="dataset-modeling-log-toggle"
-      type="button"
-      aria-label={monitor.logsPinned ? `取消固定${config.label}日志` : `固定显示${config.label}日志`}
-      aria-controls={logID}
-      aria-expanded={monitor.logsPinned}
-      onClick={onTogglePinned}
-    >
-      <ListChecksIcon size={13} weight="bold" aria-hidden="true" />
-    </button>}
-    {hasLogs && <section
-      className="dataset-modeling-log-popover"
-      id={logID}
-      role="region"
-      aria-label={`${config.label}实时日志`}
-    >
-      <header>
-        <div><MagicWandIcon size={17} weight="duotone" aria-hidden="true" /><span><strong>{config.label}运行日志</strong><small>真实任务状态 · 安全摘要</small></span></div>
-        <em>{status}</em>
-      </header>
-      <div className="dataset-modeling-log-progress">
-        <span>{monitor.tasks.length
-          ? `已结束 ${completedCount} / ${monitor.tasks.length} 个任务`
-          : monitor.ready ? '正在发现任务阶段…' : '正在同步任务状态…'}</span>
-        <strong>{progressLabel}</strong>
-        <progress
-          max={100}
-          value={displayProgressPercent}
-          aria-label={`${config.label}总体进度`}
-          aria-valuetext={displayProgressPercent === undefined ? '任务执行中，暂时无法可靠估算百分比' : `${displayProgressPercent}%`}
-        />
-      </div>
-      {monitor.syncError && <div className="dataset-modeling-log-error" role="alert">
-        状态同步暂时失败：{monitor.syncError}
-      </div>}
-      <ol className="dataset-modeling-live-log" role="log" aria-live="polite" aria-relevant="additions text">
-        {!logs.length && <li className="running">
-          <time aria-hidden="true">--:--:--</time><span>连接中</span><strong>正在读取{config.label}任务…</strong>
-        </li>}
-        {logs.map(entry => <li className={entry.tone} key={entry.id}>
-          <time dateTime={entry.timestamp}>{new Date(entry.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}</time>
-          <span>{entry.label}</span>
-          <strong>{entry.message}</strong>
-        </li>)}
-      </ol>
-      <footer>点击右上日志按钮打开或关闭；日志不展示模型输入、原始输出或业务数据。</footer>
-    </section>}
-  </div>
-}
 
 const layerOverview: Array<{ layer: DatasetLayer; name: string; description: string }> = [
   { layer: 'ODS', name: '贴源层', description: '结构映射 · 数据留在来源' },
@@ -676,6 +507,38 @@ const datasetLayerLabels: Record<DatasetLayer, string> = {
   ADS: 'ADS · 应用交付数据',
 }
 const editorFingerprint = (snapshot: DatasetEditorSnapshot) => JSON.stringify(snapshot)
+
+function publicationValidationLock(record: DatasetRecord, cause: RequestError): CanvasValidationLock | null {
+  const issue = (cause.detail.details ?? cause.detail.issues)?.[0]
+  if (!issue) return null
+  const path = issue.path || ''
+  const message = issue.reason || issue.message || cause.detail.message
+  const graph = record.dsl.designer
+  const indexed = path.match(/(?:designer\.)?(nodes|joins|groups|transforms)\[(\d+)]/)
+  if (indexed) {
+    const index = Number(indexed[2])
+    if (indexed[1] === 'nodes') {
+      const id = record.dsl.nodes[index]?.id
+      return typeof id === 'string' ? { kind: 'NODE', id, message } : null
+    }
+    if (indexed[1] === 'joins') {
+      const executableJoins = Array.isArray(record.dsl.joins) ? record.dsl.joins as Array<Record<string, unknown>> : []
+      const executableID = executableJoins[index]?.id
+      const id = typeof executableID === 'string' ? executableID : graph?.joins[index]?.id
+      return id ? { kind: 'JOIN', id, message } : null
+    }
+    if (indexed[1] === 'groups') return graph?.groups[index] ? { kind: 'GROUP', id: graph.groups[index].id, message } : null
+    if (indexed[1] === 'transforms') return graph?.transforms?.[index] ? { kind: 'TRANSFORM', id: graph.transforms[index].id, message } : null
+  }
+  if (path.startsWith('nodes') && typeof record.dsl.nodes[0]?.id === 'string') return { kind: 'NODE', id: record.dsl.nodes[0].id as string, message }
+  if (path.startsWith('joins') && graph?.joins[0]) return { kind: 'JOIN', id: graph.joins[0].id, message }
+  if (path.startsWith('designer.groups') && graph?.groups[0]) return { kind: 'GROUP', id: graph.groups[0].id, message }
+  if (path.startsWith('designer.transforms') && graph?.transforms?.[0]) return { kind: 'TRANSFORM', id: graph.transforms[0].id, message }
+  if ((path.startsWith('fields') || path.startsWith('designer.end') || path === 'dsl' || path === 'executionPolicy') && graph?.end) {
+    return { kind: 'END', id: graph.end.id, message }
+  }
+  return null
+}
 
 type PreviewIssue = { reason: string; suggestion: string }
 
@@ -899,11 +762,12 @@ function withDesignerNodePreviewMetadata(node: DesignerNode, preview: AssetTable
 }
 
 function publishedDatasetAsset(dataset: DatasetSummary, version: PublishedVersionRecord): AssetTable {
+  const originDataSourceName = dataset.originDataSourceName?.trim() || '平台数据集'
   return {
     id: `dataset-version:${version.id}`,
-    dataSourceId: `dataset-layer:${dataset.layer}`,
-    dataSourceName: designerLayerLabels[dataset.layer].name,
-    dataSourceType: dataset.layer,
+    dataSourceId: `dataset-origin:${originDataSourceName}`,
+    dataSourceName: originDataSourceName,
+    dataSourceType: '已发布数据集',
     tableName: dataset.code,
     schemaName: dataset.layer,
     businessName: dataset.name,
@@ -928,9 +792,18 @@ async function loadDesignerAssets(datasetItems: DatasetSummary[], excludedDatase
     return publishedDatasetAsset(dataset, version)
   }))
   const rawTables = await rawTablesPromise
+  const rawSourceByName = new Map(rawTables.map(table => [table.dataSourceName.trim().toLocaleLowerCase(), table]))
+  const publishedAssets = versionResults.flatMap(result => result.status === 'fulfilled' ? [result.value] : []).map(table => {
+    const rawSource = rawSourceByName.get(table.dataSourceName.trim().toLocaleLowerCase())
+    return rawSource ? {
+      ...table,
+      dataSourceId: rawSource.dataSourceId,
+      dataSourceType: rawSource.dataSourceType,
+    } : table
+  })
   return [
     ...rawTables,
-    ...versionResults.flatMap(result => result.status === 'fulfilled' ? [result.value] : []),
+    ...publishedAssets,
   ]
 }
 
@@ -1184,6 +1057,58 @@ const snapshotEditorState = (): SnapshotEditorState => {
   }
 }
 
+const snapshotDatasetAIPlanResult = (mode: 'CREATE' | 'MODIFY' = 'MODIFY'): DatasetAIPlanResult => ({
+  requestId: `snapshot-ai-${Date.now()}`,
+  proposal: {
+    schemaVersion: '2.4',
+    mode,
+    summary: '按月和客户区域汇总销售金额与订单量，并保留清晰的时间、区域和指标口径。',
+    assumptions: [
+      '销售订单事实表通过 customer_id 与客户主数据表关联。',
+      '订单日期先转换为月份，再参与聚合分组。',
+      '销售金额使用 SUM，订单编号使用 COUNT_DISTINCT。',
+    ],
+    warnings: [],
+    changeSet: {
+      operations: [
+        { action: 'ADD', componentKind: 'TRANSFORM', componentId: 'transform_month', componentName: '订单月份转换', fields: ['rules'], inputChanges: [], description: '将订单日期转换为月份字段。' },
+        { action: 'ADD', componentKind: 'GROUP', componentId: 'group_region_month', componentName: '月度区域销售汇总', fields: ['dimensions', 'metrics'], inputChanges: [], description: '按订单月份与客户区域汇总销售金额和订单量。' },
+        { action: 'UPDATE', componentKind: 'END', componentId: 'end_1', componentName: '月度区域销售汇总', fields: ['input', 'outputs'], inputChanges: [], description: '最终只输出月份、区域、销售金额和订单量。' },
+      ],
+      fieldChanges: [],
+    },
+    plan: {
+      dataset: { name: '月度区域销售汇总', description: '按月份和客户区域汇总销售金额与订单量。' },
+      nodes: [
+        { id: 'node_1', tableId: 'snapshot-table-orders', alias: 'orders', selectedColumns: snapshotAssetColumns['snapshot-table-orders'].map(column => column.columnName) },
+        { id: 'node_2', tableId: 'snapshot-table-customers', alias: 'customer', selectedColumns: snapshotAssetColumns['snapshot-table-customers'].map(column => column.columnName) },
+      ],
+      joins: [{
+        id: 'join_1', name: '关联客户区域', left: { kind: 'NODE', id: 'node_1' }, right: { kind: 'NODE', id: 'node_2' }, joinType: 'LEFT',
+        conditions: [{ leftNodeId: 'node_1', leftColumn: 'customer_id', rightNodeId: 'node_2', rightColumn: 'customer_id' }],
+      }],
+      transforms: [{
+        id: 'transform_month', name: '订单月份转换', input: { kind: 'JOIN', id: 'join_1' }, family: 'DATE', componentType: 'DATE_FORMAT',
+        rules: [{ id: 'rule_order_month', operation: 'DATE_FORMAT', inputKeys: ['node_1.order_date'], unit: 'MONTH', output: { id: 'order_month', name: '订单月份', code: 'order_month', canonicalType: 'STRING' } }],
+      }],
+      groups: [{
+        id: 'group_region_month', name: '月度区域销售汇总', input: { kind: 'TRANSFORM', id: 'transform_month' },
+        dimensions: [{ nodeId: 'transform_month', column: 'order_month', grouping: '' }, { nodeId: 'node_2', column: 'region_name', grouping: '' }],
+        metrics: [{ nodeId: 'node_1', column: 'sales_amount', aggregation: 'SUM' }, { nodeId: 'node_1', column: 'order_id', aggregation: 'COUNT_DISTINCT' }],
+      }],
+      end: {
+        name: '月度区域销售汇总', input: { kind: 'GROUP', id: 'group_region_month' },
+        outputs: [
+          { nodeId: 'transform_month', column: 'order_month', name: '订单月份', code: 'order_month' },
+          { nodeId: 'node_2', column: 'region_name', name: '客户区域', code: 'region_name' },
+          { nodeId: 'node_1', column: 'sales_amount', name: '销售金额', code: 'sales_amount' },
+          { nodeId: 'node_1', column: 'order_id', name: '订单量', code: 'order_count' },
+        ],
+      },
+    },
+  },
+})
+
 const snapshotDatasetRecord = (summary: DatasetSummary): DatasetRecord => ({
   ...summary,
   draftVersionId: `${summary.id}-draft-v${summary.version}`,
@@ -1364,7 +1289,6 @@ export function DatasetCenterPage() {
   const pageParams = new URLSearchParams(location.search)
   const designSnapshot = import.meta.env.DEV && pageParams.has('snapshot')
   const qaViewport1920 = import.meta.env.DEV && pageParams.get('qa') === '1920'
-  const modelingLogIDPrefix = useId()
   const selectedBusinessDomainID = useSyncExternalStore(
     subscribeDomainChange,
     currentDomainID,
@@ -1381,6 +1305,7 @@ export function DatasetCenterPage() {
   const [layerFilter, setLayerFilter] = useState<DatasetLayer | 'ALL'>('ALL')
   const [notice, setNotice] = useState<Notice | null>(null)
   const [dialog, setDialog] = useState<DialogState | null>(null)
+  const [modelingAdvisorOpen, setModelingAdvisorOpen] = useState(false)
   const [selectedDatasetIDs, setSelectedDatasetIDs] = useState<Set<string>>(new Set())
   const [batchAction, setBatchAction] = useState<DatasetBatchAction | null>(null)
   // 行内只保留建模与当前状态下的主操作，其余进入溢出菜单，避免破坏性的「删除」
@@ -1433,6 +1358,9 @@ export function DatasetCenterPage() {
   const [historyConfirm, setHistoryConfirm] = useState(false)
   const [editingRecord, setEditingRecord] = useState<DatasetRecord | null>(null)
   const [draftConflict, setDraftConflict] = useState<DraftConflict | null>(null)
+  const [draftSaveState, setDraftSaveState] = useState<DraftSaveState>('idle')
+  const [draftSavedAt, setDraftSavedAt] = useState('')
+  const [validationLock, setValidationLock] = useState<CanvasValidationLock | null>(null)
   const [formError, setFormError] = useState('')
   const [busyAction, setBusyAction] = useState('')
   const [modelingMonitors, setModelingMonitors] = useState(() => {
@@ -1467,6 +1395,7 @@ export function DatasetCenterPage() {
   const [aiReviewLabels, setAIReviewLabels] = useState<DatasetAIReviewLabels>({ nodes: {}, fields: {} })
   const [aiRetryAction, setAIRetryAction] = useState<DatasetAIRetryAction>(null)
   const [aiLastInstruction, setAILastInstruction] = useState('')
+  const [aiConversation, setAIConversation] = useState<DatasetAIConversationEntry[]>([])
   const canvasFullscreenTarget = useRef<HTMLElement | null>(null)
   const historySelectionRequest = useRef(0)
   const endPreviewRequest = useRef(0)
@@ -1474,9 +1403,17 @@ export function DatasetCenterPage() {
   const openedRouteDatasetID = useRef('')
   const aiRequest = useRef(0)
   const aiApplyRequest = useRef(0)
+  const aiProposalCanvasFingerprint = useRef('')
+  const aiPreviewedRequest = useRef('')
   const editorFingerprintRef = useRef('')
   const lastEditorFingerprintRef = useRef('')
-  const selectFilteredCheckbox = useRef<HTMLInputElement | null>(null)
+  const editingRecordRef = useRef<DatasetRecord | null>(null)
+  const autosaveTimerRef = useRef<number | null>(null)
+  const autosaveBaselineRef = useRef('')
+  const autosaveScheduledRef = useRef('')
+  const autosaveRestorePendingRef = useRef(false)
+  const autosaveQueueRef = useRef<Promise<void>>(Promise.resolve())
+  const latestEditorRef = useRef<{ fingerprint: string; snapshot: DatasetEditorSnapshot; completed: DatasetDraft } | null>(null)
   const modelingRunTaskIDs = useRef<Record<DatasetLLMTrigger, Set<string>>>({
     DIM_MODELING: new Set(),
     DWD_MODELING: new Set(),
@@ -1713,18 +1650,19 @@ export function DatasetCenterPage() {
       }).sort((left, right) => (left.businessName || left.tableName).localeCompare(
         right.businessName || right.tableName, 'zh-CN',
       ))
-      const physicalSourceGroups = new Map<string, {
+      const dataSourceGroups = new Map<string, {
         id: string; name: string; type: string; tables: AssetTable[]
       }>()
-      if (layer === 'ODS') {
-        for (const table of layerTables.filter(item => item.sourceKind !== 'DATASET')) {
-          const group = physicalSourceGroups.get(table.dataSourceId) ?? {
-            id: table.dataSourceId, name: table.dataSourceName,
+      for (const table of layerTables) {
+          const sourceName = table.dataSourceName.trim() || '未命名数据源'
+          const sourceKey = sourceName.toLocaleLowerCase()
+          const group = dataSourceGroups.get(sourceKey) ?? {
+            id: `data-source:${sourceKey}`, name: sourceName,
             type: table.dataSourceType, tables: [],
           }
+          if (group.type === '已发布数据集' && table.sourceKind !== 'DATASET') group.type = table.dataSourceType
           group.tables.push(table)
-          physicalSourceGroups.set(table.dataSourceId, group)
-        }
+          dataSourceGroups.set(sourceKey, group)
       }
       return {
         id: `dataset-layer:${layer}`,
@@ -1732,8 +1670,7 @@ export function DatasetCenterPage() {
         name: label.name,
         type: label.description,
         tables: layerTables,
-        datasetTables: layerTables.filter(table => table.sourceKind === 'DATASET'),
-        physicalSourceGroups: [...physicalSourceGroups.values()],
+        dataSourceGroups: [...dataSourceGroups.values()].sort((left, right) => left.name.localeCompare(right.name, 'zh-CN')),
       }
     })
   }, [datasets, editingRecord?.id, tables])
@@ -1774,6 +1711,10 @@ export function DatasetCenterPage() {
     [filtered, selectedDatasetIDs],
   )
   const allFilteredSelected = filtered.length > 0 && filteredSelectedCount === filtered.length
+  const publishedDatasetCount = datasets.filter(item => item.status === 'PUBLISHED').length
+  const pendingDatasetCount = datasets.filter(item => item.status === 'DRAFT' || item.status === 'VALIDATING').length
+  const activeDatasetRunCount = Object.values(dagRuns).filter(run => activeDAGRunStatuses.has(run.status)).length
+  const datasetRunAlertCount = Object.values(dagRuns).filter(run => run.status === 'FAILED' || run.slaBreached).length
 
   useEffect(() => {
     setSelectedDatasetIDs(current => {
@@ -1782,12 +1723,6 @@ export function DatasetCenterPage() {
       return next.size === current.size ? current : next
     })
   }, [datasets])
-
-  useEffect(() => {
-    if (selectFilteredCheckbox.current) {
-      selectFilteredCheckbox.current.indeterminate = filteredSelectedCount > 0 && !allFilteredSelected
-    }
-  }, [allFilteredSelected, filteredSelectedCount])
 
   const selectedPublicationRequest = publicationRequests.find(item => item.id === selectedPublicationRequestID) ?? null
   const currentDraftPublicationRequest = publicationRecord
@@ -1829,6 +1764,116 @@ export function DatasetCenterPage() {
     preAggregation: undefined,
     finalOutputKeys: undefined,
   }), [currentDesignerGraph, draft, endBox, generatedCode, metadata, selectedBusinessDomainName])
+  latestEditorRef.current = { fingerprint: currentEditorFingerprint, snapshot: currentEditorSnapshot, completed: completedEditorDraft }
+
+  useEffect(() => {
+    editingRecordRef.current = editingRecord
+  }, [editingRecord])
+
+  useEffect(() => {
+    const editorOpen = dialog?.mode === 'create' || dialog?.mode === 'metadata'
+    if (!editorOpen || designSnapshot || assetsLoading || aiBusy || aiApplying || Boolean(busyAction)) return
+    const recoveryID = editingRecord?.id ?? 'new'
+    const savedAt = new Date().toISOString()
+    const stored = saveDatasetEditorRecovery(selectedBusinessDomainID, {
+      schemaVersion: 1,
+      datasetID: recoveryID,
+      ...(editingRecord ? { datasetVersion: editingRecord.version } : {}),
+      generatedCode,
+      savedAt,
+      snapshot: currentEditorSnapshot,
+    })
+
+    if (!autosaveBaselineRef.current) {
+      autosaveBaselineRef.current = currentEditorFingerprint
+      setDraftSavedAt(savedAt)
+      setDraftSaveState(stored ? (autosaveRestorePendingRef.current ? 'local' : editingRecord ? 'saved' : 'local') : 'error')
+      if (!autosaveRestorePendingRef.current) return
+      autosaveRestorePendingRef.current = false
+    }
+    if (autosaveScheduledRef.current === currentEditorFingerprint) return
+    autosaveScheduledRef.current = currentEditorFingerprint
+    setDraftSaveState(stored ? 'pending' : 'error')
+
+    if (autosaveTimerRef.current !== null) window.clearTimeout(autosaveTimerRef.current)
+    autosaveTimerRef.current = window.setTimeout(() => {
+      autosaveTimerRef.current = null
+      const queuedFingerprint = currentEditorFingerprint
+      const queuedSnapshot = currentEditorSnapshot
+      const queuedCompleted = completedEditorDraft
+      const queuedCode = generatedCode
+      autosaveQueueRef.current = autosaveQueueRef.current.then(async () => {
+        let dsl
+        try {
+          // 编辑中的断线或未配置组件仍保存在恢复副本；能编译为规范 DSL 时再同步
+          // 服务端草稿。这里不调用发布校验或查询试跑。
+          dsl = buildDatasetDSL(queuedCompleted)
+        } catch {
+          setDraftSaveState('local')
+          setDraftSavedAt(savedAt)
+          return
+        }
+        setDraftSaveState('saving')
+        try {
+          const record = editingRecordRef.current
+          const saved = record
+            ? await datasetAPI.update(record.id, record.version, queuedCompleted, dsl)
+            : await datasetAPI.create(dsl)
+          editingRecordRef.current = saved
+          setEditingRecord(saved)
+          setDatasets(current => {
+            const summary: DatasetSummary = {
+              id: saved.id, code: saved.code, name: saved.name, description: saved.description,
+              type: saved.type, status: saved.status, domainId: saved.domainId,
+              sharingScope: saved.sharingScope, ownerUserId: saved.ownerUserId,
+              originTableId: saved.originTableId, layer: saved.layer, tags: saved.tags,
+              version: saved.version, dslHash: saved.dslHash,
+              currentPublishedVersionId: saved.currentPublishedVersionId, updatedAt: saved.updatedAt,
+            }
+            return [summary, ...current.filter(item => item.id !== saved.id)]
+          })
+          setDatasetManagePermissions(current => ({ ...current, [saved.id]: true }))
+
+          const latest = latestEditorRef.current
+          const recoverySnapshot = latest?.snapshot ?? queuedSnapshot
+          const recoveryFingerprint = latest?.fingerprint ?? queuedFingerprint
+          const recoverySavedAt = new Date().toISOString()
+          saveDatasetEditorRecovery(selectedBusinessDomainID, {
+            schemaVersion: 1,
+            datasetID: saved.id,
+            datasetVersion: saved.version,
+            generatedCode: queuedCode,
+            savedAt: recoverySavedAt,
+            snapshot: recoverySnapshot,
+          })
+          if (!record) removeDatasetEditorRecovery(selectedBusinessDomainID, 'new')
+          if (recoveryFingerprint === queuedFingerprint) {
+            autosaveBaselineRef.current = queuedFingerprint
+            setDraftSaveState('saved')
+            setDraftSavedAt(recoverySavedAt)
+          } else {
+            setDraftSaveState('pending')
+          }
+        } catch (cause) {
+          if (cause instanceof RequestError && cause.status === 409 && cause.detail.code === 'DATASET_VERSION_CONFLICT') {
+            setDraftConflict({ currentVersion: cause.detail.currentVersion, currentHash: cause.detail.currentHash })
+          }
+          // 服务端同步失败时保留本机恢复副本，不用错误弹窗打断画布操作。
+          setDraftSaveState('local')
+          setDraftSavedAt(savedAt)
+        }
+      }).catch(() => {
+        setDraftSaveState('local')
+      })
+    }, 900)
+
+    return () => {
+      if (autosaveTimerRef.current !== null) {
+        window.clearTimeout(autosaveTimerRef.current)
+        autosaveTimerRef.current = null
+      }
+    }
+  }, [aiApplying, aiBusy, assetsLoading, busyAction, completedEditorDraft, currentEditorFingerprint, currentEditorSnapshot, designSnapshot, dialog?.mode, editingRecord, generatedCode, selectedBusinessDomainID])
   const layerChoices = useMemo(() => {
     if (designSnapshot) return ['DWD'] as DatasetLayer[]
     try {
@@ -1866,11 +1911,19 @@ export function DatasetCenterPage() {
     setAIReviewLabels({ nodes: {}, fields: {} })
     setAIRetryAction(null)
     setAILastInstruction('')
+    setAIConversation([])
+    aiProposalCanvasFingerprint.current = ''
+    aiPreviewedRequest.current = ''
   }, [])
 
   const openCreate = async () => {
     resetDatasetAI()
     endPreviewRequest.current += 1
+    autosaveBaselineRef.current = ''
+    autosaveScheduledRef.current = ''
+    autosaveRestorePendingRef.current = false
+    editingRecordRef.current = null
+    setValidationLock(null)
     if (designSnapshot) {
       const snapshot = snapshotEditorState()
       setEditingRecord(null)
@@ -1894,16 +1947,19 @@ export function DatasetCenterPage() {
       setDialog({ mode: 'create' })
       return
     }
+    const recovery = loadDatasetEditorRecovery(selectedBusinessDomainID, 'new')
+    const recovered = recovery?.snapshot
+    autosaveRestorePendingRef.current = Boolean(recovered)
     setEditingRecord(null)
-    setDraft(emptyDraft())
-    setRelationBoxes([])
-    setGroupBoxes([])
-    setTransformBoxes([])
-    setEndBox(null)
+    setDraft(recovered?.draft ?? emptyDraft())
+    setRelationBoxes(recovered?.relationBoxes ?? [])
+    setGroupBoxes(recovered?.groupBoxes ?? [])
+    setTransformBoxes(recovered?.transformBoxes ?? [])
+    setEndBox(recovered?.endBox ?? null)
     setNodePreviews({})
-    setNodePositions({})
-    setMetadata({ name: '', description: '', domain: selectedBusinessDomainName, subject: '' })
-    setGeneratedCode(`dataset_${Date.now().toString(36)}`)
+    setNodePositions(recovered?.nodePositions ?? {})
+    setMetadata(recovered?.metadata ?? { name: '未命名数据集', description: '', domain: selectedBusinessDomainName, subject: '' })
+    setGeneratedCode(recovery?.generatedCode ?? `dataset_${Date.now().toString(36)}`)
     setActiveNodeID('')
     setActiveJoinID('')
     setActiveGroupID('')
@@ -1912,7 +1968,9 @@ export function DatasetCenterPage() {
     setEndPreview({ loading: false })
     setComponentPreviews({})
     setCanvasPreviewTarget(null)
-    setCanvasNotice('')
+    setCanvasNotice(recovered ? '已恢复上次退出时的建模草稿' : '')
+    setDraftSaveState(recovered ? 'local' : 'idle')
+    setDraftSavedAt(recovery?.savedAt ?? '')
     setCanvasFullscreen(false)
     setFormError('')
     setDialog({ mode: 'create' })
@@ -1931,6 +1989,11 @@ export function DatasetCenterPage() {
     setDraftConflict(null)
     resetDatasetAI()
     endPreviewRequest.current += 1
+    autosaveBaselineRef.current = ''
+    autosaveScheduledRef.current = ''
+    autosaveRestorePendingRef.current = false
+    editingRecordRef.current = null
+    setValidationLock(null)
     const id = typeof dataset === 'string' ? dataset : dataset.id
     if (designSnapshot) {
       const summary = typeof dataset === 'string'
@@ -1946,13 +2009,17 @@ export function DatasetCenterPage() {
       setNodePositions(snapshot.nodePositions)
       setMetadata({ ...snapshot.metadata, name: summary.name, description: summary.description })
       setGeneratedCode(summary.code)
-      setEditingRecord(snapshotDatasetRecord(summary))
+      const record = snapshotDatasetRecord(summary)
+      setEditingRecord(record)
+      editingRecordRef.current = record
       setActiveNodeID('')
       setActiveJoinID('')
       setActiveGroupID('')
       setActiveTransformID('')
       setActiveEnd(false)
       setCanvasNotice('草稿 V3 · 已自动保存于 09:32')
+      setDraftSaveState('saved')
+      setDraftSavedAt('2026-08-11T09:32:00+08:00')
       setFormError('')
       setAssetsLoading(false)
       setBusyAction('')
@@ -1997,23 +2064,43 @@ export function DatasetCenterPage() {
         domain: selectedBusinessDomainName,
         subject: record.dsl.dataset.subject ?? '',
       }
+      const recovery = loadDatasetEditorRecovery(selectedBusinessDomainID, id)
+      const restored = recovery?.datasetVersion === record.version ? recovery.snapshot : null
+      autosaveRestorePendingRef.current = Boolean(restored)
       setTables(availableTables)
-      setDraft(hydrated)
-      setRelationBoxes(graph.joins)
-      setGroupBoxes(graph.groups)
-      setTransformBoxes(graph.transforms ?? [])
-      setEndBox(graph.end ?? null)
-      setNodePositions(graph.nodePositions)
-      setMetadata(loadedMetadata)
-      setGeneratedCode(record.code)
+      setDraft(restored?.draft ?? hydrated)
+      setRelationBoxes(restored?.relationBoxes ?? graph.joins)
+      setGroupBoxes(restored?.groupBoxes ?? graph.groups)
+      setTransformBoxes(restored?.transformBoxes ?? graph.transforms ?? [])
+      setEndBox(restored?.endBox ?? graph.end ?? null)
+      setNodePositions(restored?.nodePositions ?? graph.nodePositions)
+      setMetadata(restored?.metadata ?? loadedMetadata)
+      setGeneratedCode(recovery?.datasetVersion === record.version ? recovery.generatedCode : record.code)
       setEditingRecord(record)
+      editingRecordRef.current = record
+      setCanvasNotice(restored ? '已恢复上次退出时尚未发布的画布修改' : '')
+      setDraftSaveState(restored ? 'local' : 'saved')
+      setDraftSavedAt(restored ? recovery!.savedAt : record.updatedAt)
     } catch (cause) {
       setFormError(cause instanceof Error ? cause.message : '加载数据集配置失败')
     } finally {
       setAssetsLoading(false)
       setBusyAction('')
     }
-  }, [datasets, designSnapshot, resetDatasetAI, selectedBusinessDomainName])
+  }, [datasets, designSnapshot, resetDatasetAI, selectedBusinessDomainID, selectedBusinessDomainName])
+
+  const openPublicationIssueInCanvas = async (record: DatasetRecord, cause: RequestError) => {
+    const lock = publicationValidationLock(record, cause)
+    await openEdit(record.id)
+    setValidationLock(lock)
+    setFormError(lock ? `发布校验未通过：${lock.message}。异常组件已锁定，请修改后重新发布。` : cause.message)
+    if (!lock) return
+    setActiveNodeID(lock.kind === 'NODE' ? lock.id : '')
+    setActiveJoinID(lock.kind === 'JOIN' ? lock.id : '')
+    setActiveGroupID(lock.kind === 'GROUP' ? lock.id : '')
+    setActiveTransformID(lock.kind === 'TRANSFORM' ? lock.id : '')
+    setActiveEnd(lock.kind === 'END')
+  }
 
   const loadNodePreview = useCallback(async (node: DesignerNode) => {
     setNodePreviews(current => ({ ...current, [node.id]: { loading: true } }))
@@ -2078,7 +2165,9 @@ export function DatasetCenterPage() {
           grainKeys: grain ? [nodeFieldCode(grain.node, grain.column.columnName, nodes.length > 1)] : [],
         }
       })
-      setActiveNodeID(nodeID)
+      // 新增只负责把组件放到画布；属性抽屉由用户随后点击组件时打开，避免拖放
+      // 动作被突兀打断。
+      setActiveNodeID('')
       setActiveJoinID('')
       setActiveGroupID('')
       setActiveTransformID('')
@@ -2145,8 +2234,8 @@ export function DatasetCenterPage() {
     setActiveGroupID('')
     setActiveTransformID('')
     setActiveEnd(false)
-    setActiveJoinID(id)
-    setCanvasNotice(input ? '关联组件已插入连线，槽位 1 已连接，请继续连接槽位 2' : '关联组件已加入画布，请配置槽位 1 和槽位 2')
+    setActiveJoinID('')
+    setCanvasNotice(input ? '关联组件已插入连线；点击组件可继续配置槽位' : '关联组件已加入画布；点击组件后配置槽位')
     return id
   }
 
@@ -2331,9 +2420,9 @@ export function DatasetCenterPage() {
     setActiveNodeID('')
     setActiveJoinID('')
     setActiveTransformID('')
-    setActiveGroupID(id)
+    setActiveGroupID('')
     setActiveEnd(false)
-    setCanvasNotice(input ? '分组组件已插入连线，请继续配置维度和指标' : '分组组件已加入画布，请从上游组件手动连线')
+    setCanvasNotice(input ? '分组组件已插入连线；点击组件可配置维度和指标' : '分组组件已加入画布；连线后点击组件配置')
     return id
   }
 
@@ -2514,11 +2603,10 @@ export function DatasetCenterPage() {
       } : {}),
     }
     if (componentType !== 'FILTER' && input && availableFields.length) transform = { ...transform, rules: [defaultTransformRule(transform, availableFields, 1)] }
-    const next = [...transformBoxes, transform]
-    setTransformBoxes(next)
-    setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveTransformID(id); setActiveEnd(false)
+    setTransformBoxes(current => [...current, transform])
+    setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveTransformID(''); setActiveEnd(false)
     setFormError('')
-    setCanvasNotice(input ? `${definition.label}已插入连线，请继续完善配置` : `${definition.label}已加入画布，请从上游组件手动连线`)
+    setCanvasNotice(input ? `${definition.label}已插入连线；点击组件可完善配置` : `${definition.label}已加入画布；连线后点击组件配置`)
     return id
   }
 
@@ -2702,6 +2790,20 @@ export function DatasetCenterPage() {
     const request = ++endPreviewRequest.current
     const record = editingRecord
     const previewFingerprint = editorFingerprintRef.current
+    if (designSnapshot) {
+      setEndPreview({
+        loading: false,
+        data: {
+          columns: ['订单月份', '客户区域', '销售金额', '订单量'],
+          rows: [
+            ['2026-06', '华东', 1286400, 386],
+            ['2026-06', '华南', 984500, 291],
+            ['2026-06', '华北', 763200, 227],
+          ],
+        },
+      })
+      return
+    }
     let candidateDSL: ReturnType<typeof buildDatasetDSL>
     try {
       candidateDSL = buildDatasetDSL(record ? completedEditorDraft : { ...completedEditorDraft, name: completedEditorDraft.name.trim() || '组件数据预览' })
@@ -2727,7 +2829,7 @@ export function DatasetCenterPage() {
       const issue = endPreviewIssue(cause)
       setEndPreview({ loading: false, error: issue.reason, suggestion: issue.suggestion })
     }
-  }, [completedEditorDraft, editingRecord])
+  }, [completedEditorDraft, designSnapshot, editingRecord])
 
   const openCanvasPreview = useCallback((target: CanvasPreviewTarget) => {
     setCanvasPreviewTarget(target)
@@ -2770,14 +2872,20 @@ export function DatasetCenterPage() {
     setCanvasPreviewTarget(null)
   }, [currentEditorFingerprint])
 
+  useEffect(() => {
+    if (!aiApplied || !aiResult || aiPreviewedRequest.current === aiResult.requestId) return
+    aiPreviewedRequest.current = aiResult.requestId
+    openCanvasPreview({ kind: 'END', id: 'end_1' })
+  }, [aiApplied, aiResult, openCanvasPreview])
+
   const addEndBox = (position?: CanvasPoint) => {
     if (endBox) {
-      setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveTransformID(''); setActiveEnd(true)
+      setCanvasNotice('结束节点已在画布中；点击节点可打开配置')
       return
     }
     setEndBox({ id: 'end_1', name: '最终输出', position: position ?? { x: 820, y: 165 }, outputs: [] })
-    setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveTransformID(''); setActiveEnd(true)
-    setCanvasNotice('结束节点已加入画布，请从最终上游组件手动连线')
+    setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveTransformID(''); setActiveEnd(false)
+    setCanvasNotice('结束节点已加入画布；连线后点击节点配置最终输出')
   }
 
   const connectEndInput = (input?: RelationInput) => {
@@ -2846,7 +2954,13 @@ export function DatasetCenterPage() {
     setActiveEnd(false)
   }
 
-  const openMetadata = () => {
+  const openMetadata = (validateGraph = false) => {
+    // 元信息也是草稿的一部分，正常编辑不触发 DAG 校验；完整校验统一放到发布动作。
+    if (!validateGraph) {
+      setFormError('')
+      setDialog({ mode: 'metadata' })
+      return
+    }
     if (!draft.nodes.length || !draft.nodes.some(node => node.selected.length)) {
       setFormError('请先从左侧点选或拖入数据表，并至少保留一个输出字段')
       return
@@ -2991,14 +3105,12 @@ export function DatasetCenterPage() {
     try {
       const completed = completedEditorDraft
       const dsl = buildDatasetDSL(completed)
-      const validation = await datasetAPI.validate(dsl)
       const semanticNamed = completed.layer === 'DWD' || completed.layer === 'DWS' || completed.layer === 'ADS'
       let saved: DatasetRecord
       if (editingRecord) {
         saved = await datasetAPI.update(editingRecord.id, editingRecord.version, completed, dsl)
         if (saved.version <= editingRecord.version ||
-          (!semanticNamed && (saved.dslHash !== validation.dslHash ||
-            saved.name !== completed.name || saved.description !== completed.description)) ||
+          (!semanticNamed && (saved.name !== completed.name || saved.description !== completed.description)) ||
           (saved.dsl.dataset.domain ?? '') !== completed.domain ||
           (saved.dsl.dataset.subject ?? '') !== completed.subject) {
           throw new Error('服务端未确认最新配置已保存，请保留当前页面后重试')
@@ -3107,6 +3219,9 @@ export function DatasetCenterPage() {
       return
     }
     try {
+      // “发布”是编辑流程唯一的校验入口；先校验规范 DSL，服务端提交接口随后执行
+      // 依赖检查和安全查询试跑。
+      await datasetAPI.validate(publicationRecord.dsl)
       const request = await datasetAPI.requestPublication(publicationRecord.id, {
         draftVersionId: publicationRecord.draftVersionId,
         expectedVersion: publicationRecord.version,
@@ -3124,7 +3239,11 @@ export function DatasetCenterPage() {
           : `当前草稿已有${publicationStatusLabels[request.status] ?? request.status}记录`,
       })
     } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : '提交发布申请失败')
+      if (cause instanceof RequestError && ['DSL-001-VALIDATION-FAILED', 'DATASET_PUBLISH_VALIDATION_FAILED'].includes(cause.detail.code)) {
+        await openPublicationIssueInCanvas(publicationRecord, cause)
+      } else {
+        setFormError(cause instanceof Error ? cause.message : '提交发布申请失败')
+      }
     } finally {
       setBusyAction('')
     }
@@ -3164,8 +3283,13 @@ export function DatasetCenterPage() {
           ? '指标候选提取任务已启动'
           : `${publicationRecord.layer} PostgreSQL 物化任务已启动`
       setNotice({ tone: 'success', message: `“${publicationRecord.name}”审批通过并发布为 V${result.publishedVersion.versionNo}；${processing}` })
+      removeDatasetEditorRecovery(selectedBusinessDomainID, publicationRecord.id)
     } catch (cause) {
-      setFormError(cause instanceof Error ? cause.message : '审批并发布数据集失败')
+      if (cause instanceof RequestError && cause.detail.code === 'DATASET_PUBLISH_VALIDATION_FAILED') {
+        await openPublicationIssueInCanvas(publicationRecord, cause)
+      } else {
+        setFormError(cause instanceof Error ? cause.message : '审批并发布数据集失败')
+      }
     } finally {
       setBusyAction('')
     }
@@ -3671,12 +3795,15 @@ export function DatasetCenterPage() {
     }
   }
 
-  const triggerDatasetLLM = async (trigger: DatasetLLMTrigger, label: string) => {
-    if (busyAction) return
-    const selectionError = modelingSelectionError(trigger, selectedDatasets)
+  const triggerDatasetLLM = async (trigger: DatasetLLMTrigger, label: string, explicitDatasetIDs?: string[]): Promise<boolean> => {
+    if (busyAction) return false
+    const scopedDatasets = explicitDatasetIDs
+      ? datasets.filter(dataset => explicitDatasetIDs.includes(dataset.id))
+      : selectedDatasets
+    const selectionError = modelingSelectionError(trigger, scopedDatasets)
     if (selectionError) {
       setNotice({ tone: 'error', message: `${label}尚未触发：${selectionError}` })
-      return
+      return false
     }
     if (designSnapshot) {
       setBusyAction(`llm:${trigger}`)
@@ -3696,9 +3823,9 @@ export function DatasetCenterPage() {
         message: `${label}已根据当前数据范围生成建议，新草稿已进入数据集目录。`,
       })
       setBusyAction('')
-      return
+      return true
     }
-    const selectedIDs = selectedDatasets.map(dataset => dataset.id)
+    const selectedIDs = scopedDatasets.map(dataset => dataset.id)
     modelingRunTaskIDs.current[trigger] = new Set()
     modelingRequestedAt.current[trigger] = Date.now()
     expectModelingTasks(trigger, true)
@@ -3724,42 +3851,42 @@ export function DatasetCenterPage() {
           tone: 'error',
           message: `明细建模尚未提交：${result.blockedCount ?? 0} 个领域尚未完成本轮维度建模。请先执行“维度建模”，待任务完成并发布 DIM 后再试。`,
         })
-        return
+        return false
       }
       if (result.blockedReason === 'DIM_PUBLICATION_REQUIRED') {
         setNotice({
           tone: 'error',
           message: `明细建模尚未提交：${result.blockedCount ?? 0} 个领域的 DIM 仍是草稿。请先提交发布并完成审批，再触发明细建模。`,
         })
-        return
+        return false
       }
       if (result.blockedReason === 'NO_FACT_MODEL_AVAILABLE') {
         setNotice({
           tone: 'error',
           message: `明细建模没有可提交任务：${result.blockedCount ?? 0} 个领域经维度建模确认暂无事实表。`,
         })
-        return
+        return false
       }
       if (result.blockedReason === 'DWD_MODELING_COMPLETED') {
         setNotice({
           tone: 'success',
           message: '当前最新已发版 DIM 批次的明细建模已经完成，无需重复提交。如需重新生成，请先执行新一轮维度建模并发布 DIM。',
         })
-        return
+        return false
       }
       if (result.blockedReason === 'DWD_MODELING_RETRY_REQUIRED') {
         setNotice({
           tone: 'error',
           message: '当前最新 DIM 批次的明细建模未完成，请在运行日志中重试失败任务；DWD 重试仍只使用当前最新已发版 DIM。',
         })
-        return
+        return false
       }
       if (result.blockedReason === 'DWD_PUBLICATION_REQUIRED') {
         setNotice({
           tone: 'error',
           message: `主题建模尚未提交：${result.blockedCount ?? 0} 个 DWD/DIM 仍是草稿。请先完成发布，再由 LLM 创建 DWS DAG。`,
         })
-        return
+        return false
       }
       const unit = '个批次'
       const existing = result.existingCount
@@ -3786,17 +3913,19 @@ export function DatasetCenterPage() {
         tone: 'success',
         message: `${selectedIDs.length ? `已按所选 ${selectedIDs.length} 个数据集校验并执行：` : '已按默认全量范围执行：'}${submitted}${existing}${noFact}${unpublished}`,
       })
+      return true
     } catch (cause) {
       expectModelingTasks(trigger, false)
       modelingRequestedAt.current[trigger] = null
       modelingRunTaskIDs.current[trigger] = new Set()
       setNotice({ tone: 'error', message: cause instanceof Error ? cause.message : `${label}触发失败` })
+      return false
     } finally {
       setBusyAction('')
     }
   }
 
-  const generateDatasetAIPlan = async (retryInstruction?: string, useActualCanvas = false) => {
+  const generateDatasetAIPlan = async (retryInstruction?: string, useActualCanvas = false, conversationContent?: string | null) => {
     const instruction = (retryInstruction ?? aiPrompt).trim()
     if (!instruction || aiBusy || aiApplying || assetsLoading || busyAction) return
     const requestID = ++aiRequest.current
@@ -3820,23 +3949,35 @@ export function DatasetCenterPage() {
     // Once the canvas contains nodes it is the single source of truth for every AI
     // modification. A staged proposal is only reusable while a brand-new canvas is
     // still empty; this prevents a follow-up prompt from silently ignoring manual edits.
+    const stagedProposalIsCurrent = Boolean(aiResult && !aiApplied && aiProposalCanvasFingerprint.current === baseFingerprint)
     const current = datasetAIRequestContext(actualCurrent, aiResult?.proposal.plan, {
-      forceLiveCanvas: useActualCanvas,
+      forceLiveCanvas: useActualCanvas || Boolean(aiResult && !aiApplied && !stagedProposalIsCurrent),
       stagedProposalApplied: aiApplied,
+      preferStagedProposal: stagedProposalIsCurrent,
     })
     setAILastInstruction(instruction)
+    if (conversationContent !== null) {
+      setAIConversation(entries => [...entries, {
+        id: `user:${requestID}`,
+        role: 'USER',
+        content: conversationContent ?? instruction,
+      }])
+    }
     setAIRetryAction(null)
     setAIProgressLogs([])
     setAIBusy(true)
     setAIError(null)
     try {
-      const result = await requestDatasetAIProposal(editingRecord?.id, instruction, current, event => {
-        if (requestID !== aiRequest.current) return
-        setAIProgressLogs(logs => [...logs, event].slice(-30))
-      })
+      const result = designSnapshot
+        ? snapshotDatasetAIPlanResult(editingCanvas ? 'MODIFY' : 'CREATE')
+        : await requestDatasetAIProposal(editingRecord?.id, instruction, current, event => {
+          if (requestID !== aiRequest.current) return
+          setAIProgressLogs(logs => [...logs, event].slice(-30))
+        })
       if (requestID !== aiRequest.current) return
       const tableIDs = [...new Set(result.proposal.plan.nodes.map(node => node.tableId))]
       const columnEntries = await Promise.all(tableIDs.map(async tableID => {
+        if (designSnapshot) return [tableID, snapshotAssetColumns[tableID] ?? []] as const
         try { return [tableID, (await datasetAPI.columns(tableID)).items] as const } catch { return [tableID, [] as AssetColumn[]] as const }
       }))
       if (requestID !== aiRequest.current) return
@@ -3868,6 +4009,19 @@ export function DatasetCenterPage() {
       setAIDetailsExpanded(true)
       setAIPrompt('')
       setAIRetryAction(null)
+      aiProposalCanvasFingerprint.current = baseFingerprint
+      setAIConversation(entries => [
+        ...entries.map(entry => entry.role === 'ASSISTANT' && entry.status === 'STAGED'
+          ? { ...entry, status: 'SUPERSEDED' as const }
+          : entry),
+        {
+          id: `assistant:${result.requestId || requestID}`,
+          role: 'ASSISTANT' as const,
+          content: result.proposal.summary,
+          result,
+          status: 'STAGED' as const,
+        },
+      ])
     } catch (cause) {
       if (requestID !== aiRequest.current) return
       setAIError(datasetAIRequestIssue(cause, 'GENERATE'))
@@ -3888,16 +4042,13 @@ export function DatasetCenterPage() {
       const materialized = await materializeDatasetAIPlan(
         aiResult.proposal.plan,
         tables,
-        async tableID => (await datasetAPI.columns(tableID)).items,
+        async tableID => designSnapshot ? snapshotAssetColumns[tableID] ?? [] : (await datasetAPI.columns(tableID)).items,
         draft,
         generatedCode,
         currentDesignerGraph,
       )
       if (requestID !== aiApplyRequest.current) return
-      // The AI contract is validated independently, then the deterministic editor conversion
-      // still passes through the existing authoritative DSL validator before any React state changes.
-      await datasetAPI.validate(buildDatasetDSL(materialized.draft))
-      if (requestID !== aiApplyRequest.current) return
+      // AI 方案先进入可恢复草稿；依赖校验和查询试跑统一延后到发布。
       if (editorFingerprintRef.current !== baseFingerprint) {
         setAIError(datasetAILocalIssue(
           '校验期间画布已发生变化，本次方案未应用。',
@@ -3936,6 +4087,10 @@ export function DatasetCenterPage() {
       setCanvasNotice(`AI 方案已应用：${aiResult.proposal.summary}`)
       setAIApplied(true)
       setAIRetryAction(null)
+      aiProposalCanvasFingerprint.current = editorFingerprint(appliedSnapshot)
+      setAIConversation(entries => entries.map(entry => entry.result?.requestId === aiResult.requestId
+        ? { ...entry, status: 'APPLIED' as const }
+        : entry))
     } catch (cause) {
       if (requestID !== aiApplyRequest.current) return
       setAIError(datasetAIRequestIssue(cause, 'APPLY'))
@@ -3979,6 +4134,10 @@ export function DatasetCenterPage() {
     setAIDetailsExpanded(true)
     setAIRetryAction(null)
     setAILastInstruction('')
+    aiProposalCanvasFingerprint.current = ''
+    setAIConversation(entries => entries.map(entry => entry.status === 'APPLIED'
+      ? { ...entry, status: 'REVERTED' as const }
+      : entry))
     setCanvasNotice('已撤销本次 AI 方案，恢复到应用前的画布')
   }
 
@@ -3987,7 +4146,7 @@ export function DatasetCenterPage() {
     if (aiRetryAction === 'GENERATE') {
       const instruction = mode === 'MODIFIED' ? aiPrompt.trim() : aiLastInstruction.trim()
       if (!instruction) return
-      void generateDatasetAIPlan(instruction, true)
+      void generateDatasetAIPlan(instruction)
       return
     }
     void applyDatasetAIPlan()
@@ -4031,67 +4190,37 @@ export function DatasetCenterPage() {
   const actionBusy = Boolean(busyAction)
   const editingCanvas = Boolean(editingRecord || busyAction.startsWith('edit:') || dialog?.mode === 'create' && dialog.dataset)
   const completeDetailFields = detail ? datasetDetailFields(detail) : []
+  const draftSavedTimeLabel = draftSavedAt ? new Date(draftSavedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }) : ''
+  const draftSaveLabel = draftSaveState === 'saving' ? '正在保存草稿…'
+    : draftSaveState === 'pending' ? '画布已记录，等待同步…'
+      : draftSaveState === 'saved' ? `草稿已自动保存${draftSavedTimeLabel ? ` · ${draftSavedTimeLabel}` : ''}`
+        : draftSaveState === 'local' ? `编辑中草稿已保留${draftSavedTimeLabel ? ` · ${draftSavedTimeLabel}` : ''}`
+          : draftSaveState === 'error' ? '浏览器空间不足，请尽快完善并发布' : ''
+  const activeModelingLabels = modelingMonitorConfigs
+    .filter(config => modelingMonitors[config.trigger].expected || modelingMonitors[config.trigger].tasks.some(isActiveModelingTask) || busyAction === `llm:${config.trigger}`)
+    .map(config => config.label)
 
-  return <AppShell className={`dataset-center-shell ${qaViewport1920 ? 'qa-1920-dataset-workflow' : ''}`} title="数据集资产" eyebrow="数据资产" actions={<button className="primary-button dataset-create-button" type="button" disabled={actionBusy} onClick={() => void openCreate()}><PlusIcon size={18} weight="bold" />新建数据集</button>}>
+  return <AppShell className={`dataset-center-shell ${qaViewport1920 ? 'qa-1920-dataset-workflow' : ''}`} title="数据集" titleMeta={<span className="dataset-title-meta">建模、发布与物化运行</span>} actions={<div className="dataset-header-actions"><button className="dataset-advisor-button" type="button" disabled={actionBusy} onClick={() => setModelingAdvisorOpen(true)}><MagicWandIcon size={17} weight="fill" />智能建模{activeModelingLabels.length > 0 && <em>{activeModelingLabels.length}</em>}</button><button className="primary-button dataset-create-button" type="button" disabled={actionBusy} onClick={() => void openCreate()}><PlusIcon size={18} weight="bold" />新建数据集</button></div>}>
     {notice && <div className={`dataset-center-toast ${notice.tone}`} role={notice.tone === 'error' ? 'alert' : 'status'}>{notice.tone === 'success' ? <CheckCircleIcon size={20} weight="fill" /> : <DropSlashIcon size={20} weight="fill" />}<span>{notice.message}</span><button type="button" aria-label="关闭消息" onClick={() => setNotice(null)}><XIcon size={17} /></button></div>}
     <section className="dataset-center" aria-label="数据集配置中心内容">
-      <header className="dataset-center-summary">
-        <div><span className="eyebrow">数据资产化 · 第 2 段</span><h2>数据集建模与发布</h2><p>将已治理的数据表组织成可复用的数据模型，并完成校验、审批和物化交付。</p></div>
-        <div className="dataset-center-total"><strong>{datasets.length}</strong><span>领域内数据集</span></div>
-      </header>
-      <ol className="dataset-chain-progress" aria-label="数据集资产化主流程">
-        <li className="complete"><span><CheckCircleIcon size={18} weight="fill" /></span><div><strong>数据表资产</strong><small>字段与业务语义已完善</small></div></li>
-        <li className="active"><span><TreeStructureIcon size={18} weight="bold" /></span><div><strong>数据集建模</strong><small>配置字段、关联和粒度</small></div></li>
-        <li><span><ListChecksIcon size={18} /></span><div><strong>校验与发布</strong><small>预览、审批、冻结版本</small></div></li>
-        <li><span><ArrowClockwiseIcon size={18} /></span><div><strong>物化交付</strong><small>运行任务并服务下游</small></div></li>
-      </ol>
       <div className="dataset-overview-grid" aria-label="数据集运行概览">
-        <article><span><RowsIcon size={21} /></span><div><small>全部数据集</small><strong>{datasets.length}</strong></div><em>当前领域</em></article>
-        <article><span className="is-success"><CheckCircleIcon size={21} /></span><div><small>已发布</small><strong>{datasets.filter(item => item.status === 'PUBLISHED').length}</strong></div><em>可被下游使用</em></article>
-        <article><span className="is-warning"><CalendarDotsIcon size={21} /></span><div><small>待处理</small><strong>{datasets.filter(item => item.status === 'DRAFT' || item.status === 'VALIDATING').length}</strong></div><em>草稿或校验中</em></article>
-        <article><span className="is-blue"><ArrowClockwiseIcon size={21} /></span><div><small>物化运行</small><strong>{Object.values(dagRuns).filter(run => activeDAGRunStatuses.has(run.status)).length}</strong></div><em>{Object.values(dagRuns).filter(run => run.status === 'FAILED' || run.slaBreached).length} 个需处理告警</em></article>
+        <article className={datasets.length === 0 ? 'is-zero' : ''}><span className="dataset-overview-label"><span className="dataset-overview-icon"><RowsIcon size={20} /></span><small>全部数据集</small></span><strong>{datasets.length}</strong></article>
+        <article className={publishedDatasetCount === 0 ? 'is-zero' : ''}><span className="dataset-overview-label"><span className="dataset-overview-icon is-success"><CheckCircleIcon size={20} /></span><small>已发布</small></span><strong>{publishedDatasetCount}</strong></article>
+        <article className={pendingDatasetCount === 0 ? 'is-zero' : ''}><span className="dataset-overview-label"><span className="dataset-overview-icon is-warning"><CalendarDotsIcon size={20} /></span><small>待处理</small></span><strong>{pendingDatasetCount}</strong></article>
+        <article className={activeDatasetRunCount === 0 ? 'is-zero' : ''} title={datasetRunAlertCount ? `${datasetRunAlertCount} 个需处理告警` : '暂无需处理告警'}><span className="dataset-overview-label"><span className="dataset-overview-icon is-blue"><ArrowClockwiseIcon size={20} /></span><small>物化运行</small></span><strong>{activeDatasetRunCount}</strong></article>
       </div>
       <section className="dataset-catalog-panel">
         <header>
-          <div><span className="eyebrow">数据集目录</span><h3>模型资产清单</h3><p>按数仓分层查看数据集，进入画布完成建模后再提交发布。</p></div>
-          <section className="dataset-intelligent-modeling" aria-label="智能建模">
-            <span><MagicWandIcon size={15} weight="fill" />智能建模{selectedDatasets.length ? ` · 已选 ${selectedDatasets.length} 个` : ''}</span>
-            <div>
-              {modelingMonitorConfigs.map(config => <DatasetModelingAction
-                key={config.trigger}
-                config={config}
-                monitor={modelingMonitors[config.trigger]}
-                actionBusy={actionBusy}
-                submitting={busyAction === `llm:${config.trigger}`}
-                logID={`${modelingLogIDPrefix}-${config.trigger.toLowerCase()}`}
-                onTrigger={() => void triggerDatasetLLM(config.trigger, config.label)}
-                onTogglePinned={() => setModelingMonitors(current => ({
-                  DIM_MODELING: { ...current.DIM_MODELING, logsPinned: config.trigger === 'DIM_MODELING' && !current[config.trigger].logsPinned },
-                  DWD_MODELING: { ...current.DWD_MODELING, logsPinned: config.trigger === 'DWD_MODELING' && !current[config.trigger].logsPinned },
-                  DWS_MODELING: { ...current.DWS_MODELING, logsPinned: config.trigger === 'DWS_MODELING' && !current[config.trigger].logsPinned },
-                }))}
-              />)}
-            </div>
-          </section>
+          <div><h3>模型资产清单</h3><p>按数仓分层查看数据集，进入画布完成建模后再提交发布。</p></div>
         </header>
         <div className="dataset-catalog-toolbar" aria-label="数据集筛选">
           <label className="dataset-search-field"><MagnifyingGlassIcon size={17} /><input aria-label="搜索数据集" type="search" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索名称、编码或说明" /></label>
           <label><span>分层</span><select aria-label="按数据集分层筛选" value={layerFilter} onChange={event => setLayerFilter(event.target.value as DatasetLayer | 'ALL')}><option value="ALL">全部分层</option>{layerOverview.map(item => <option value={item.layer} key={item.layer}>{item.layer} · {item.name}（{layerCounts[item.layer]}）</option>)}</select></label>
           <label><span>状态</span><select aria-label="按数据集状态筛选" value={statusFilter} onChange={event => setStatusFilter(event.target.value)}><option value="ALL">全部状态</option>{Object.entries(statusLabels).map(([status, label]) => <option key={status} value={status}>{label}</option>)}</select></label>
           <button className="dataset-filter-button" type="button" onClick={() => { setKeyword(''); setLayerFilter('ALL'); setStatusFilter('ALL') }}><FunnelIcon size={16} />重置筛选</button>
+          <button className={`dataset-select-all-button ${allFilteredSelected ? 'is-active' : ''}`} type="button" aria-pressed={allFilteredSelected} disabled={actionBusy || !filtered.length} onClick={toggleFilteredSelection}>{allFilteredSelected ? '取消全选' : '全选'}</button>
           <small>显示 {filtered.length} / {datasets.length}</small>
         </div>
-      {!!selectedDatasets.length && <div className="dataset-bulk-toolbar" aria-label="数据集批量操作">
-        <label><input ref={selectFilteredCheckbox} type="checkbox" checked={allFilteredSelected} disabled={actionBusy || !filtered.length} onChange={toggleFilteredSelection} /><span>选择当前结果</span></label>
-        <strong>已选择 {selectedDatasets.length} 个</strong>
-        <div>
-          <button className="action-publish" type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => { setFormError(''); setBatchAction('publish') }}>批量提交发布申请</button>
-          <button className="action-resume" type="button" disabled={actionBusy || !selectedRunnableCount} title="逐个锁定所选数据集的当前发布版本，执行一次完整替换入仓 DAG" onClick={() => { setFormError(''); setBatchAction('run') }}>批量运行</button>
-          <button className="action-pause" type="button" disabled={actionBusy || !selectedActiveDAGCount} title="停止所选数据集中正在排队或执行的本次 DAG" onClick={() => { setFormError(''); setBatchAction('stop') }}>批量停止</button>
-          <button className="action-delete" type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => { setFormError(''); setBatchAction('delete') }}>批量删除</button>
-          <button className="quiet-button" type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => setSelectedDatasetIDs(new Set())}>清空选择</button>
-        </div>
-      </div>}
       <div className="dataset-catalog-head" aria-hidden="true"><span>数据集</span><span>分层 / 状态</span><span>版本与运行</span><span>最近更新</span><span>操作</span></div>
       {loading ? <Empty>正在加载数据集…</Empty> : !datasets.length ? <Empty title="还没有数据集">点击右上角“新建数据集”开始配置。</Empty> : !filtered.length ? <Empty title="没有符合条件的数据集">请调整搜索词或筛选条件。</Empty> :
         <div className="dataset-asset-list" role="list" aria-label="数据集资产清单">{filtered.map(dataset => <article key={dataset.id} role="listitem" className="dataset-asset-card">
@@ -4133,10 +4262,40 @@ export function DatasetCenterPage() {
             </div>}
           </div>
         </article>)}</div>}
+      {!!selectedDatasets.length && <div className="dataset-bulk-toolbar dataset-bulk-toolbar-bottom" aria-label="数据集批量操作">
+        <div className="dataset-bulk-selection"><strong>已选择 {selectedDatasets.length} 个数据集</strong><span>批量操作仅作用于当前选择</span></div>
+        <div className="dataset-bulk-actions">
+          <button className="action-publish" type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => { setFormError(''); setBatchAction('publish') }}>提交发布申请</button>
+          <button className="action-resume" type="button" disabled={actionBusy || !selectedRunnableCount} title="逐个锁定所选数据集的当前发布版本，执行一次完整替换入仓 DAG" onClick={() => { setFormError(''); setBatchAction('run') }}>批量运行</button>
+          <button className="action-pause" type="button" disabled={actionBusy || !selectedActiveDAGCount} title="停止所选数据集中正在排队或执行的本次 DAG" onClick={() => { setFormError(''); setBatchAction('stop') }}>批量停止</button>
+          <button className="action-delete" type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => { setFormError(''); setBatchAction('delete') }}>批量删除</button>
+          <button className="quiet-button" type="button" disabled={actionBusy || !selectedDatasets.length} onClick={() => setSelectedDatasetIDs(new Set())}>清空选择</button>
+        </div>
+      </div>}
       </section>
     </section>
 
-    {dialog?.mode === 'create' && <Dialog title={editingCanvas ? '修改数据集' : '新建数据集'} eyebrow="图形化配置" wide closeDisabled={aiApplying} onClose={closeDialog}>
+    {modelingAdvisorOpen && <IntelligentModelingAdvisor
+      open={modelingAdvisorOpen}
+      datasets={datasets}
+      initialSelectedDatasetIDs={[...selectedDatasetIDs]}
+      busy={actionBusy}
+      activeModelingLabels={activeModelingLabels}
+      onClose={() => setModelingAdvisorOpen(false)}
+      onSubmit={async (trigger, label, datasetIDs) => {
+        setSelectedDatasetIDs(new Set(datasetIDs))
+        if (!trigger) {
+          setNotice({
+            tone: 'success',
+            message: '应用建模分析方案已生成；当前服务尚未接入 DWS→ADS 自动执行器，因此未创建后台落表任务。',
+          })
+          return true
+        }
+        return triggerDatasetLLM(trigger, label, datasetIDs)
+      }}
+    />}
+
+    {dialog?.mode === 'create' && <Dialog title={editingCanvas ? '修改数据集' : '新建数据集'} eyebrow="数据集建模" wide closeDisabled={aiApplying} onClose={closeDialog}>
       <DatasetDesignWorkspace
         ref={canvasFullscreenTarget}
         loading={assetsLoading}
@@ -4148,11 +4307,11 @@ export function DatasetCenterPage() {
         groupCount={groupBoxes.length}
         transformCount={transformBoxes.length}
         hasEnd={Boolean(endBox)}
-        notice={canvasNotice}
+        notice={draftSaveLabel || canvasNotice}
         onCanvasClick={closeCanvasEditor}
         onSelectTable={table => void selectTable(table)}
-        assistant={<DatasetAIComposer prompt={aiPrompt} lastInstruction={aiLastInstruction} result={aiResult} progressLogs={aiProgressLogs} labels={aiReviewLabels} error={aiError} busy={aiBusy} applying={aiApplying} applied={aiApplied} detailsExpanded={aiDetailsExpanded} ready={!assetsLoading && !busyAction} hasAssets={tables.length > 0} canUndo={Boolean(aiUndo)} canRetry={Boolean(aiRetryAction)} retryRequiresGeneration={aiRetryAction === 'GENERATE'} hasGraph={draft.nodes.length > 0} onPromptChange={setAIPrompt} onSubmit={() => void generateDatasetAIPlan()} onApply={() => void applyDatasetAIPlan()} onUndo={undoDatasetAIPlan} onRetryOriginal={() => retryDatasetAI('ORIGINAL')} onRetryModified={() => retryDatasetAI('MODIFIED')} onDismissError={dismissDatasetAIError} onDetailsExpandedChange={setAIDetailsExpanded} />}
-        canvas={<RelationCanvas nodes={draft.nodes} fields={draft.fields} joins={draft.joins} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} end={endBox} nodePositions={nodePositions} activeNodeID={activeNodeID} activeJoinID={activeJoinID} activeGroupID={activeGroupID} activeTransformID={activeTransformID} activeEnd={activeEnd} tables={tables} isFullscreen={canvasFullscreen} previewTarget={canvasPreviewTarget} preview={canvasPreview} previewLabel={canvasPreviewLabel} onPreview={openCanvasPreview} onRefreshPreview={() => { if (canvasPreviewTarget) openCanvasPreview(canvasPreviewTarget) }} onClosePreview={() => setCanvasPreviewTarget(null)} onArrange={arrangeCanvas} onToggleFullscreen={() => void toggleCanvasFullscreen()} onAddJoin={addRelationBox} onAddGroup={addGroupBox} onAddTransform={addTransformBox} onAddEnd={addEndBox} onAddTable={(table, position) => void selectTable(table, position)} onMove={updateCanvasPosition} onConnect={dropRelationInput} onConnectGroup={connectGroupInput} onConnectTransform={connectTransformInput} onConnectEnd={connectEndInput} onRemoveBox={removeRelationBox} onRemoveGroup={removeGroupBox} onRemoveTransform={removeTransformBox} onRemoveEnd={removeEndBox} onNodeClick={openNodeConfig} onJoinClick={joinID => { setActiveNodeID(''); setActiveGroupID(''); setActiveTransformID(''); setActiveEnd(false); setActiveJoinID(joinID); setCanvasNotice('') }} onGroupClick={groupID => { setActiveNodeID(''); setActiveJoinID(''); setActiveTransformID(''); setActiveEnd(false); setActiveGroupID(groupID); setCanvasNotice('') }} onTransformClick={transformID => { setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveEnd(false); setActiveTransformID(transformID); setCanvasNotice('') }} onEndClick={() => { setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveTransformID(''); setActiveEnd(true); setCanvasNotice('') }} onRemoveNode={removeNode} />}
+        assistant={<DatasetAIComposer prompt={aiPrompt} lastInstruction={aiLastInstruction} result={aiResult} conversation={aiConversation} progressLogs={aiProgressLogs} labels={aiReviewLabels} error={aiError} preview={endPreview} tables={tables} graphOverview={{ nodes: draft.nodes.map(node => node.table.businessName || node.table.tableName), joins: relationBoxes.map(box => box.name), transforms: transformBoxes.map(box => box.name), groups: groupBoxes.map(box => box.name), end: endBox?.name }} busy={aiBusy} applying={aiApplying} applied={aiApplied} detailsExpanded={aiDetailsExpanded} ready={!assetsLoading && !busyAction} hasAssets={tables.length > 0} canUndo={Boolean(aiUndo)} canRetry={Boolean(aiRetryAction)} retryRequiresGeneration={aiRetryAction === 'GENERATE'} hasGraph={draft.nodes.length > 0} existingDAG={editingCanvas && draft.nodes.length > 0} onPromptChange={setAIPrompt} onSubmit={(instruction, conversationContent) => void generateDatasetAIPlan(instruction, false, conversationContent)} onApply={() => void applyDatasetAIPlan()} onUndo={undoDatasetAIPlan} onSave={() => openMetadata()} onRetryOriginal={() => retryDatasetAI('ORIGINAL')} onRetryModified={() => retryDatasetAI('MODIFIED')} onDismissError={dismissDatasetAIError} onDetailsExpandedChange={setAIDetailsExpanded} />}
+        canvas={<RelationCanvas nodes={draft.nodes} fields={draft.fields} joins={draft.joins} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} end={endBox} nodePositions={nodePositions} activeNodeID={activeNodeID} activeJoinID={activeJoinID} activeGroupID={activeGroupID} activeTransformID={activeTransformID} activeEnd={activeEnd} validationLock={validationLock} tables={tables} isFullscreen={canvasFullscreen} previewTarget={canvasPreviewTarget} preview={canvasPreview} previewLabel={canvasPreviewLabel} onPreview={openCanvasPreview} onRefreshPreview={() => { if (canvasPreviewTarget) openCanvasPreview(canvasPreviewTarget) }} onClosePreview={() => setCanvasPreviewTarget(null)} onArrange={arrangeCanvas} onToggleFullscreen={() => void toggleCanvasFullscreen()} onAddJoin={addRelationBox} onAddGroup={addGroupBox} onAddTransform={addTransformBox} onAddEnd={addEndBox} onAddTable={(table, position) => void selectTable(table, position)} onMove={updateCanvasPosition} onConnect={dropRelationInput} onConnectGroup={connectGroupInput} onConnectTransform={connectTransformInput} onConnectEnd={connectEndInput} onRemoveBox={removeRelationBox} onRemoveGroup={removeGroupBox} onRemoveTransform={removeTransformBox} onRemoveEnd={removeEndBox} onNodeClick={openNodeConfig} onJoinClick={joinID => { setActiveNodeID(''); setActiveGroupID(''); setActiveTransformID(''); setActiveEnd(false); setActiveJoinID(joinID); setCanvasNotice('') }} onGroupClick={groupID => { setActiveNodeID(''); setActiveJoinID(''); setActiveTransformID(''); setActiveEnd(false); setActiveGroupID(groupID); setCanvasNotice('') }} onTransformClick={transformID => { setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveEnd(false); setActiveTransformID(transformID); setCanvasNotice('') }} onEndClick={() => { setActiveNodeID(''); setActiveJoinID(''); setActiveGroupID(''); setActiveTransformID(''); setActiveEnd(true); setCanvasNotice('') }} onRemoveNode={removeNode} />}
         panels={<>
           {activeNode && <NodeConfigDrawer node={activeNode} fields={draft.fields.filter(field => field.key.startsWith(`${activeNode.id}.`))} onFieldPatch={updateOutputField} onDone={closeCanvasEditor} />}
           {activeRelationBox && <JoinConfigDrawer box={activeRelationBox} join={activeJoin} boxes={relationBoxes} groups={groupBoxes} transforms={transformBoxes} nodes={draft.nodes} leftOutputFields={activeLeftOutputFields} rightOutputFields={activeRightOutputFields} onNameChange={name => setRelationBoxes(current => current.map(box => box.id === activeRelationBox.id ? { ...box, name } : box))} onJoinPatch={patch => activeJoin && updateJoin(activeJoin.id, { ...patch, manualConfirmed: false })} onConditionPatch={(conditionID, patch) => activeJoin && updateJoinCondition(activeJoin.id, conditionID, patch)} onAddCondition={() => activeJoin && addJoinCondition(activeJoin.id)} onRemoveCondition={conditionID => activeJoin && removeJoinCondition(activeJoin.id, conditionID)} onOutputChange={(key, checked) => updateRelationOutput(activeRelationBox.id, key, checked)} onDone={closeCanvasEditor} />}
@@ -4162,7 +4321,7 @@ export function DatasetCenterPage() {
         </>}
         feedback={formError && <div className="dataset-center-feedback error" role="alert">{formError}</div>}
       />
-      <footer className="dataset-dialog-footer"><button className="quiet-button" type="button" disabled={actionBusy || aiApplying} onClick={closeDialog}>取消</button><button className="primary-button" type="button" disabled={actionBusy || assetsLoading || aiBusy || aiApplying} onClick={openMetadata}>{busyAction.startsWith('asset:') ? '正在填充…' : aiBusy ? '正在生成 AI 方案…' : aiApplying ? '正在应用 AI 方案…' : '保存配置'}</button></footer>
+      <footer className="dataset-dialog-footer"><button className="quiet-button" type="button" disabled={actionBusy || aiApplying} onClick={closeDialog}>退出</button><button className="primary-button" type="button" disabled={actionBusy || assetsLoading || aiBusy || aiApplying} onClick={() => openMetadata()}>{busyAction.startsWith('asset:') ? '正在填充…' : aiBusy ? '正在生成 AI 方案…' : aiApplying ? '正在应用 AI 方案…' : '完善数据集信息'}</button></footer>
     </Dialog>}
 
     {dialog?.mode === 'metadata' && <Dialog title={editingRecord ? '保存数据集修改' : '完善数据集信息'} eyebrow="保存配置" onClose={() => { if (!busyAction) setDialog({ mode: 'create' }) }}>
@@ -4373,13 +4532,65 @@ export function DatasetCenterPage() {
   </AppShell>
 }
 
-function DatasetAIComposer({ prompt, lastInstruction, result, progressLogs, labels, error, busy, applying, applied, detailsExpanded, ready, hasAssets, canUndo, canRetry, retryRequiresGeneration, hasGraph, onPromptChange, onSubmit, onApply, onUndo, onRetryOriginal, onRetryModified, onDismissError, onDetailsExpandedChange }: {
+function DatasetAITypeConfirmationCard({ modelKind, busy, onChange, onConfirm }: {
+  modelKind: DatasetAIModelKind | null
+  busy: boolean
+  onChange: (kind: DatasetAIModelKind) => void
+  onConfirm: () => void
+}) {
+  const meta: Record<DatasetAIModelKind, { label: string; description: string }> = {
+    DIM: { label: '维度表', description: '统一业务实体与属性' },
+    DWD: { label: '事实 / 明细表', description: '保留业务过程明细' },
+    DWS: { label: '聚合表', description: '按维度汇总指标' },
+  }
+  return <section className="dataset-ai-scene-card dataset-ai-type-confirmation-card" aria-label="模型类型确认">
+    <header><div><span>类型待确认</span><strong>请选择本次建模类型</strong></div></header>
+    <p>当前需求无法唯一判断模型类型。确认后，系统会按业务目标自动筛选候选表。</p>
+    <div className="dataset-ai-model-kind" role="group" aria-label="选择模型类型">
+      {(Object.keys(meta) as DatasetAIModelKind[]).map(kind => <button className={modelKind === kind ? 'is-selected' : ''} type="button" aria-pressed={modelKind === kind} disabled={busy} key={kind} onClick={() => onChange(kind)}><strong>{meta[kind].label}</strong><small>{meta[kind].description}</small></button>)}
+    </div>
+    <footer><span>仅在需求未明确类型时出现</span><button type="button" disabled={!modelKind || busy} onClick={onConfirm}>确认类型并筛表</button></footer>
+  </section>
+}
+
+function DatasetAITableConfirmationCard({ modelKindLabel, requirement, tables, suggestedTableIDs, availableTables, tableToAdd, busy, onTableToAddChange, onAdd, onRemove, onExpand, onChangeType, onConfirm }: {
+  modelKindLabel: string
+  requirement: string
+  tables: AssetTable[]
+  suggestedTableIDs: Set<string>
+  availableTables: AssetTable[]
+  tableToAdd: string
+  busy: boolean
+  onTableToAddChange: (tableID: string) => void
+  onAdd: () => void
+  onRemove: (tableID: string) => void
+  onExpand: () => void
+  onChangeType: () => void
+  onConfirm: () => void
+}) {
+  return <section className="dataset-ai-scene-card dataset-ai-table-confirmation-card" aria-label="候选表确认">
+    <header><div><span>候选表确认</span><strong>确认系统筛选结果</strong></div><button type="button" disabled={busy} onClick={onChangeType}>修改类型</button></header>
+    <p>已按“{requirement}”筛选适合构建{modelKindLabel}的数据表，请确认是否准确。</p>
+    <div className="dataset-ai-table-scope">
+      <div><strong>系统筛选的候选表</strong><span>{tables.length} 张</span></div>
+      {tables.length > 0 ? <ul>{tables.map(table => <li key={table.id}><span><strong>{table.businessName || table.tableName}</strong><small>{table.schemaName}.{table.tableName}{suggestedTableIDs.has(table.id) ? ' · 系统推荐' : ' · 手动补充'}</small></span><button type="button" disabled={busy} aria-label={`移除${table.businessName || table.tableName}`} onClick={() => onRemove(table.id)}><XIcon size={13} weight="bold" /></button></li>)}</ul> : <p>当前筛选结果为空，可以扩大筛选范围或从下方补充数据表。</p>}
+      {availableTables.length > 0 && <div className="dataset-ai-table-picker"><select aria-label="补充候选表" value={tableToAdd} disabled={busy} onChange={event => onTableToAddChange(event.target.value)}><option value="">补充其他数据表…</option>{availableTables.map(table => <option value={table.id} key={table.id}>{table.businessName || table.tableName} · {table.schemaName}.{table.tableName}</option>)}</select><button type="button" disabled={!tableToAdd || busy} onClick={onAdd}><PlusIcon size={14} weight="bold" />加入</button></div>}
+    </div>
+    <footer><div><button type="button" disabled={!availableTables.length || busy} onClick={onExpand}>扩大筛选</button><small>筛选后仍可增加或删除</small></div><button type="button" disabled={!tables.length || busy} onClick={onConfirm}>确认这些表并分析</button></footer>
+  </section>
+}
+
+function DatasetAIComposer({ prompt, lastInstruction, result, conversation, progressLogs, labels, error, preview, tables, graphOverview, busy, applying, applied, detailsExpanded, ready, hasAssets, canUndo, canRetry, retryRequiresGeneration, hasGraph, existingDAG, onPromptChange, onSubmit, onApply, onUndo, onSave, onRetryOriginal, onRetryModified, onDismissError, onDetailsExpandedChange }: {
   prompt: string
   lastInstruction: string
   result: DatasetAIPlanResult | null
+  conversation: DatasetAIConversationEntry[]
   progressLogs: DatasetAIProgressEvent[]
   labels: DatasetAIReviewLabels
   error: DatasetAIErrorView | null
+  preview: NodePreviewState
+  tables: AssetTable[]
+  graphOverview: DatasetAIGraphOverview
   busy: boolean
   applying: boolean
   applied: boolean
@@ -4390,10 +4601,12 @@ function DatasetAIComposer({ prompt, lastInstruction, result, progressLogs, labe
   canRetry: boolean
   retryRequiresGeneration: boolean
   hasGraph: boolean
+  existingDAG: boolean
   onPromptChange: (value: string) => void
-  onSubmit: () => void
+  onSubmit: (instruction?: string, conversationContent?: string | null) => void
   onApply: () => void
   onUndo: () => void
+  onSave: () => void
   onRetryOriginal: () => void
   onRetryModified: () => void
   onDismissError: () => void
@@ -4403,14 +4616,24 @@ function DatasetAIComposer({ prompt, lastInstruction, result, progressLogs, labe
   const detailsID = useId()
   const headingID = useId()
   const promptRef = useRef<HTMLTextAreaElement>(null)
-  const actionLabel = busy ? '正在生成…' : proposal ? '继续修改' : hasGraph ? 'AI 修改流程' : 'AI 生成流程'
+  const threadRef = useRef<HTMLDivElement>(null)
+  const [intakeStage, setIntakeStage] = useState<'REQUIREMENT' | 'TYPE' | 'TABLES' | 'SUBMITTED'>('REQUIREMENT')
+  const [intakeGoal, setIntakeGoal] = useState('')
+  const [intakeMessages, setIntakeMessages] = useState<Array<{ id: string; role: 'USER' | 'ASSISTANT'; content: string }>>([])
+  const [modelKind, setModelKind] = useState<DatasetAIModelKind | null>(null)
+  const [selectedTableIDs, setSelectedTableIDs] = useState<Set<string>>(() => new Set())
+  const [suggestedTableIDs, setSuggestedTableIDs] = useState<Set<string>>(() => new Set())
+  const [tableToAdd, setTableToAdd] = useState('')
+  const modelKindLabels: Record<DatasetAIModelKind, string> = { DIM: '维度表', DWD: '事实表 / 明细表', DWS: '聚合表' }
+  const selectedTables = tables.filter(table => selectedTableIDs.has(table.id))
+  const availableTables = tables.filter(table => !selectedTableIDs.has(table.id))
+  const isModificationFlow = existingDAG || proposal?.mode === 'MODIFY'
   const hasNoChanges = proposal?.mode === 'MODIFY' && proposal.changeSet.operations.length === 0
   const actionsBusy = busy || applying
   const canApply = Boolean(proposal) && !applied && !hasNoChanges && !actionsBusy && !retryRequiresGeneration
   const canUseUndo = canUndo && (!proposal || applied) && !actionsBusy
   const promptChanged = Boolean(prompt.trim()) && prompt.trim() !== lastInstruction.trim()
-  const retryLabel = !canRetry ? '重试' : retryRequiresGeneration ? promptChanged ? '根据修改重新生成' : '按原要求重试' : '重新应用'
-  const retryAction = retryRequiresGeneration && promptChanged ? onRetryModified : onRetryOriginal
+  const hasDiagnostics = Boolean(error && (error.code || error.diagnosticCode || error.reasonCode || error.stage || error.repairAttempted !== undefined || error.status || error.requestId))
   const nodeLabel = (nodeID: string) => labels.nodes[nodeID]
     || proposal?.plan.nodes.find(node => node.id === nodeID)?.alias
     || proposal?.plan.transforms?.find(transform => transform.id === nodeID)?.name
@@ -4425,85 +4648,222 @@ function DatasetAIComposer({ prompt, lastInstruction, result, progressLogs, labe
     RIGHT: '保留右侧全部数据 · 一对多',
     FULL: '保留两侧全部数据 · 多对多',
   })[joinType]
+  const showTableConfirmation = (kind: DatasetAIModelKind, goal: string, expanded = false) => {
+    const filtered = filterDatasetAICandidateTables(tables, goal, kind, expanded ? tables.length : 3)
+    const ids = new Set(filtered.map(table => table.id))
+    setModelKind(kind)
+    setSelectedTableIDs(ids)
+    setSuggestedTableIDs(ids)
+    setTableToAdd('')
+    setIntakeStage('TABLES')
+  }
+  const understandRequirement = () => {
+    const message = prompt.trim()
+    if (!message || busy || applying) return
+    const goal = intakeStage === 'REQUIREMENT' ? message : `${intakeGoal}；${message}`
+    const detectedKind = inferDatasetAIModelKind(message) || (intakeStage === 'TABLES' ? modelKind : inferDatasetAIModelKind(goal))
+    setIntakeGoal(goal)
+    setIntakeMessages(messages => [...messages,
+      { id: `intake-user:${Date.now()}`, role: 'USER', content: message },
+      { id: `intake-assistant:${Date.now()}`, role: 'ASSISTANT', content: detectedKind
+        ? `${intakeStage === 'TABLES' ? '已根据补充条件重新筛选' : `已识别为${modelKindLabels[detectedKind]}，我先筛选`}候选表，请确认是否准确。`
+        : '需求中没有明确模型类型，请先确认类型；确认后我会自动筛选候选表。' },
+    ])
+    onPromptChange('')
+    if (detectedKind) showTableConfirmation(detectedKind, goal)
+    else {
+      setModelKind(null)
+      setIntakeStage('TYPE')
+    }
+  }
+  const confirmModelKind = () => {
+    if (!modelKind || busy || applying) return
+    setIntakeMessages(messages => [...messages, {
+      id: `intake-type:${Date.now()}`,
+      role: 'ASSISTANT',
+      content: `已确认目标类型为${modelKindLabels[modelKind]}，下面是根据“${intakeGoal}”筛选出的候选表。`,
+    }])
+    showTableConfirmation(modelKind, intakeGoal)
+  }
+  const confirmTables = () => {
+    if (!modelKind || !selectedTables.length || busy || applying) return
+    const tableNames = selectedTables.map(table => `${table.businessName || table.tableName}（${table.schemaName}.${table.tableName}）`).join('、')
+    setIntakeStage('SUBMITTED')
+    setIntakeMessages(messages => [...messages, {
+      id: `intake-tables:${Date.now()}`,
+      role: 'ASSISTANT',
+      content: `已确认${selectedTables.length}张候选表：${selectedTables.map(table => table.businessName || table.tableName).join('、')}。正在分析关联键、指标、分组和字段转换。`,
+    }])
+    onSubmit(`建模范围已确认：目标为${modelKindLabels[modelKind]}（${modelKind}）；只使用以下候选表：${tableNames}。业务目标：${intakeGoal}。请先返回关联键、指标计算逻辑、分组信息和字段转换信息供确认，不要直接写入画布。`, null)
+  }
+  const submitMessage = () => {
+    if (!existingDAG && intakeStage !== 'SUBMITTED') {
+      understandRequirement()
+      return
+    }
+    onSubmit()
+  }
+  const beginComponentChange = (instruction: string) => {
+    onPromptChange(instruction)
+    requestAnimationFrame(() => {
+      promptRef.current?.focus()
+      promptRef.current?.setSelectionRange(instruction.length, instruction.length)
+    })
+  }
   useLayoutEffect(() => {
     const textarea = promptRef.current
     if (!textarea) return
     textarea.style.height = '0px'
     textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 28), 128)}px`
   }, [prompt])
-  return <DatasetAIDock hasProposal={Boolean(proposal)}>
-    <form onSubmit={event => { event.preventDefault(); onSubmit() }}>
-      <span className="dataset-ai-icon" aria-hidden="true"><MagicWandIcon size={19} weight="fill" /></span>
-      <label>
-        <strong>{hasGraph ? '告诉 AI 接下来怎么改' : '用一句话描述想要的数据结果'}</strong>
-        <textarea ref={promptRef} rows={1} aria-label="描述数据集生成或修改目标" maxLength={4000} value={prompt} disabled={busy || applying || !hasAssets || !ready} onChange={event => onPromptChange(event.target.value)} placeholder={hasGraph ? '例如：把客户与订单改为 INNER 关联，按地区汇总订单金额' : '例如：关联客户和订单，按地区汇总订单金额，保留客户名称'} />
-      </label>
-      <button type="submit" disabled={!hasAssets || !ready || !prompt.trim() || busy || applying}><MagicWandIcon aria-hidden="true" size={15} weight="bold" />{actionLabel}</button>
-      <div className="dataset-ai-toolbar" role="toolbar" aria-label="AI 方案操作">
-        <button type="button" aria-controls={detailsID} aria-expanded={Boolean(proposal && detailsExpanded)} disabled={!proposal || detailsExpanded} onClick={() => onDetailsExpandedChange(true)}><CaretDownIcon aria-hidden="true" size={14} weight="bold" />展开</button>
-        <button type="button" aria-controls={detailsID} aria-expanded={Boolean(proposal && detailsExpanded)} disabled={!proposal || !detailsExpanded} onClick={() => onDetailsExpandedChange(false)}><CaretUpIcon aria-hidden="true" size={14} weight="bold" />折叠</button>
-        <button type="button" disabled={!canApply} onClick={onApply}><CheckCircleIcon aria-hidden="true" size={14} weight="bold" />应用</button>
-        <button type="button" disabled={!canUseUndo} onClick={onUndo}><ArrowCounterClockwiseIcon aria-hidden="true" size={14} weight="bold" />撤销</button>
-        <button type="button" disabled={!canRetry || actionsBusy} onClick={retryAction}><ArrowClockwiseIcon aria-hidden="true" size={14} weight="bold" />{retryLabel}</button>
+  useLayoutEffect(() => {
+    const thread = threadRef.current
+    if (!thread) return
+    if (conversation.length === 0 && intakeMessages.length === 0 && !busy && !error) {
+      thread.scrollTo({ top: 0, behavior: 'auto' })
+      return
+    }
+    thread.scrollTo({ top: thread.scrollHeight, behavior: conversation.length + intakeMessages.length > 1 ? 'smooth' : 'auto' })
+  }, [applied, applying, busy, conversation.length, error, intakeMessages.length, intakeStage, preview.data?.rows.length, preview.error, preview.loading, result?.requestId])
+  return <DatasetAIDock hasProposal={Boolean(proposal)} existingDAG={existingDAG}>
+    <div className="dataset-ai-chat">
+      <div className="dataset-ai-thread" ref={threadRef} role="log" aria-live="polite" aria-label="AI 数据流对话">
+        {conversation.length === 0 && intakeMessages.length === 0 && !existingDAG && <article className="dataset-ai-message is-assistant is-welcome">
+          <span className="dataset-ai-message-avatar" aria-hidden="true"><MagicWandIcon size={17} weight="fill" /></span>
+          <div><strong>告诉我你想构建什么数据集</strong><p>可以直接描述业务目标；如果你已经说明事实、明细、维度或聚合类型，我会跳过类型确认。</p><small>我会先筛选候选表，再请你确认，不会直接写入画布。</small></div>
+        </article>}
+        {conversation.length === 0 && intakeMessages.length === 0 && existingDAG && <article className="dataset-ai-message is-assistant is-welcome">
+          <span className="dataset-ai-message-avatar" aria-hidden="true"><MagicWandIcon size={17} weight="fill" /></span>
+          <div><strong>基于当前 DAG 继续修改</strong><p>我会保留未提及的组件和连线，只修改你指定的组件，或按要求新增、删除组件。</p><small>修改方案确认后才会应用到画布，并返回更新后的预览数据。</small></div>
+        </article>}
+        {conversation.length === 0 && existingDAG && <section className="dataset-ai-existing-dag-card" aria-label="当前 DAG 组件">
+          <header><div><span>当前 DAG</span><strong>选择要执行的组件操作</strong></div><small>{graphOverview.nodes.length + graphOverview.joins.length + graphOverview.transforms.length + graphOverview.groups.length + (graphOverview.end ? 1 : 0)} 个组件</small></header>
+          <dl className="dataset-ai-existing-dag-stats">
+            <div><dt>数据</dt><dd>{graphOverview.nodes.length}</dd></div><div><dt>关联</dt><dd>{graphOverview.joins.length}</dd></div><div><dt>处理</dt><dd>{graphOverview.transforms.length}</dd></div><div><dt>分组</dt><dd>{graphOverview.groups.length}</dd></div><div><dt>输出</dt><dd>{graphOverview.end ? 1 : 0}</dd></div>
+          </dl>
+          <ul className="dataset-ai-existing-component-list">
+            {graphOverview.nodes.length > 0 && <li><span>数据</span><strong>{graphOverview.nodes.join('、')}</strong></li>}
+            {graphOverview.joins.length > 0 && <li><span>关联</span><strong>{graphOverview.joins.join('、')}</strong></li>}
+            {graphOverview.transforms.length > 0 && <li><span>处理</span><strong>{graphOverview.transforms.join('、')}</strong></li>}
+            {graphOverview.groups.length > 0 && <li><span>分组</span><strong>{graphOverview.groups.join('、')}</strong></li>}
+            {graphOverview.end && <li><span>输出</span><strong>{graphOverview.end}</strong></li>}
+          </ul>
+          <div className="dataset-ai-component-actions" role="group" aria-label="选择组件操作">
+            <button type="button" disabled={busy || applying} onClick={() => beginComponentChange('请修改现有组件：')}><PencilSimpleIcon size={14} weight="bold" />修改组件</button>
+            <button type="button" disabled={busy || applying} onClick={() => beginComponentChange('请在当前 DAG 中新增组件：')}><PlusIcon size={14} weight="bold" />新增组件</button>
+            <button type="button" disabled={busy || applying} onClick={() => beginComponentChange('请从当前 DAG 中删除组件：')}><TrashIcon size={14} weight="bold" />删除组件</button>
+          </div>
+        </section>}
+        {intakeMessages.map(message => message.role === 'USER'
+          ? <article className="dataset-ai-message is-user" key={message.id}><div><p>{message.content}</p></div></article>
+          : <article className="dataset-ai-message is-assistant is-intake" key={message.id}><span className="dataset-ai-message-avatar" aria-hidden="true"><MagicWandIcon size={17} weight="fill" /></span><div><p>{message.content}</p></div></article>)}
+        {!existingDAG && intakeStage === 'TYPE' && <DatasetAITypeConfirmationCard modelKind={modelKind} busy={actionsBusy} onChange={setModelKind} onConfirm={confirmModelKind} />}
+        {!existingDAG && intakeStage === 'TABLES' && modelKind && <DatasetAITableConfirmationCard
+          modelKindLabel={modelKindLabels[modelKind]}
+          requirement={intakeGoal}
+          tables={selectedTables}
+          suggestedTableIDs={suggestedTableIDs}
+          availableTables={availableTables}
+          tableToAdd={tableToAdd}
+          busy={actionsBusy}
+          onTableToAddChange={setTableToAdd}
+          onAdd={() => { if (!tableToAdd) return; setSelectedTableIDs(current => new Set(current).add(tableToAdd)); setTableToAdd('') }}
+          onRemove={tableID => setSelectedTableIDs(current => { const next = new Set(current); next.delete(tableID); return next })}
+          onExpand={() => {
+            const expanded = filterDatasetAICandidateTables(tables, intakeGoal, modelKind, tables.length)
+            setSelectedTableIDs(current => new Set([...current, ...expanded.map(table => table.id)]))
+            setSuggestedTableIDs(current => new Set([...current, ...expanded.map(table => table.id)]))
+          }}
+          onChangeType={() => setIntakeStage('TYPE')}
+          onConfirm={confirmTables}
+        />}
+        {conversation.map(entry => entry.role === 'USER'
+          ? <article className="dataset-ai-message is-user" key={entry.id}><div><p>{entry.content}</p></div></article>
+          : <article className={`dataset-ai-message is-assistant is-${entry.status?.toLowerCase() || 'staged'}`} key={entry.id}>
+            <span className="dataset-ai-message-avatar" aria-hidden="true"><MagicWandIcon size={17} weight="fill" /></span>
+            <div>
+              <header><strong>AI 数据流助手</strong><span>{entry.status === 'APPLIED' ? '已应用' : entry.status === 'REVERTED' ? '已撤销' : entry.status === 'SUPERSEDED' ? '已更新' : '待应用'}</span></header>
+              <p>{entry.content}</p>
+              {entry.result && entry.result.requestId !== result?.requestId && <dl className="dataset-ai-message-stats"><div><dt>数据</dt><dd>{entry.result.proposal.plan.nodes.length}</dd></div><div><dt>处理</dt><dd>{entry.result.proposal.plan.transforms?.length ?? 0}</dd></div><div><dt>关联</dt><dd>{entry.result.proposal.plan.joins.length}</dd></div><div><dt>分组</dt><dd>{entry.result.proposal.plan.groups.length}</dd></div><div><dt>输出</dt><dd>{entry.result.proposal.plan.end.outputs.length}</dd></div></dl>}
+              {entry.result?.requestId === result?.requestId && proposal && <article className={`dataset-ai-proposal ${detailsExpanded ? '' : 'is-collapsed'} ${applied ? 'is-applied' : ''}`} aria-labelledby={headingID}>
+                <header>
+                  <div className="dataset-ai-proposal-heading"><span aria-live="polite" aria-atomic="true">{isModificationFlow ? applied ? 'DAG 修改已应用' : '组件修改待确认' : applied ? '第 3 步 · DAG 已生成' : '第 2 步 · 配置待确认'}</span><h3 id={headingID}>{proposal.summary}</h3></div>
+                  <dl><div><dt>数据</dt><dd>{proposal.plan.nodes.length}</dd></div><div><dt>处理</dt><dd>{proposal.plan.transforms?.length ?? 0}</dd></div><div><dt>关联</dt><dd>{proposal.plan.joins.length}</dd></div><div><dt>分组</dt><dd>{proposal.plan.groups.length}</dd></div><div><dt>输出</dt><dd>{proposal.plan.end.outputs.length}</dd></div></dl>
+                </header>
+                <div className="dataset-ai-proposal-details" id={detailsID} hidden={!detailsExpanded}>
+                  {proposal.mode === 'MODIFY' && <section className="dataset-ai-change-review" aria-label="本次修改">
+                    <h4>本次修改</h4>
+                    {proposal.changeSet.operations.length > 0 ? <>
+                      <p>已按你的要求识别以下变更，未列出的组件保持不变。</p>
+                      <ul aria-label="本次修改清单">{proposal.changeSet.operations.map((operation, index) => <li key={`${operation.action}:${operation.componentKind}:${operation.componentId}:${index}`}>
+                        <span className={`is-${operation.action.toLowerCase()}`}>{datasetAIChangeActionLabels[operation.action]}</span>
+                        <div><strong>{operation.componentName}</strong><small>{datasetAIChangeComponentLabels[operation.componentKind]}{operation.fields.length > 0 ? ` · 修改字段：${operation.fields.map(field => datasetAIChangeFieldLabels[field] || field).join('、')}` : ''}</small><small>{operation.description}</small></div>
+                      </li>)}</ul>
+                    </> : <p className="dataset-ai-no-changes" role="status">当前流程已符合要求，无需变更。</p>}
+                  </section>}
+                  <section className="dataset-ai-flow-review"><h4>{isModificationFlow ? '修改后完整流程' : '方案流程'}</h4><ol>
+                    <li><span>数据</span><strong>{proposal.plan.nodes.map(node => nodeLabel(node.id)).join('、')}</strong></li>
+                    {(proposal.plan.transforms?.length ?? 0) > 0 && <li><span>处理</span><strong>{proposal.plan.transforms?.map(transform => transform.name).join('、')}</strong></li>}
+                    {proposal.plan.joins.length > 0 && <li><span>关联</span><strong>{proposal.plan.joins.map(join => join.name).join('、')}</strong></li>}
+                    {proposal.plan.groups.length > 0 && <li><span>汇总</span><strong>{proposal.plan.groups.map(group => group.name).join('、')}</strong></li>}
+                    <li><span>输出</span><strong>{proposal.plan.end.outputs.slice(0, 8).map(output => output.name).join('、')}{proposal.plan.end.outputs.length > 8 ? ` 等 ${proposal.plan.end.outputs.length} 项` : ''}</strong></li>
+                  </ol></section>
+                  {proposal.plan.joins.length > 0 && <section className="dataset-ai-join-review"><h4>{isModificationFlow ? '修改后的关联字段' : '请确认关联字段'}</h4><p>这些字段决定两张表如何匹配；可继续对话调整，应用时才写入画布。</p><ul>{proposal.plan.joins.map(join => <li key={join.id}><span>{join.joinType}</span><div><strong>{join.name}<small>{joinMeaning(join.joinType)}</small></strong>{join.conditions.map((condition, index) => <small key={`${join.id}:${index}`}><b>{fieldLabel(condition.leftNodeId, condition.leftColumn)}</b><i>=</i><b>{fieldLabel(condition.rightNodeId, condition.rightColumn)}</b></small>)}</div></li>)}</ul></section>}
+                  {proposal.plan.groups.length > 0 && <section className="dataset-ai-group-review"><h4>{isModificationFlow ? '修改后的分组与指标' : '汇总口径'}</h4><ul>{proposal.plan.groups.map(group => <li key={group.id}><strong>{group.name}</strong><small>按 {group.dimensions.map(item => fieldLabel(item.nodeId, item.column)).join('、')} 分组</small><small>计算 {group.metrics.map(item => `${fieldLabel(item.nodeId, item.column)} · ${item.aggregation}`).join('、')}</small></li>)}</ul></section>}
+                  {(proposal.assumptions.length > 0 || proposal.warnings.length > 0) && <section className="dataset-ai-notes"><h4>生成依据</h4>{proposal.assumptions.map(item => <p key={`assumption:${item}`}>{item}</p>)}{proposal.warnings.map(item => <p className="warning" key={`warning:${item}`}>{item}</p>)}</section>}
+                </div>
+                {applied && <section className="dataset-ai-preview-result" aria-label="DAG 预览数据"><header><div><span>{isModificationFlow ? '修改结果' : '第 4 步'}</span><strong>{isModificationFlow ? '更新后预览数据' : 'DAG 预览数据'}</strong></div><small>最终输出前 5 行 · 仅预览，不保存</small></header>{preview.loading ? <p>正在执行 DAG 并读取预览数据…</p> : preview.data ? <PreviewRows preview={{ queryId: '', columns: preview.data.columns, columnMetadata: preview.data.columnMetadata, rows: preview.data.rows, rowCount: preview.data.rows.length, durationMs: 0 }} /> : preview.error ? <div className="dataset-ai-preview-error"><strong>预览暂不可用</strong><span>{preview.error}</span><small>{preview.suggestion}</small></div> : <p>正在准备预览数据…</p>}</section>}
+                <footer className="dataset-ai-proposal-actions">
+                  <button type="button" aria-controls={detailsID} aria-expanded={detailsExpanded} onClick={() => onDetailsExpandedChange(!detailsExpanded)}>{detailsExpanded ? <CaretUpIcon aria-hidden="true" size={14} weight="bold" /> : <CaretDownIcon aria-hidden="true" size={14} weight="bold" />}{detailsExpanded ? '收起详情' : '查看详情'}</button>
+                  <span>{applied ? isModificationFlow ? '可继续调整其他组件，或保存本次修改' : '请确认继续修改，或保存当前 DAG' : isModificationFlow ? '只会应用上方列出的组件变更' : '若配置不正确，请直接在下方继续对话修改'}</span>
+                  {applied ? <><button type="button" onClick={() => promptRef.current?.focus()}>继续修改</button><button type="button" disabled={!canUseUndo} onClick={onUndo}><ArrowCounterClockwiseIcon aria-hidden="true" size={14} weight="bold" />{isModificationFlow ? '撤销修改' : '撤销生成'}</button><button className="is-primary" type="button" onClick={onSave}><CheckCircleIcon aria-hidden="true" size={14} weight="bold" />{isModificationFlow ? '保存修改' : '保存 DAG'}</button></> : <button className="is-primary" type="button" disabled={!canApply} onClick={onApply}><CheckCircleIcon aria-hidden="true" size={14} weight="bold" />{applying ? isModificationFlow ? '正在应用…' : '正在生成…' : hasNoChanges ? '无需修改' : isModificationFlow ? '确认并应用修改' : '确认并生成 DAG'}</button>}
+                </footer>
+              </article>}
+            </div>
+          </article>)}
+        {busy && <DatasetAIGenerationProgress logs={progressLogs} />}
+        {error && <section className="dataset-ai-error" role="alert">
+      <header className="dataset-ai-error-heading">
+        <span className="dataset-ai-error-icon" aria-hidden="true"><WarningCircleIcon size={19} weight="fill" /></span>
+        <div>
+          <small>生成未完成</small>
+          <strong>{error.title}</strong>
+          <p>{error.message}</p>
+        </div>
+        <span className="dataset-ai-error-safe"><CheckCircleIcon aria-hidden="true" size={13} weight="fill" />原画布已保护</span>
+      </header>
+      <div className="dataset-ai-error-suggestion">
+        <strong>下一步怎么做</strong>
+        <p>{error.suggestion}</p>
       </div>
-    </form>
-    {!ready && <p className="dataset-ai-helper" role="status">正在准备当前画布与可用数据资产…</p>}
-    {ready && !hasAssets && <p className="dataset-ai-helper" role="status">请先完成至少一张数据表的 LLM 映射，再使用自动配置。</p>}
-    {busy && <DatasetAIGenerationProgress logs={progressLogs} />}
-    {error && <div className="dataset-ai-error" role="alert">
-      <div className="dataset-ai-error-copy">
-        <strong>{error.title}</strong>
-        <p>{error.message}</p>
-        <small><b>处理建议</b>{error.suggestion}</small>
-		{(error.code || error.diagnosticCode || error.reasonCode || error.stage || error.repairAttempted !== undefined || error.status || error.requestId) && <dl aria-label="错误诊断信息">
+      {hasDiagnostics && <details className="dataset-ai-error-diagnostics">
+        <summary>查看技术详情<CaretDownIcon aria-hidden="true" size={13} weight="bold" /></summary>
+        <dl aria-label="错误诊断信息">
           {error.code && <div><dt>错误码</dt><dd>{error.code}</dd></div>}
-			{error.diagnosticCode && <div><dt>校验规则</dt><dd>{error.diagnosticCode}</dd></div>}
+          {error.diagnosticCode && <div><dt>校验规则</dt><dd>{error.diagnosticCode}</dd></div>}
           {error.reasonCode && <div><dt>原因码</dt><dd>{error.reasonCode}</dd></div>}
           {error.stage && <div><dt>失败阶段</dt><dd>{error.stage}</dd></div>}
           {error.repairAttempted !== undefined && <div><dt>自动修复</dt><dd>{error.repairAttempted ? '已尝试' : '未尝试'}</dd></div>}
           {error.status && <div><dt>HTTP</dt><dd>{error.status}</dd></div>}
           {error.requestId && <div><dt>请求标识</dt><dd>{error.requestId}</dd></div>}
-        </dl>}
-      </div>
-      <div className="dataset-ai-error-actions" aria-label="错误恢复操作">
-        {canRetry && retryRequiresGeneration && <button type="button" disabled={actionsBusy || !lastInstruction.trim()} onClick={onRetryOriginal}><ArrowClockwiseIcon aria-hidden="true" size={14} weight="bold" />按原要求重试</button>}
+        </dl>
+      </details>}
+      <footer className="dataset-ai-error-actions" aria-label="错误恢复操作">
+        {canRetry && retryRequiresGeneration && <button className={promptChanged ? '' : 'is-primary'} type="button" disabled={actionsBusy || !lastInstruction.trim()} onClick={onRetryOriginal}><ArrowClockwiseIcon aria-hidden="true" size={14} weight="bold" />按原要求重试</button>}
         {canRetry && retryRequiresGeneration && promptChanged && <button className="is-primary" type="button" disabled={actionsBusy} onClick={onRetryModified}><MagicWandIcon aria-hidden="true" size={14} weight="bold" />根据修改重新生成</button>}
-        {canRetry && !retryRequiresGeneration && <button type="button" disabled={actionsBusy} onClick={onRetryOriginal}><ArrowClockwiseIcon aria-hidden="true" size={14} weight="bold" />重新应用</button>}
+        {canRetry && !retryRequiresGeneration && <button className="is-primary" type="button" disabled={actionsBusy} onClick={onRetryOriginal}><ArrowClockwiseIcon aria-hidden="true" size={14} weight="bold" />重新应用</button>}
         <button type="button" disabled={actionsBusy} onClick={onDismissError}>继续手动配置</button>
-      </div>
-    </div>}
-    {proposal && <article className={`dataset-ai-proposal ${detailsExpanded ? '' : 'is-collapsed'}`} aria-labelledby={headingID}>
-      <header>
-        <div className="dataset-ai-proposal-heading"><span aria-live="polite" aria-atomic="true">{applied ? '已应用到画布' : proposal.mode === 'CREATE' ? '待确认的新方案' : '待确认的修改方案'}</span><h3 id={headingID}>{proposal.summary}</h3></div>
-        <dl><div><dt>数据节点</dt><dd>{proposal.plan.nodes.length}</dd></div><div><dt>字段处理</dt><dd>{proposal.plan.transforms?.length ?? 0}</dd></div><div><dt>关联</dt><dd>{proposal.plan.joins.length}</dd></div><div><dt>分组</dt><dd>{proposal.plan.groups.length}</dd></div><div><dt>输出</dt><dd>{proposal.plan.end.outputs.length}</dd></div></dl>
-      </header>
-      <div className="dataset-ai-proposal-details" id={detailsID} hidden={!detailsExpanded}>
-        {proposal.mode === 'MODIFY' && <section className="dataset-ai-change-review" aria-label="本次修改">
-          <h4>本次修改</h4>
-          {proposal.changeSet.operations.length > 0 ? <>
-            <p>已按你的要求识别以下变更，未列出的组件保持不变。</p>
-            <ul aria-label="本次修改清单">{proposal.changeSet.operations.map((operation, index) => <li key={`${operation.action}:${operation.componentKind}:${operation.componentId}:${index}`}>
-              <span className={`is-${operation.action.toLowerCase()}`}>{datasetAIChangeActionLabels[operation.action]}</span>
-              <div>
-                <strong>{operation.componentName}</strong>
-                <small>{datasetAIChangeComponentLabels[operation.componentKind]}{operation.fields.length > 0 ? ` · 修改字段：${operation.fields.map(field => datasetAIChangeFieldLabels[field] || field).join('、')}` : ''}</small>
-                <small>{operation.description}</small>
-              </div>
-            </li>)}</ul>
-          </> : <p className="dataset-ai-no-changes" role="status">当前流程已符合要求，无需变更。</p>}
+      </footer>
         </section>}
-        <section className="dataset-ai-flow-review"><h4>方案流程</h4><ol>
-          <li><span>数据</span><strong>{proposal.plan.nodes.map(node => nodeLabel(node.id)).join('、')}</strong></li>
-          {(proposal.plan.transforms?.length ?? 0) > 0 && <li><span>处理</span><strong>{proposal.plan.transforms?.map(transform => transform.name).join('、')}</strong></li>}
-          {proposal.plan.joins.length > 0 && <li><span>关联</span><strong>{proposal.plan.joins.map(join => join.name).join('、')}</strong></li>}
-          {proposal.plan.groups.length > 0 && <li><span>汇总</span><strong>{proposal.plan.groups.map(group => group.name).join('、')}</strong></li>}
-          <li><span>输出</span><strong>{proposal.plan.end.outputs.slice(0, 8).map(output => output.name).join('、')}{proposal.plan.end.outputs.length > 8 ? ` 等 ${proposal.plan.end.outputs.length} 项` : ''}</strong></li>
-        </ol></section>
-        {proposal.plan.joins.length > 0 && <section className="dataset-ai-join-review"><h4>请确认关联字段</h4><p>下面字段决定两张表如何匹配；点击应用即确认这些关联。</p><ul>{proposal.plan.joins.map(join => <li key={join.id}><span>{join.joinType}</span><div><strong>{join.name}<small>{joinMeaning(join.joinType)}</small></strong>{join.conditions.map((condition, index) => <small key={`${join.id}:${index}`}><b>{fieldLabel(condition.leftNodeId, condition.leftColumn)}</b><i>=</i><b>{fieldLabel(condition.rightNodeId, condition.rightColumn)}</b></small>)}</div></li>)}</ul></section>}
-        {proposal.plan.groups.length > 0 && <section className="dataset-ai-group-review"><h4>汇总口径</h4><ul>{proposal.plan.groups.map(group => <li key={group.id}><strong>{group.name}</strong><small>按 {group.dimensions.map(item => fieldLabel(item.nodeId, item.column)).join('、')} 分组</small><small>计算 {group.metrics.map(item => `${fieldLabel(item.nodeId, item.column)} · ${item.aggregation}`).join('、')}</small></li>)}</ul></section>}
-        {(proposal.assumptions.length > 0 || proposal.warnings.length > 0) && <section className="dataset-ai-notes"><h4>生成依据</h4>{proposal.assumptions.map(item => <p key={`assumption:${item}`}>{item}</p>)}{proposal.warnings.map(item => <p className="warning" key={`warning:${item}`}>{item}</p>)}</section>}
+        {!ready && <p className="dataset-ai-helper" role="status">正在准备当前画布与可用数据资产…</p>}
+        {ready && !hasAssets && <p className="dataset-ai-helper" role="status">请先完成至少一张数据表的 LLM 映射，再使用 AI 助手。</p>}
       </div>
-    </article>}
+      <form className="dataset-ai-message-composer" onSubmit={event => { event.preventDefault(); submitMessage() }}>
+        <label><span>{existingDAG ? proposal ? '继续调整组件修改方案' : '说明要修改、新增或删除的组件' : intakeStage === 'REQUIREMENT' ? '描述业务目标' : intakeStage === 'TYPE' ? '补充类型信息（可选）' : intakeStage === 'TABLES' ? '补充筛选条件（可选）' : proposal ? '继续调整当前方案' : hasGraph ? '告诉 AI 怎样调整画布' : '补充建模要求'}</span><textarea ref={promptRef} rows={1} aria-label="发送数据集生成或修改要求" maxLength={4000} value={prompt} disabled={busy || applying || !hasAssets || !ready} onChange={event => onPromptChange(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !busy && !applying && Boolean(prompt.trim())) { event.preventDefault(); submitMessage() } }} placeholder={existingDAG ? '例如：把客户关联改为 INNER，再新增订单状态过滤组件…' : intakeStage === 'REQUIREMENT' ? '例如：创建销售订单事实表，保留订单、客户和金额明细…' : intakeStage === 'TYPE' ? '也可以直接输入“事实表”“维度表”或“聚合表”…' : intakeStage === 'TABLES' ? '例如：只使用销售库，排除历史归档表…' : proposal && !applied ? '指出不正确的关联键、指标、分组或字段转换…' : hasGraph ? '例如：增加订单状态筛选，并保留当前连线…' : '继续补充建模要求…'} /></label>
+        <button type="submit" aria-label="发送要求" disabled={!hasAssets || !ready || busy || applying || !prompt.trim()}><ArrowUpIcon aria-hidden="true" size={17} weight="bold" /></button>
+        <small>Enter 发送 · Shift + Enter 换行</small>
+      </form>
+    </div>
   </DatasetAIDock>
 }
 
@@ -4525,9 +4885,9 @@ function DatasetAIGenerationProgress({ logs }: { logs: DatasetAIProgressEvent[] 
   </div>
 }
 
-function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, nodePositions, activeNodeID, activeJoinID, activeGroupID, activeTransformID, activeEnd, tables, isFullscreen, previewTarget, preview, previewLabel, onPreview, onRefreshPreview, onClosePreview, onArrange, onToggleFullscreen, onAddJoin, onAddGroup, onAddTransform, onAddEnd, onAddTable, onMove, onConnect, onConnectGroup, onConnectTransform, onConnectEnd, onRemoveBox, onRemoveGroup, onRemoveTransform, onRemoveEnd, onNodeClick, onJoinClick, onGroupClick, onTransformClick, onEndClick, onRemoveNode }: {
+function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, nodePositions, activeNodeID, activeJoinID, activeGroupID, activeTransformID, activeEnd, validationLock, tables, isFullscreen, previewTarget, preview, previewLabel, onPreview, onRefreshPreview, onClosePreview, onArrange, onToggleFullscreen, onAddJoin, onAddGroup, onAddTransform, onAddEnd, onAddTable, onMove, onConnect, onConnectGroup, onConnectTransform, onConnectEnd, onRemoveBox, onRemoveGroup, onRemoveTransform, onRemoveEnd, onNodeClick, onJoinClick, onGroupClick, onTransformClick, onEndClick, onRemoveNode }: {
   nodes: DesignerNode[]; fields: FieldOption[]; joins: JoinOption[]; boxes: RelationBox[]; groups: GroupBox[]; transforms: TransformBox[]; end: EndBox | null; nodePositions: Record<string, CanvasPoint>
-  activeNodeID: string; activeJoinID: string; activeGroupID: string; activeTransformID: string; activeEnd: boolean; tables: AssetTable[]
+  activeNodeID: string; activeJoinID: string; activeGroupID: string; activeTransformID: string; activeEnd: boolean; validationLock: CanvasValidationLock | null; tables: AssetTable[]
   isFullscreen: boolean; previewTarget: CanvasPreviewTarget | null; preview?: NodePreviewState; previewLabel: string
   onPreview: (target: CanvasPreviewTarget) => void; onRefreshPreview: () => void; onClosePreview: () => void; onArrange: () => void; onToggleFullscreen: () => void
   onAddJoin: (position?: CanvasPoint, input?: RelationInput) => string; onAddGroup: (position?: CanvasPoint, input?: RelationInput) => string; onAddTransform: (componentType: GraphTransformComponentType, position?: CanvasPoint, input?: RelationInput) => string | undefined; onAddEnd: (position?: CanvasPoint) => void; onAddTable: (table: AssetTable, position: CanvasPoint) => void
@@ -4541,12 +4901,22 @@ function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, 
   const [connectionPoint, setConnectionPoint] = useState<CanvasPoint | null>(null)
   const [sourcePortPositions, setSourcePortPositions] = useState<Record<string, CanvasPoint>>({})
   const [targetPortPositions, setTargetPortPositions] = useState<Record<string, CanvasPoint>>({})
+  const [edgeActionKey, setEdgeActionKey] = useState('')
   const [openEdgeMenuKey, setOpenEdgeMenuKey] = useState('')
   const [pendingEdgeInsertion, setPendingEdgeInsertion] = useState<PendingEdgeInsertion | null>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
   const lineLayerRef = useRef<SVGSVGElement>(null)
   const connectionPointerIDRef = useRef<number | null>(null)
   const edgeInsertionInFlightRef = useRef<PendingEdgeInsertion | null>(null)
+  const isValidationLocked = (kind: CanvasComponentKind, id: string) => validationLock?.kind === kind && validationLock.id === id
+  useEffect(() => {
+    if (!validationLock) return
+    const key = `${validationLock.kind}:${validationLock.id}`
+    const component = [...(canvasRef.current?.querySelectorAll<HTMLElement>('[data-component-key]') ?? [])]
+      .find(item => item.dataset.componentKey === key)
+    component?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' })
+    component?.focus({ preventScroll: true })
+  }, [validationLock])
   const measureSourcePorts = useCallback(() => {
     const canvas = canvasRef.current
     const layer = lineLayerRef.current
@@ -4775,6 +5145,17 @@ function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, 
         ? transforms.some(transform => transform.id === inserted.id && transform.input?.kind === source.kind && transform.input.id === source.id)
         : false
     if (!ready || edgeInsertionInFlightRef.current === pendingEdgeInsertion) return
+    const insertedComponent = canvasRef.current?.querySelector<HTMLElement>(`[data-component-key="${inserted.kind}:${inserted.id}"]`)
+    const canvas = canvasRef.current
+    if (canvas && insertedComponent) {
+      const componentLeft = insertedComponent.offsetLeft
+      const componentRight = componentLeft + insertedComponent.offsetWidth
+      const visibleLeft = canvas.scrollLeft + 24
+      const visibleRight = canvas.scrollLeft + canvas.clientWidth - 24
+      if (componentLeft < visibleLeft || componentRight > visibleRight) {
+        canvas.scrollTo({ left: Math.max(0, componentLeft - (canvas.clientWidth - insertedComponent.offsetWidth) / 2), top: canvas.scrollTop, behavior: 'smooth' })
+      }
+    }
     // 连接回调会改写父组件状态并重建函数引用；用 ref 标记已消费的事务，
     // 再在同一个微任务中清除 pending 与改写下游，避免 effect 重复连接。
     edgeInsertionInFlightRef.current = pendingEdgeInsertion
@@ -4788,13 +5169,16 @@ function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, 
     })
   }, [boxes, groups, onConnect, onConnectEnd, onConnectGroup, onConnectTransform, pendingEdgeInsertion, transforms])
   useEffect(() => {
-    if (!openEdgeMenuKey) return
+    if (!openEdgeMenuKey && !edgeActionKey) return
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpenEdgeMenuKey('')
+      if (event.key === 'Escape') {
+        setOpenEdgeMenuKey('')
+        setEdgeActionKey('')
+      }
     }
     window.addEventListener('keydown', closeOnEscape)
     return () => window.removeEventListener('keydown', closeOnEscape)
-  }, [openEdgeMenuKey])
+  }, [edgeActionKey, openEdgeMenuKey])
   const sourcePort = (input: RelationInput, position: CanvasPoint) => ({
     // 首次布局前保留稳定回退；布局完成后使用真实端口圆心，避免内容把卡片撑高
     // 时曲线仍按 min-height 猜测位置。
@@ -4850,10 +5234,40 @@ function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, 
     if (geometry) edges.push({ key: 'end-input', source: end.input, target: { kind: 'END', id: end.id }, targetLabel: '结束节点输入', geometry, deleteLabel: '删除结束节点输入连线', remove: () => onConnectEnd() })
   }
   const insertComponentOnEdge = (item: CanvasEdge, selection: { kind: 'JOIN' } | { kind: 'GROUP' } | { kind: 'TRANSFORM'; componentType: GraphTransformComponentType }) => {
-    const width = selection.kind === 'JOIN' ? 180 : selection.kind === 'GROUP' ? 190 : 200
+    const width = selection.kind === 'TRANSFORM' ? 230 : 220
+    const targetPosition = item.target.kind === 'JOIN'
+      ? boxes.find(box => box.id === item.target.id)?.position
+      : item.target.kind === 'GROUP'
+        ? groups.find(group => group.id === item.target.id)?.position
+        : item.target.kind === 'TRANSFORM'
+          ? transforms.find(transform => transform.id === item.target.id)?.position
+          : end?.id === item.target.id ? end.position : undefined
+    const sourcePosition = positionOf(item.source)
+    const sourceWidth = item.source.kind === 'NODE' ? 250 : item.source.kind === 'TRANSFORM' ? 230 : 220
+    const horizontalGap = 70
     const position = {
-      x: Math.max(16, item.geometry.deletePosition.x - width / 2),
+      // 新组件占用目标组件原来的水平层级；手工把目标拖得太近时，仍确保
+      // 上游卡片与新组件之间保留清晰的连线空间。
+      x: Math.max(16, targetPosition?.x ?? item.geometry.deletePosition.x - width / 2, sourcePosition ? sourcePosition.x + sourceWidth + horizontalGap : 16),
       y: Math.max(20, item.geometry.deletePosition.y - 58),
+    }
+    if (targetPosition) {
+      const shiftDistance = Math.max(300, position.x + width + horizontalGap - targetPosition.x)
+      const target: GraphTarget = item.target.kind === 'END'
+        ? { kind: 'OUTPUT', id: item.target.id }
+        : { kind: item.target.kind, id: item.target.id }
+      const downstream = graphDownstreamTargets(target, { joins: boxes, groups, transforms, ...(end ? { end } : {}) })
+      for (const component of downstream) {
+        const currentPosition = component.kind === 'JOIN'
+          ? boxes.find(box => box.id === component.id)?.position
+          : component.kind === 'GROUP'
+            ? groups.find(group => group.id === component.id)?.position
+            : component.kind === 'TRANSFORM'
+              ? transforms.find(transform => transform.id === component.id)?.position
+              : end?.id === component.id ? end.position : undefined
+        if (!currentPosition) continue
+        onMove(component.kind === 'OUTPUT' ? 'END' : component.kind, component.id, { x: currentPosition.x + shiftDistance, y: currentPosition.y })
+      }
     }
     const id = selection.kind === 'JOIN'
       ? onAddJoin(position, item.source)
@@ -4960,22 +5374,25 @@ function RelationCanvas({ nodes, fields, joins, boxes, groups, transforms, end, 
         <button type="button" onClick={onArrange}><TreeStructureIcon aria-hidden="true" size={15} weight="bold" /><span>整理</span></button>
         <button type="button" aria-pressed={isFullscreen} onClick={onToggleFullscreen}>{isFullscreen ? <ArrowsInSimpleIcon aria-hidden="true" size={15} weight="bold" /> : <ArrowsOutSimpleIcon aria-hidden="true" size={15} weight="bold" />}<span>{isFullscreen ? '退出全屏' : '全屏'}</span></button>
       </div>
-      <div ref={canvasRef} className={`dataset-component-canvas ${draggingConnection ? 'is-connecting' : ''}`} aria-label="关系组件画布" onClick={() => setOpenEdgeMenuKey('')} onPointerDown={beginPointerConnection} onDragOver={event => { event.preventDefault(); if (draggingConnection) { const bounds = event.currentTarget.getBoundingClientRect(); setConnectionPoint({ x: event.clientX - bounds.left + (event.currentTarget.scrollLeft || 0), y: event.clientY - bounds.top + (event.currentTarget.scrollTop || 0) }) } }} onDrop={dropOnCanvas}>
+      <div ref={canvasRef} className={`dataset-component-canvas ${draggingConnection ? 'is-connecting' : ''}`} aria-label="关系组件画布" onClick={() => { setOpenEdgeMenuKey(''); setEdgeActionKey('') }} onPointerDown={beginPointerConnection} onDragOver={event => { event.preventDefault(); if (draggingConnection) { const bounds = event.currentTarget.getBoundingClientRect(); setConnectionPoint({ x: event.clientX - bounds.left + (event.currentTarget.scrollLeft || 0), y: event.clientY - bounds.top + (event.currentTarget.scrollTop || 0) }) } }} onDrop={dropOnCanvas}>
       <svg ref={lineLayerRef} className="dataset-component-lines" style={canvasExtent} aria-hidden="true"><defs><marker id="dataset-edge-arrow" markerWidth="10" markerHeight="10" refX="8.5" refY="5" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0 L10,5 L0,10 Z" /></marker></defs>{edges.map(item => <path className="dataset-flow-edge" data-source-key={graphInputKey(item.source)} key={item.key} d={item.geometry.path} markerEnd="url(#dataset-edge-arrow)" />)}{draggingStart && connectionPoint && <path className="preview" d={curveGeometry(draggingStart, connectionPoint).path} markerEnd="url(#dataset-edge-arrow)" />}</svg>
-      {edges.map(item => <div key={`actions-${item.key}`} className={`dataset-line-actions ${openEdgeMenuKey === item.key ? 'is-open' : ''}`} style={{ left: item.geometry.deletePosition.x, top: item.geometry.deletePosition.y }} onClick={event => event.stopPropagation()}>
-        <button type="button" className="dataset-line-add" aria-label={`在${item.targetLabel}的连线上插入组件`} aria-expanded={openEdgeMenuKey === item.key} aria-haspopup="dialog" onClick={() => setOpenEdgeMenuKey(current => current === item.key ? '' : item.key)}><PlusIcon aria-hidden="true" size={12} weight="bold" /></button>
-        <button type="button" className="dataset-line-delete" aria-label={item.deleteLabel} onClick={item.remove}><XIcon aria-hidden="true" size={11} weight="bold" /></button>
+      {edges.map(item => <div key={`actions-${item.key}`} className={`dataset-line-actions ${edgeActionKey === item.key || openEdgeMenuKey === item.key ? 'is-open' : ''}`} style={{ left: item.geometry.deletePosition.x, top: item.geometry.deletePosition.y }} onClick={event => event.stopPropagation()}>
+        <button type="button" className="dataset-line-more" aria-label={`${item.targetLabel}连线操作`} aria-expanded={edgeActionKey === item.key} aria-haspopup="menu" onClick={() => setEdgeActionKey(current => current === item.key ? '' : item.key)}><DotsThreeIcon aria-hidden="true" size={15} weight="bold" /></button>
+        {edgeActionKey === item.key && <div className="dataset-line-action-menu" role="menu">
+          <button type="button" role="menuitem" onClick={() => { setEdgeActionKey(''); setOpenEdgeMenuKey(item.key) }}><PlusIcon aria-hidden="true" size={14} weight="bold" /><span>插入组件</span></button>
+          <button type="button" role="menuitem" className="is-destructive" aria-label={item.deleteLabel} onClick={() => { setEdgeActionKey(''); item.remove() }}><XIcon aria-hidden="true" size={14} weight="bold" /><span>删除连线</span></button>
+        </div>}
       </div>)}
-      {nodes.map((node, index) => { const position = nodePositions[node.id] ?? { x: 42, y: 58 + index * 145 }; const nodeFields = fields.filter(field => field.key.startsWith(`${node.id}.`)); return <article key={node.id} role="button" tabIndex={0} aria-label={`配置数据节点 ${index + 1}`} style={{ left: position.x, top: position.y }} className={`dataset-canvas-component data ${activeNodeID === node.id ? 'active' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'NODE', id: node.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onClick={() => onNodeClick(node.id)}><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'NODE', id: node.id })} aria-label={`从数据节点 ${index + 1} 拖出连接`} draggable onDragStart={event => dragConnection(event, { kind: 'NODE', id: node.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>数据节点 {index + 1}</span><button type="button" aria-label={`移除${nodeLabel(node)}`} onClick={event => { event.stopPropagation(); onRemoveNode(node.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{node.table.businessName || node.table.tableName}</strong><small>{node.table.dataSourceName} · {node.alias}</small><footer><span>原始数据</span><b>{nodeFields.filter(field => field.output !== false).length} 字段</b></footer>{previewTrigger({ kind: 'NODE', id: node.id }, `数据节点 ${index + 1}`)}</article> })}
-      {boxes.map((box, index) => { const position = box.position; const join = joins.find(item => item.id === box.id); const outputs = relationOutputKeys({ kind: 'JOIN', id: box.id }, boxes, groups, nodes, fields, transforms); const complete = Boolean(box.left && box.right); return <article key={box.id} role="button" tabIndex={0} aria-label={`配置关联 ${index + 1}`} style={{ left: position.x, top: position.y }} className={`dataset-canvas-component relation ${activeJoinID === box.id ? 'active' : ''} ${join?.manualConfirmed ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'JOIN', id: box.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onDragOver={acceptConnectionOver} onDrop={event => dropOnJoinNode(event, box)} onClick={() => onJoinClick(box.id)}><button type="button" className="input-port component-side input-side slot-one" aria-label={`连接到关联节点 ${index + 1} 槽位 1`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropConnection(event, box.id, 'left')} /><button type="button" className="input-port component-side input-side slot-two" aria-label={`连接到关联节点 ${index + 1} 槽位 2`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropConnection(event, box.id, 'right')} /><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'JOIN', id: box.id })} aria-label={`从关联节点 ${index + 1} 拖出连接`} draggable={complete} aria-disabled={!complete} onDragStart={event => complete && dragConnection(event, { kind: 'JOIN', id: box.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>关联组件</span><button type="button" aria-label={`删除关联组件 ${index + 1}`} onClick={event => { event.stopPropagation(); onRemoveBox(box.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{box.name}</strong><small>{join?.joinType ? `${join.joinType} JOIN` : '尚未完成关联'}</small><div><span>槽位 1</span><b>{inputLabel(box.left)}</b></div><div><span>槽位 2</span><b>{inputLabel(box.right)}</b></div><footer><span>{join?.manualConfirmed ? `${joinConditions(join).length} 个关联条件` : '点击完成配置'}</span><b>{outputs.length} 字段</b></footer>{previewTrigger({ kind: 'JOIN', id: box.id }, `关联组件 ${index + 1}`)}</article> })}
-          {groups.map((group, index) => { const complete = groupIsComplete(group); const modeLabel = group.groupByMode === 'CUBE' ? 'CUBE · ' : group.groupByMode === 'ROLLUP' ? 'ROLLUP · ' : group.groupByMode === 'GROUPING_SETS' ? 'SETS · ' : ''; return <article key={group.id} role="button" tabIndex={0} aria-label={`打开分组组件 ${index + 1} 配置`} style={{ left: group.position.x, top: group.position.y }} className={`dataset-canvas-component group ${activeGroupID === group.id ? 'active' : ''} ${complete ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'GROUP', id: group.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onDragOver={acceptConnectionOver} onDrop={event => finishConnectionDrop(event, input => onConnectGroup(group.id, input))} onClick={() => onGroupClick(group.id)}><button type="button" className="input-port component-side input-side group-input" aria-label={`连接到分组组件 ${index + 1} 输入槽位`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropGroupConnection(event, group.id)} /><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'GROUP', id: group.id })} aria-label={`从分组组件 ${index + 1} 拖出连接`} draggable={complete} aria-disabled={!complete} onDragStart={event => complete && dragConnection(event, { kind: 'GROUP', id: group.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>分组组件 {index + 1}</span><button type="button" aria-label={`删除分组组件 ${index + 1}`} onClick={event => { event.stopPropagation(); onRemoveGroup(group.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{group.name}</strong><div><span>输入</span><b>{inputLabel(group.input)}</b></div><footer><span>{modeLabel}{group.dimensions.length} 个维度</span><b>{group.metrics.length} 个指标</b></footer>{previewTrigger({ kind: 'GROUP', id: group.id }, `分组组件 ${index + 1}`)}</article> })}
+      {nodes.map((node, index) => { const position = nodePositions[node.id] ?? { x: 42, y: 58 + index * 145 }; const nodeFields = fields.filter(field => field.key.startsWith(`${node.id}.`)); return <article key={node.id} role="button" tabIndex={0} aria-label={`配置数据节点 ${index + 1}`} aria-invalid={isValidationLocked('NODE', node.id) || undefined} data-component-key={`NODE:${node.id}`} title={isValidationLocked('NODE', node.id) ? validationLock?.message : undefined} style={{ left: position.x, top: position.y }} className={`dataset-canvas-component data ${activeNodeID === node.id ? 'active' : ''} ${isValidationLocked('NODE', node.id) ? 'is-validation-locked' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'NODE', id: node.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onClick={() => onNodeClick(node.id)}><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'NODE', id: node.id })} aria-label={`从数据节点 ${index + 1} 拖出连接`} draggable onDragStart={event => dragConnection(event, { kind: 'NODE', id: node.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>数据节点 {index + 1}</span><button type="button" aria-label={`移除${nodeLabel(node)}`} onClick={event => { event.stopPropagation(); onRemoveNode(node.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{node.table.businessName || node.table.tableName}</strong><small>{node.table.dataSourceName} · {node.alias}</small><footer><span>原始数据</span><b>{nodeFields.filter(field => field.output !== false).length} 字段</b></footer>{previewTrigger({ kind: 'NODE', id: node.id }, `数据节点 ${index + 1}`)}</article> })}
+      {boxes.map((box, index) => { const position = box.position; const join = joins.find(item => item.id === box.id); const outputs = relationOutputKeys({ kind: 'JOIN', id: box.id }, boxes, groups, nodes, fields, transforms); const complete = Boolean(box.left && box.right); return <article key={box.id} role="button" tabIndex={0} aria-label={`配置关联 ${index + 1}`} aria-invalid={isValidationLocked('JOIN', box.id) || undefined} data-component-key={`JOIN:${box.id}`} title={isValidationLocked('JOIN', box.id) ? validationLock?.message : undefined} style={{ left: position.x, top: position.y }} className={`dataset-canvas-component relation ${activeJoinID === box.id ? 'active' : ''} ${join?.manualConfirmed ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''} ${isValidationLocked('JOIN', box.id) ? 'is-validation-locked' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'JOIN', id: box.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onDragOver={acceptConnectionOver} onDrop={event => dropOnJoinNode(event, box)} onClick={() => onJoinClick(box.id)}><button type="button" className="input-port component-side input-side slot-one" aria-label={`连接到关联节点 ${index + 1} 槽位 1`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropConnection(event, box.id, 'left')} /><button type="button" className="input-port component-side input-side slot-two" aria-label={`连接到关联节点 ${index + 1} 槽位 2`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropConnection(event, box.id, 'right')} /><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'JOIN', id: box.id })} aria-label={`从关联节点 ${index + 1} 拖出连接`} draggable={complete} aria-disabled={!complete} onDragStart={event => complete && dragConnection(event, { kind: 'JOIN', id: box.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>关联组件</span><button type="button" aria-label={`删除关联组件 ${index + 1}`} onClick={event => { event.stopPropagation(); onRemoveBox(box.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{box.name}</strong><small>{join?.joinType ? `${join.joinType} JOIN` : '尚未完成关联'}</small><div><span>槽位 1</span><b>{inputLabel(box.left)}</b></div><div><span>槽位 2</span><b>{inputLabel(box.right)}</b></div><footer><span>{join?.manualConfirmed ? `${joinConditions(join).length} 个关联条件` : '点击完成配置'}</span><b>{outputs.length} 字段</b></footer>{previewTrigger({ kind: 'JOIN', id: box.id }, `关联组件 ${index + 1}`)}</article> })}
+          {groups.map((group, index) => { const complete = groupIsComplete(group); const modeLabel = group.groupByMode === 'CUBE' ? 'CUBE · ' : group.groupByMode === 'ROLLUP' ? 'ROLLUP · ' : group.groupByMode === 'GROUPING_SETS' ? 'SETS · ' : ''; return <article key={group.id} role="button" tabIndex={0} aria-label={`打开分组组件 ${index + 1} 配置`} aria-invalid={isValidationLocked('GROUP', group.id) || undefined} data-component-key={`GROUP:${group.id}`} title={isValidationLocked('GROUP', group.id) ? validationLock?.message : undefined} style={{ left: group.position.x, top: group.position.y }} className={`dataset-canvas-component group ${activeGroupID === group.id ? 'active' : ''} ${complete ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''} ${isValidationLocked('GROUP', group.id) ? 'is-validation-locked' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'GROUP', id: group.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onDragOver={acceptConnectionOver} onDrop={event => finishConnectionDrop(event, input => onConnectGroup(group.id, input))} onClick={() => onGroupClick(group.id)}><button type="button" className="input-port component-side input-side group-input" aria-label={`连接到分组组件 ${index + 1} 输入槽位`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropGroupConnection(event, group.id)} /><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'GROUP', id: group.id })} aria-label={`从分组组件 ${index + 1} 拖出连接`} draggable={complete} aria-disabled={!complete} onDragStart={event => complete && dragConnection(event, { kind: 'GROUP', id: group.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>分组组件 {index + 1}</span><button type="button" aria-label={`删除分组组件 ${index + 1}`} onClick={event => { event.stopPropagation(); onRemoveGroup(group.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{group.name}</strong><div><span>输入</span><b>{inputLabel(group.input)}</b></div><footer><span>{modeLabel}{group.dimensions.length} 个维度</span><b>{group.metrics.length} 个指标</b></footer>{previewTrigger({ kind: 'GROUP', id: group.id }, `分组组件 ${index + 1}`)}</article> })}
       {transforms.map((transform, index) => {
         const complete = transformIsComplete(transform)
         const label = transformDisplayLabel(transform)
         const itemCount = transformIsFilter(transform) ? transform.conditions?.length ?? 0 : transform.rules.length
-        return <article key={transform.id} role="button" tabIndex={0} aria-label={`打开${label} ${index + 1} 配置`} style={{ left: transform.position.x, top: transform.position.y }} className={`dataset-canvas-component transform ${transformColorClass(transform)} ${activeTransformID === transform.id ? 'active' : ''} ${complete ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'TRANSFORM', id: transform.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onDragOver={acceptConnectionOver} onDrop={event => finishConnectionDrop(event, input => onConnectTransform(transform.id, input))} onClick={() => onTransformClick(transform.id)}><button type="button" className="input-port component-side input-side group-input" aria-label={`连接到${label} ${index + 1} 输入槽位`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropTransformConnection(event, transform.id)} /><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'TRANSFORM', id: transform.id })} aria-label={`从${label} ${index + 1} 拖出连接`} draggable={complete} aria-disabled={!complete} onDragStart={event => complete && dragConnection(event, { kind: 'TRANSFORM', id: transform.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>{label}</span><button type="button" aria-label={`删除${label} ${index + 1}`} onClick={event => { event.stopPropagation(); onRemoveTransform(transform.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{transform.name}</strong><div><span>输入</span><b>{inputLabel(transform.input)}</b></div><footer><span>{itemCount} 条{transformIsFilter(transform) ? '条件' : '规则'}</span><b>{complete ? '已配置' : '待完善'}</b></footer>{previewTrigger({ kind: 'TRANSFORM', id: transform.id }, `${label} ${index + 1}`)}</article>
+        return <article key={transform.id} role="button" tabIndex={0} aria-label={`打开${label} ${index + 1} 配置`} aria-invalid={isValidationLocked('TRANSFORM', transform.id) || undefined} data-component-key={`TRANSFORM:${transform.id}`} title={isValidationLocked('TRANSFORM', transform.id) ? validationLock?.message : undefined} style={{ left: transform.position.x, top: transform.position.y }} className={`dataset-canvas-component transform ${transformColorClass(transform)} ${activeTransformID === transform.id ? 'active' : ''} ${complete ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''} ${isValidationLocked('TRANSFORM', transform.id) ? 'is-validation-locked' : ''}`} draggable onDragStart={event => { const value = JSON.stringify({ kind: 'TRANSFORM', id: transform.id }); event.dataTransfer.setData('text/dataset-canvas-item', value); event.dataTransfer.setData('text/dataset-relation-input', value) }} onDragOver={acceptConnectionOver} onDrop={event => finishConnectionDrop(event, input => onConnectTransform(transform.id, input))} onClick={() => onTransformClick(transform.id)}><button type="button" className="input-port component-side input-side group-input" aria-label={`连接到${label} ${index + 1} 输入槽位`} onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={event => dropTransformConnection(event, transform.id)} /><button type="button" className="output-port component-side output-side" data-source-key={graphInputKey({ kind: 'TRANSFORM', id: transform.id })} aria-label={`从${label} ${index + 1} 拖出连接`} draggable={complete} aria-disabled={!complete} onDragStart={event => complete && dragConnection(event, { kind: 'TRANSFORM', id: transform.id })} onDragEnd={() => { setDraggingConnection(null); setConnectionPoint(null) }} /><header><span>{label}</span><button type="button" aria-label={`删除${label} ${index + 1}`} onClick={event => { event.stopPropagation(); onRemoveTransform(transform.id) }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{transform.name}</strong><div><span>输入</span><b>{inputLabel(transform.input)}</b></div><footer><span>{itemCount} 条{transformIsFilter(transform) ? '条件' : '规则'}</span><b>{complete ? '已配置' : '待完善'}</b></footer>{previewTrigger({ kind: 'TRANSFORM', id: transform.id }, `${label} ${index + 1}`)}</article>
       })}
-      {end && <article role="button" tabIndex={0} aria-label="打开结束节点配置" style={{ left: end.position.x, top: end.position.y }} className={`dataset-canvas-component end ${activeEnd ? 'active' : ''} ${end.input && end.outputs.length ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''}`} draggable onDragStart={event => event.dataTransfer.setData('text/dataset-canvas-item', JSON.stringify({ kind: 'END', id: end.id }))} onDragOver={acceptConnectionOver} onDrop={event => finishConnectionDrop(event, onConnectEnd)} onClick={onEndClick}><button type="button" className="input-port component-side input-side group-input" aria-label="连接到结束节点输入槽位" onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={dropEndConnection} /><header><span>结束节点</span><button type="button" aria-label="删除结束节点" onClick={event => { event.stopPropagation(); onRemoveEnd() }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{end.name}</strong><div><span>最终输入</span><b>{inputLabel(end.input)}</b></div><footer><span>输出结果</span><b>{end.outputs.length} 个字段</b></footer>{previewTrigger({ kind: 'END', id: end.id }, '结束节点')}</article>}
+      {end && <article role="button" tabIndex={0} aria-label="打开结束节点配置" aria-invalid={isValidationLocked('END', end.id) || undefined} data-component-key={`END:${end.id}`} title={isValidationLocked('END', end.id) ? validationLock?.message : undefined} style={{ left: end.position.x, top: end.position.y }} className={`dataset-canvas-component end ${activeEnd ? 'active' : ''} ${end.input && end.outputs.length ? 'configured' : ''} ${draggingConnection ? 'connection-target' : ''} ${isValidationLocked('END', end.id) ? 'is-validation-locked' : ''}`} draggable onDragStart={event => event.dataTransfer.setData('text/dataset-canvas-item', JSON.stringify({ kind: 'END', id: end.id }))} onDragOver={acceptConnectionOver} onDrop={event => finishConnectionDrop(event, onConnectEnd)} onClick={onEndClick}><button type="button" className="input-port component-side input-side group-input" aria-label="连接到结束节点输入槽位" onDragOver={event => { event.preventDefault(); event.stopPropagation() }} onDrop={dropEndConnection} /><header><span>结束节点</span><button type="button" aria-label="删除结束节点" onClick={event => { event.stopPropagation(); onRemoveEnd() }}><XIcon aria-hidden="true" size={14} weight="bold" /></button></header><strong>{end.name}</strong><div><span>最终输入</span><b>{inputLabel(end.input)}</b></div><footer><span>输出结果</span><b>{end.outputs.length} 个字段</b></footer>{previewTrigger({ kind: 'END', id: end.id }, '结束节点')}</article>}
       {!boxes.length && !groups.length && !transforms.length && !end && <div className="dataset-component-canvas-hint"><strong>{nodes.length ? '从顶部选择组件建立数据流' : '从左侧拖入数据集开始建模'}</strong><p>{nodes.length ? '字段处理、分组、关联与结束节点之间会用有方向的曲线连接。' : '数据集会成为画布节点，随后可从顶部横向组件栏继续搭建流程。'}</p></div>}
       </div>
       {edges.find(item => item.key === openEdgeMenuKey) && <div
@@ -6043,7 +6460,7 @@ function PublishedVersionHistoryPanel({ record, items, selected, usage, preview,
 }
 
 function Dialog({ title, eyebrow, wide = false, closeDisabled = false, children, onClose }: { title: string; eyebrow: string; wide?: boolean; closeDisabled?: boolean; children: ReactNode; onClose: () => void }) {
-  return <div className="dataset-dialog-backdrop" role="presentation" onMouseDown={event => { if (!closeDisabled && event.target === event.currentTarget) onClose() }}><section className={`dataset-dialog ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="dataset-dialog-title"><header><div><span className="eyebrow">{eyebrow}</span><h2 id="dataset-dialog-title">{title}</h2></div><button type="button" disabled={closeDisabled} aria-label={`关闭${title}`} onClick={onClose}>×</button></header>{children}</section></div>
+  return <div className="dataset-dialog-backdrop" role="presentation" onMouseDown={event => { if (!closeDisabled && event.target === event.currentTarget) onClose() }}><section className={`dataset-dialog ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="dataset-dialog-title"><header><span className="dataset-dialog-heading-icon"><RowsIcon size={20} weight="duotone" /></span><div><span className="eyebrow">{eyebrow}</span><h2 id="dataset-dialog-title">{title}</h2></div><button type="button" disabled={closeDisabled} aria-label={`关闭${title}`} onClick={onClose}><XIcon size={18} /></button></header>{children}</section></div>
 }
 
 function Empty({ title, children }: { title?: string; children: ReactNode }) {

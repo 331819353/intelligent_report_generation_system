@@ -60,20 +60,19 @@ func (resolver *ODSResolver) SetFullProjector(projector odsProjector) {
 
 func NewODSResolver(
 	pool *pgxpool.Pool,
-	mysqlStager databaseStager,
-	oracleStager databaseStager,
 	excelStager fileStager,
 ) *ODSResolver {
-	stagers := make(map[datasource.Type]databaseStager, 2)
-	if mysqlStager != nil {
-		stagers[datasource.TypeMySQL] = mysqlStager
-	}
-	if oracleStager != nil {
-		stagers[datasource.TypeOracle] = oracleStager
-	}
 	return &ODSResolver{
-		pool: pool, databaseStagers: stagers, fileStager: excelStager,
+		pool: pool, databaseStagers: make(map[datasource.Type]databaseStager), fileStager: excelStager,
 	}
+}
+
+// SetDatabaseStager registers one catalog-backed database extraction path.
+func (resolver *ODSResolver) SetDatabaseStager(sourceType datasource.Type, stager databaseStager) {
+	if resolver == nil || !datasource.IsDatabaseType(sourceType) || stager == nil {
+		return
+	}
+	resolver.databaseStagers[sourceType] = stager
 }
 
 // CompositeResolver keeps warehouse-input resolution separate from source
@@ -442,8 +441,7 @@ func loadODSSourceTx(
 	}
 	switch plan.input.Type {
 	case materialization.InputSourceTable:
-		if plan.source.Type != datasource.TypeMySQL &&
-			plan.source.Type != datasource.TypeOracle {
+		if !datasource.IsDatabaseType(plan.source.Type) {
 			return executionError(
 				CodeODSSourceContractInvalid,
 				"the ODS database input uses an unsupported source type",
@@ -626,9 +624,13 @@ func (resolver *ODSResolver) stage(
 				nil,
 			)
 		}
-		dialect := querycompiler.MySQL
-		if plan.source.Type == datasource.TypeOracle {
-			dialect = querycompiler.Oracle
+		dialect, ok := querycompiler.DialectForSourceType(string(plan.source.Type))
+		if !ok {
+			return warehouse.StageResult{}, executionError(
+				CodeODSSourceContractInvalid,
+				"the ODS database input uses an unsupported source type",
+				nil,
+			)
 		}
 		return stager.Stage(ctx, warehouse.StageInput{
 			TenantID: claim.TenantID,

@@ -8,7 +8,7 @@
 .version-manager-heading small, .version-empty { color: var(--muted); font-size: 12px; }
 .version-list { display: grid; align-content: start; gap: 7px; max-height: 320px; overflow: auto; }
 .version-list button { display: grid; grid-template-columns: max-content 1fr max-content; gap: 9px; align-items: center; width: 100%; padding: 10px; border: 1px solid #e0e6ee; border-radius: 8px; background: #f8fafc; text-align: left; }
-.version-list button.selected { border-color: #7aa2ff; background: #eef4ff; box-shadow: inset 3px 0 #2764ff; }
+.version-list button.selected { border-color: #8cbde9; background: #eef4ff; box-shadow: inset 3px 0 #0872d3; }
 .version-list button span { color: var(--muted); font-size: 14px; }
 .version-list button em, .current-version { border-radius: 999px; padding: 3px 7px; background: #dcfce7; color: #047857; font-size: 13px; font-style: normal; font-weight: 800; }
 .version-detail { min-width: 0; display: grid; gap: 10px; }
@@ -86,3 +86,68 @@ fieldset.dataset-designer { min-inline-size: 0; margin: 0; padding: 0; border: 0
 .dataset-preview th, .dataset-preview td { padding: 9px 12px; text-align: left; border-right: 1px solid #edf0f3; border-bottom: 1px solid #edf0f3; }
 .dataset-preview th { position: sticky; top: 0; background: #fbfcfd; font-size: 14px; color: var(--muted); }
 .danger-button { border: 1px solid #dc2626; border-radius: 8px; padding: 10px 16px; background: #dc2626; color: white; font-weight: 700; }
+
+/* 数据集设计器视觉收敛：版本区与设计三栏统一到全局卡片与控件语言。 */
+.dataset-version-manager {
+  border-color: var(--line);
+  border-radius: var(--radius-card);
+  padding: 18px;
+  box-shadow: var(--shadow-card);
+}
+.version-manager-heading { border-color: #f0f3f7; }
+.version-manager-heading h2 { font-size: 16px; font-weight: 680; letter-spacing: -.01em; }
+.version-list button { border-color: #e6ecf3; border-radius: 10px; background: #fbfcfe; transition: border-color .15s ease, background .15s ease; }
+.version-list button:hover { border-color: #a8c8e8; background: #f7fbff; }
+.version-list button.selected { border-color: #8cbde9; background: #eaf3ff; box-shadow: none; }
+.version-metadata > div { border-radius: 9px; background: #f7f9fc; }
+.version-usage span { border-color: #e8eef6; border-radius: 9px; }
+.version-parameters { border-color: #d9e8f8; border-radius: 10px; background: #f4f9ff; }
+.version-parameters input { border-color: #e2e9f1; border-radius: 8px; }
+.dataset-assets,
+.dataset-config {
+  border-color: var(--line);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+}
+.dataset-assets h2, .dataset-config h2 { margin: 2px 0 16px; font-size: 15px; font-weight: 680; }
+.dataset-assets > button { border-color: #e6ecf3; border-radius: 10px; background: #fbfcfe; transition: border-color .15s ease, background .15s ease; }
+.dataset-assets > button:hover { border-color: #a8c8e8; background: #f7fbff; }
+.dataset-meta { border-color: var(--line); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.dataset-meta input, .dataset-node input, .dataset-config input, .dataset-config select,
+.dataset-config textarea, .join-editor select, .dataset-field select {
+  border-color: #e2e9f1;
+  border-radius: 8px;
+  background: #fff;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.dataset-meta input:focus-visible, .dataset-node input:focus-visible, .dataset-config input:focus-visible,
+.dataset-config select:focus-visible, .dataset-config textarea:focus-visible,
+.join-editor select:focus-visible, .dataset-field select:focus-visible,
+.version-parameters input:focus-visible {
+  border-color: #a4c8ea;
+  outline: 0;
+  box-shadow: var(--focus-ring);
+}
+.dataset-empty { border-color: #ccd8e6; border-radius: var(--radius-card); background: #fbfcfe; }
+.dataset-node { border-color: var(--line); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.dataset-node > header { border-color: #f0f3f7; background: #fafbfd; }
+.dataset-field-head { background: #fafbfd; color: #8390a2; font-size: 12px; font-weight: 720; }
+.dataset-field { border-color: #f0f3f7; }
+.join-editor { border-color: #d9e8f8; border-radius: 12px; background: #f4f9ff; }
+.dataset-config fieldset { border-color: var(--line); border-radius: 10px; padding: 12px; }
+.config-list { border-color: var(--line); }
+.config-list > header button { border-color: #e2e9f1; border-radius: 8px; transition: border-color .15s ease, background .15s ease; }
+.config-list > header button:hover { border-color: #aecae6; background: #f4f9ff; color: #0872d3; }
+.mini-editor { border-radius: 10px; background: #f7f9fc; }
+.mini-editor input, .mini-editor select { border-radius: 8px; }
+.preview-parameters { border-color: #d9e8f8; border-radius: 10px; background: #f4f9ff; }
+.dataset-preview { border-color: var(--line); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.dataset-preview > header { border-color: #f0f3f7; background: #fafbfd; }
+.preview-warnings { border-color: #f2ddba; background: #fffaf2; }
+.dataset-preview th { background: #fafbfd; color: #8390a2; font-size: 12px; }
+.dataset-preview th, .dataset-preview td { border-color: #f0f3f7; }
+.danger-button { border-color: #d24d46; border-radius: var(--radius-control); background: #d24d46; transition: background .15s ease, border-color .15s ease; }
+.danger-button:hover:not(:disabled) { border-color: #bc403a; background: #bc403a; }
+.version-list button em, .current-version { background: #e2f6ec; color: #0b7a52; }
+.status-published { background: #e2f6ec; color: #0b7a52; }
+.status-stale { background: #fdf0dc; color: #a15c00; }

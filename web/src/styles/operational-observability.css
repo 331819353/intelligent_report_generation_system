@@ -11,7 +11,7 @@
 .operational-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .operational-summary article { min-width: 0; display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 3px 10px; align-items: center; border: 1px solid #dfe6ef; border-radius: 11px; padding: 13px 15px; background: #fff; }
 .operational-summary article.attention { border-color: #efd49b; background: #fffbf3; }
-.operational-summary svg { grid-row: 1 / span 3; color: #2b68d8; }
+.operational-summary svg { grid-row: 1 / span 3; color: #0872d3; }
 .operational-summary span { color: #7b8797; font-size: 12px; font-weight: 700; }
 .operational-summary strong { overflow: hidden; color: #26364e; font-size: 20px; text-overflow: ellipsis; white-space: nowrap; }
 .operational-summary small { color: #98a2b3; font-size: 11px; }
@@ -26,9 +26,9 @@
 .operational-quota:first-child { border-left: 0; }
 .operational-quota header, .operational-quota footer { display: flex; justify-content: space-between; gap: 8px; }
 .operational-quota header span { color: #66758a; font-size: 12px; font-weight: 700; }
-.operational-quota header strong { color: #2b68d8; font-size: 14px; }
+.operational-quota header strong { color: #0872d3; font-size: 14px; }
 .operational-quota > div { height: 7px; overflow: hidden; border-radius: 999px; background: #edf1f6; }
-.operational-quota > div i { display: block; height: 100%; border-radius: inherit; background: #3b7be6; }
+.operational-quota > div i { display: block; height: 100%; border-radius: inherit; background: #0872d3; }
 .operational-quota.is-attention > div i { background: #e09a26; }
 .operational-quota.is-critical > div i { background: #d6524c; }
 .operational-quota footer span { color: #475467; font-size: 12px; font-weight: 800; }
@@ -61,7 +61,7 @@
 .operational-purpose-list article > div { display: grid; gap: 2px; }
 .operational-purpose-list strong { color: #475467; font-size: 12px; }
 .operational-purpose-list small { color: #98a2b3; font-size: 11px; }
-.operational-purpose-list article > span { color: #2b68d8; font-size: 12px; font-weight: 800; }
+.operational-purpose-list article > span { color: #0872d3; font-size: 12px; font-weight: 800; }
 .operational-failure-list article { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; gap: 9px; align-items: center; border-top: 1px solid #edf0f4; padding: 10px 2px; }
 .operational-failure-list article:first-child { border-top: 0; }
 .operational-failure-list article span { color: #7d899a; font-size: 11px; }
@@ -82,4 +82,37 @@
   .operational-quota, .operational-latency-card article { border-top: 1px solid #edf0f4; border-left: 0; }
   .operational-queue-list > article { grid-template-columns: 75px minmax(0, 1fr); }
   .operational-queue-list dl { grid-column: 1 / -1; }
+}
+
+/* 运维观测视觉收敛：指标卡与队列列表统一到全局卡片语言，弱化描边、收敛主题色。 */
+.operational-center { gap: 16px; }
+.operational-heading-actions select { border-color: #e2e9f1; border-radius: var(--radius-control); transition: border-color .15s ease, box-shadow .15s ease; }
+.operational-heading-actions select:focus-visible { border-color: #a4c8ea; outline: 0; box-shadow: var(--focus-ring); }
+.operational-summary { gap: 12px; }
+.operational-summary article {
+  border-color: var(--line);
+  border-radius: var(--radius-card);
+  padding: 15px 17px;
+  box-shadow: var(--shadow-card);
+}
+.operational-summary article.attention { border-color: #f0dcb2; background: #fffbf3; }
+.operational-summary svg { color: #0872d3; }
+.operational-grid { gap: 16px; }
+.operational-card {
+  border-color: var(--line);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+}
+.operational-card > header { border-color: #f0f3f7; background: #fafbfd; }
+.operational-quota { border-color: #f0f3f7; }
+.operational-quota header strong { color: #0872d3; }
+.operational-quota > div i { background: #0872d3; }
+.operational-latency-card article { border-color: #f0f3f7; }
+.operational-queue-list > article { border-color: #f0f3f7; }
+.operational-queue-list dl > div { border-color: #f0f3f7; }
+.operational-purpose-list article { border-color: #f0f3f7; }
+.operational-purpose-list article > span { color: #0872d3; }
+.operational-failure-list article { border-color: #f0f3f7; }
+@media (max-width: 850px) {
+  .operational-quota, .operational-latency-card article { border-top-color: #f0f3f7; }
 }

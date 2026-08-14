@@ -55,18 +55,16 @@ func main() {
 		logger.Error("initialize connection-test credential manager", "error", err)
 		os.Exit(1)
 	}
-	mysqlConnector := datasource.NewPythonConnector(
-		datasource.TypeMySQL, cfg.ConnectorURL, cfg.ConnectorToken,
-		credentialManager,
-	)
-	oracleConnector := datasource.NewPythonConnector(
-		datasource.TypeOracle, cfg.ConnectorURL, cfg.ConnectorToken,
-		credentialManager,
-	)
+	connectors := make([]datasource.Connector, 0, len(datasource.DatabaseDrivers())+1)
+	for _, driver := range datasource.DatabaseDrivers() {
+		connectors = append(connectors, datasource.NewPythonConnector(
+			driver.Type, cfg.ConnectorURL, cfg.ConnectorToken, credentialManager,
+		))
+	}
+	connectors = append(connectors, datasource.NewExcelConnector(excelManager))
 	jobRepository := datasource.NewPostgresConnectionTestRepository(pool)
 	worker := datasource.NewConnectionTestWorker(
-		jobRepository, cfg.ConnectionTestTimeout,
-		mysqlConnector, oracleConnector, datasource.NewExcelConnector(excelManager),
+		jobRepository, cfg.ConnectionTestTimeout, connectors...,
 	)
 
 	workerID := uuid.NewString()

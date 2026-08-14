@@ -293,6 +293,39 @@ export function wouldCreateGraphCycle(source: GraphInput, target: GraphTarget, g
 }
 
 /**
+ * 返回目标组件及所有直接或间接下游组件。插入连线组件时用它整体腾出一个
+ * 水平层级，同时保留无关分支的手工布局。
+ */
+export function graphDownstreamTargets(start: GraphTarget, graph: Pick<DesignerGraphV1, 'joins' | 'groups' | 'transforms' | 'end'>): GraphTarget[] {
+  const consumersByInput = new Map<string, GraphTarget[]>()
+  const addConsumer = (input: GraphInput | undefined, target: GraphTarget) => {
+    if (!input) return
+    const key = graphInputKey(input)
+    consumersByInput.set(key, [...(consumersByInput.get(key) ?? []), target])
+  }
+  for (const join of graph.joins) {
+    addConsumer(join.left, { kind: 'JOIN', id: join.id })
+    addConsumer(join.right, { kind: 'JOIN', id: join.id })
+  }
+  for (const group of graph.groups) addConsumer(group.input, { kind: 'GROUP', id: group.id })
+  for (const transform of graph.transforms ?? []) addConsumer(transform.input, { kind: 'TRANSFORM', id: transform.id })
+  if (graph.end) addConsumer(graph.end.input, { kind: 'OUTPUT', id: graph.end.id })
+
+  const downstream: GraphTarget[] = []
+  const queue = [start]
+  const visited = new Set<string>()
+  while (queue.length) {
+    const target = queue.shift()!
+    const key = graphTargetKey(target)
+    if (visited.has(key)) continue
+    visited.add(key)
+    downstream.push(target)
+    if (target.kind !== 'OUTPUT') queue.push(...(consumersByInput.get(key) ?? []))
+  }
+  return downstream
+}
+
+/**
  * 连线阶段的轻量校验。返回 undefined 表示可以连接，否则返回可直接展示的中文错误。
  * target 表示接收输入的关联、分组或结束节点。
  */

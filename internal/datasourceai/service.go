@@ -20,18 +20,19 @@ import (
 )
 
 const (
-	promptVersion   = "data-source-assistant-v1"
+	promptVersion   = "data-source-assistant-v2"
 	maxHistoryItems = 16
 	maxMessageRunes = 2000
 	maxReplyRunes   = 2000
 )
 
-const systemPrompt = `你是数据源配置助手，只处理 MySQL、Oracle、Excel/CSV 数据源的新建与修改。
-你的任务是从用户自然语言和已有草稿中提取配置，保留未被用户修改的已有值，并通过简短多轮问题补齐缺失信息。
+const systemPrompt = `你是通用数据源配置助手，处理 MySQL、MariaDB、PostgreSQL、Oracle、SQL Server、ClickHouse、Excel/CSV 数据源的新建与修改。
+你的任务是从 JDBC URL、标准连接 URI、键值表、位置式连接块或自然语言中提取配置，保留未被用户修改的已有值，并通过简短多轮问题补齐缺失信息。
+位置式连接块可能没有字段标签，常见顺序为“Host:端口/数据库或服务名”、用户名、密码；解析时兼容换行、空格以及中英文冒号和斜杠。只有端口能唯一映射到数据库类型时才可据此推断，否则必须询问类型。
 严禁编造 Host、数据库名、用户名或文件；无法从对话确认的值必须保持空字符串。密码永远不在输出中，passwordProvided 仅表示用户已在安全输入框填写。
 数据库数据源的名称和 code 由系统根据类型、Host、端口、数据库/服务名和用户名自动生成；永远不要向用户询问名称或 code。
 code 必须以英文字母开头，只能包含英文字母、数字和下划线，最长 128 位。
-Host 只输出主机名或 IP，不包含协议、JDBC 前缀、端口、路径。MySQL 默认端口 3306，Oracle 默认端口 1521。
+Host 只输出主机名或 IP，不包含协议、JDBC 前缀、端口、路径。默认端口分别为 MySQL/MariaDB 3306、PostgreSQL 5432、Oracle 1521、SQL Server 1433、ClickHouse HTTP 8123。
 Oracle 必须明确区分 SERVICE_NAME 和 SID；用户未说明时默认 SERVICE_NAME，绝不能把 Schema 或用户名当作服务名。
 测试失败时，根据稳定错误代码给出具体、可执行的检查建议；不要声称已经修复网络、账号或目标数据库。只有输入中明确可安全规范化的格式问题才能建议重试。
 reply 使用中文且简洁。suggestedAction 只能是 ASK、TEST 或 WAIT。`
@@ -96,7 +97,7 @@ func (s *Service) Turn(
 		return TurnResult{}, err
 	}
 	mode := "CREATE"
-	baseline := Draft{Type: "MYSQL", Port: 3306, OracleConnectMode: "SERVICE_NAME", Visibility: "PRIVATE", SharingScope: "PRIVATE"}
+	baseline := Draft{OracleConnectMode: "SERVICE_NAME", Visibility: "PRIVATE", SharingScope: "PRIVATE"}
 	if sourceID != "" {
 		mode = "UPDATE"
 		source, err := s.sources.Get(ctx, tenantID, sourceID)
@@ -193,6 +194,8 @@ func (s *Service) Turn(
 	reply := cleanText(output.Reply, maxReplyRunes)
 	if len(identityFixes) > 0 {
 		reply = generatedIdentityReply(missing)
+	} else if mode == "CREATE" && !hasRecognizedConfiguration(resultDraft) {
+		reply = "尚未识别出可用的连接参数。请明确提供数据源类型、Host、端口、数据库或 Oracle Service Name/SID，以及用户名；密码请只在安全输入框填写。"
 	}
 	return TurnResult{
 		Reply: reply, Draft: resultDraft,
@@ -202,6 +205,13 @@ func (s *Service) Turn(
 		AutoRetry: input.TestFailure != nil && len(fixes) > 0 && len(missing) == 0,
 		RequestID: invocation.RequestID,
 	}, nil
+}
+
+func hasRecognizedConfiguration(value Draft) bool {
+	if value.Type == "EXCEL" {
+		return value.Code != "" || value.Name != ""
+	}
+	return value.Host != "" || value.Database != "" || value.Username != ""
 }
 
 func resourceID(sourceID, actorID string) string {
@@ -287,7 +297,7 @@ func safeRepairs(value Draft, failure *TestFailure) (Draft, []string) {
 	value = normalizeDraft(value)
 	fixes := make([]string, 0, 3)
 	originalHost := value.Host
-	for _, prefix := range []string{"jdbc:mysql://", "jdbc:oracle:thin:@", "mysql://", "oracle://", "https://", "http://"} {
+	for _, prefix := range []string{"jdbc:mysql://", "jdbc:mariadb://", "jdbc:postgresql://", "jdbc:oracle:thin:@", "jdbc:sqlserver://", "jdbc:clickhouse://", "mysql://", "mariadb://", "postgresql://", "postgres://", "oracle://", "sqlserver://", "mssql://", "clickhouse://", "https://", "http://"} {
 		if strings.HasPrefix(strings.ToLower(value.Host), prefix) {
 			value.Host = value.Host[len(prefix):]
 			fixes = append(fixes, "已移除 Host 中的协议或 JDBC 前缀")
@@ -309,13 +319,11 @@ func safeRepairs(value Draft, failure *TestFailure) (Draft, []string) {
 		value.Host = "host.docker.internal"
 		fixes = append(fixes, "已将本机地址转换为容器可访问的 host.docker.internal")
 	}
-	if value.Port == 0 && value.Type == "MYSQL" {
-		value.Port = 3306
-		fixes = append(fixes, "已补充 MySQL 默认端口 3306")
-	}
-	if value.Port == 0 && value.Type == "ORACLE" {
-		value.Port = 1521
-		fixes = append(fixes, "已补充 Oracle 默认端口 1521")
+	if value.Port == 0 {
+		if driver, ok := datasource.DatabaseDriver(datasource.Type(value.Type)); ok {
+			value.Port = driver.DefaultPort
+			fixes = append(fixes, fmt.Sprintf("已补充 %s 默认端口 %d", driver.DisplayName, driver.DefaultPort))
+		}
 	}
 	if failure == nil && originalHost == value.Host {
 		fixes = nil
@@ -324,7 +332,7 @@ func safeRepairs(value Draft, failure *TestFailure) (Draft, []string) {
 }
 
 func validateDraft(value Draft) error {
-	if value.Type != "MYSQL" && value.Type != "ORACLE" && value.Type != "EXCEL" {
+	if !datasource.IsSupportedType(datasource.Type(value.Type)) {
 		return errors.New("unsupported data source type")
 	}
 	if value.Code != "" && !codePattern.MatchString(value.Code) {
@@ -452,7 +460,7 @@ func outputSchema() map[string]any {
 		"required": []string{"code", "name", "description", "type", "host", "port", "database", "oracleConnectMode", "username", "visibility", "sharingScope"},
 		"properties": map[string]any{
 			"code": stringField(), "name": stringField(), "description": stringField(),
-			"type": map[string]any{"type": "string", "enum": []string{"MYSQL", "ORACLE", "EXCEL"}},
+			"type": map[string]any{"type": "string", "enum": append([]string{""}, append(datasource.DatabaseTypeValues(), string(datasource.TypeExcel))...)},
 			"host": stringField(), "port": map[string]any{"type": "integer", "minimum": 0, "maximum": 65535},
 			"database":          stringField(),
 			"oracleConnectMode": map[string]any{"type": "string", "enum": []string{"SERVICE_NAME", "SID"}},

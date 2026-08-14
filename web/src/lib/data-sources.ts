@@ -1,6 +1,24 @@
 import { apiRequest, RequestError } from './api'
 
-export type DataSourceType = 'MYSQL' | 'ORACLE' | 'EXCEL'
+export type DatabaseSourceType = 'MYSQL' | 'MARIADB' | 'POSTGRESQL' | 'ORACLE' | 'SQLSERVER' | 'CLICKHOUSE'
+export type DataSourceType = DatabaseSourceType | 'EXCEL'
+
+export const databaseDriverDefinitions: ReadonlyArray<{ type: DatabaseSourceType; label: string; defaultPort: number }> = [
+  { type: 'MYSQL', label: 'MySQL', defaultPort: 3306 },
+  { type: 'MARIADB', label: 'MariaDB', defaultPort: 3306 },
+  { type: 'POSTGRESQL', label: 'PostgreSQL', defaultPort: 5432 },
+  { type: 'ORACLE', label: 'Oracle', defaultPort: 1521 },
+  { type: 'SQLSERVER', label: 'SQL Server', defaultPort: 1433 },
+  { type: 'CLICKHOUSE', label: 'ClickHouse', defaultPort: 8123 },
+]
+
+export const dataSourceTypeLabels: Record<DataSourceType, string> = Object.fromEntries([
+  ...databaseDriverDefinitions.map(driver => [driver.type, driver.label]),
+  ['EXCEL', 'Excel / CSV'],
+]) as Record<DataSourceType, string>
+
+export const defaultDatabasePort = (type: DataSourceType | '') =>
+  databaseDriverDefinitions.find(driver => driver.type === type)?.defaultPort ?? 0
 export type DataSourceStatus = 'DRAFT' | 'ACTIVE' | 'DISABLED' | 'SYNCING' | 'ERROR' | 'DELETING'
 export type DataSourceValidationStatus = 'UNTESTED' | 'PASSED' | 'FAILED'
 export type DataSourcePublicationStatus = 'UNPUBLISHED' | 'PUBLISHED'
@@ -32,7 +50,6 @@ export type DataSourceRecord = {
   publicationStatus?: DataSourcePublicationStatus
   hasUnpublishedChanges?: boolean
   lastTestedAt?: string
-  testExpiresAt?: string
   reviewStatus?: DataSourceReviewStatus
   reviewRequestId?: string
   reviewRequestVersion?: number
@@ -137,7 +154,6 @@ export type DataSourceTestResult = {
   latencyMs: number
   configVersionId?: string
   testedAt?: string
-  expiresAt?: string
 }
 
 export class DataSourceConnectionTestError extends Error {
@@ -155,7 +171,7 @@ export type DataSourceAIDraft = {
   code: string
   name: string
   description: string
-  type: DataSourceType
+  type: DataSourceType | ''
   host: string
   port: number
   database: string
@@ -204,7 +220,6 @@ export type ConnectionTestJob = {
   startedAt?: string
   completedAt?: string
   testedAt?: string
-  expiresAt?: string
 }
 
 export type DataSourceTableRecord = {
@@ -457,7 +472,6 @@ const connectionTestResult = (job: ConnectionTestJob): DataSourceTestResult => (
   latencyMs: job.latencyMs || 0,
   configVersionId: job.configVersionId,
   testedAt: job.testedAt,
-  expiresAt: job.expiresAt,
 })
 
 const waitForConnectionTestDelay = (signal?: AbortSignal) => new Promise<void>((resolve, reject) => {

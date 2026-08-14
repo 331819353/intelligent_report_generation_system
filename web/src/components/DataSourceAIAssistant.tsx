@@ -1,20 +1,25 @@
 import {
   ArrowCounterClockwise,
+  CaretDown,
   CheckCircle,
   ChatCircleDots,
   FileArrowUp,
+  Key,
   PaperPlaneRight,
   PlugsConnected,
+  ShieldCheck,
   Sparkle,
   SpinnerGap,
   X,
 } from '@phosphor-icons/react'
-import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AppButton } from './AppButton'
 import { RequestError } from '../lib/api'
+import { prepareDataSourceChatInstruction } from '../lib/data-source-ai-input'
 import { md5Hex } from '../lib/md5'
 import {
   dataSourceAPI,
+  defaultDatabasePort,
   DataSourceConnectionTestError,
   type DataSourceAIDraft,
   type DataSourceAIMessage,
@@ -29,6 +34,7 @@ import {
 } from '../lib/data-sources'
 
 type Notice = { tone: 'success' | 'error'; message: string }
+type PendingInstruction = { text: string; passwordProvided: boolean }
 type Props = {
   sources: DataSourceRecord[]
   onSourceChanged: (source: DataSourceRecord) => void
@@ -37,10 +43,11 @@ type Props = {
   open?: boolean
   onOpenChange?: (open: boolean) => void
   hideLauncher?: boolean
+  previewMode?: 'success'
 }
 
 const blankDraft = (): DataSourceAIDraft => ({
-  code: '', name: '', description: '', type: 'MYSQL', host: '', port: 3306,
+  code: '', name: '', description: '', type: '', host: '', port: 0,
   database: '', oracleConnectMode: 'SERVICE_NAME', username: '', visibility: 'PRIVATE', sharingScope: 'PRIVATE',
 })
 
@@ -55,7 +62,7 @@ const draftFromSource = (source: DataSourceRecord): DataSourceAIDraft => ({
   description: source.description || '',
   type: source.type,
   host: textConfig(source, 'host'),
-  port: Number(textConfig(source, 'port')) || (source.type === 'ORACLE' ? 1521 : 3306),
+  port: Number(textConfig(source, 'port')) || defaultDatabasePort(source.type) || 3306,
   database: textConfig(source, 'database'),
   oracleConnectMode: textConfig(source, 'oracleConnectMode') === 'SID' ? 'SID' : 'SERVICE_NAME',
   username: textConfig(source, 'username'),
@@ -134,8 +141,7 @@ const publicationFailureChecks = (code: string) => {
     case 'DATA_SOURCE_TEST_PENDING':
       return ['等待当前连接测试完成后再次点击发布']
     case 'DATA_SOURCE_TEST_REQUIRED':
-    case 'DATA_SOURCE_TEST_EXPIRED':
-      return ['重新测试当前配置', '测试通过后自动重新提交发布']
+      return ['测试当前配置', '测试通过后自动重新提交发布']
     case 'DATA_SOURCE_VERSION_CHANGED':
       return ['已重新加载服务端最新配置', '确认配置后重新测试并发布']
     case 'DATA_SOURCE_REVIEW_PENDING':
@@ -150,22 +156,8 @@ const welcomeMessage: DataSourceAIMessage = {
   content: '你好，我是数据源配置助手。告诉我你想新建数据源，还是选择一个现有数据源进行修改；之后我们会通过对话逐步补齐信息。',
 }
 
-const prepareChatInstruction = (input: string) => {
-  let detectedPassword = ''
-  const hidePassword = (prefix: string, value: string, suffix: string) => {
-    const candidate = value.trim()
-    if (!detectedPassword && candidate && !candidate.startsWith('[已')) detectedPassword = candidate
-    return `${prefix}[已转入安全输入]${suffix}`
-  }
-  const markdownPassword = /(\|\s*(?:密码|口令|password|passwd)\s*\|\s*`?)([^`|\r\n]+)(`?\s*\|)/gi
-  const inlinePassword = /((?:密码|口令|password|passwd)\s*[:=：]\s*["'`]?)([^"'`\r\n|]+)(["'`]?)/gi
-  const text = input
-    .replace(markdownPassword, (_match, prefix: string, value: string, suffix: string) => hidePassword(prefix, value, suffix))
-    .replace(inlinePassword, (_match, prefix: string, value: string, suffix: string) => hidePassword(prefix, value, suffix))
-  return { text, password: detectedPassword }
-}
-
-export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNotice, open: controlledOpen, onOpenChange, hideLauncher = false }: Props) {
+export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNotice, open: controlledOpen, onOpenChange, hideLauncher = false, previewMode }: Props) {
+  const previewSource = previewMode === 'success' ? sources.find(source => source.type === 'ORACLE') || null : null
   const [internalOpen, setInternalOpen] = useState(false)
   const open = controlledOpen ?? internalOpen
   const setOpen = (next: boolean | ((current: boolean) => boolean)) => {
@@ -173,12 +165,16 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
     if (controlledOpen === undefined) setInternalOpen(value)
     onOpenChange?.(value)
   }
-  const [modeChosen, setModeChosen] = useState(false)
-  const [sourceId, setSourceId] = useState('')
-  const [workingSource, setWorkingSource] = useState<DataSourceRecord | null>(null)
-  const [draft, setDraft] = useState<DataSourceAIDraft>(blankDraft)
-  const [messages, setMessages] = useState<DataSourceAIMessage[]>([welcomeMessage])
+  const [modeChosen, setModeChosen] = useState(Boolean(previewSource))
+  const [sourceId, setSourceId] = useState(previewSource?.id || '')
+  const [workingSource, setWorkingSource] = useState<DataSourceRecord | null>(previewSource)
+  const [draft, setDraft] = useState<DataSourceAIDraft>(() => previewSource ? draftFromSource(previewSource) : blankDraft())
+  const [messages, setMessages] = useState<DataSourceAIMessage[]>(previewSource ? [
+    { role: 'assistant', content: `已识别“${previewSource.name}”的 Oracle 连接参数，名称、地址、端口、服务名和账号信息均已齐全。` },
+    { role: 'assistant', content: '现有凭据会在安全通道中复用；连接测试已通过，可以提交发布审核。' },
+  ] : [welcomeMessage])
   const [instruction, setInstruction] = useState('')
+  const [pendingInstructions, setPendingInstructions] = useState<PendingInstruction[]>([])
   const [password, setPassword] = useState('')
   const [savedPasswordRejected, setSavedPasswordRejected] = useState(false)
   const [file, setFile] = useState<File | null>(null)
@@ -186,16 +182,18 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
   const [fileInspection, setFileInspection] = useState<ExcelWorkbookInspection | null>(null)
   const [missingFields, setMissingFields] = useState<string[]>([])
   const [checks, setChecks] = useState<string[]>([])
-  const [fixes, setFixes] = useState<string[]>([])
+  const [fixes, setFixes] = useState<string[]>(previewSource ? ['已规范为连接器可访问的数据库地址', '已根据类型与连接参数确认数据源标识'] : [])
   const [testFailureCode, setTestFailureCode] = useState('')
   const [connectionTestJob, setConnectionTestJob] = useState<ConnectionTestJob | null>(null)
-  const [assistantTurnCompleted, setAssistantTurnCompleted] = useState(false)
+  const [assistantTurnCompleted, setAssistantTurnCompleted] = useState(Boolean(previewSource))
   const [busy, setBusy] = useState<'chat' | 'file' | 'test' | 'publish' | ''>('')
-  const [testedSource, setTestedSource] = useState<DataSourceRecord | null>(null)
-  const [testPassed, setTestPassed] = useState(false)
+  const [testedSource, setTestedSource] = useState<DataSourceRecord | null>(previewSource)
+  const [testPassed, setTestPassed] = useState(Boolean(previewSource))
   const [submitted, setSubmitted] = useState(false)
   const logRef = useRef<HTMLDivElement | null>(null)
   const attachmentInputRef = useRef<HTMLInputElement | null>(null)
+  const connectionTestAbortRef = useRef<AbortController | null>(null)
+  const connectionTestRevisionRef = useRef(0)
   const listedSource = useMemo(() => sources.find(source => source.id === sourceId), [sourceId, sources])
   const activeSource = workingSource || listedSource
   const passwordFailure = testFailureCode === 'CONNECTION_AUTH_FAILED'
@@ -223,12 +221,37 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
     else required.push('host', 'port', 'database', 'username', 'password')
     return [...new Set([...missingFields, ...required])].filter(field => !satisfied[field])
   }, [activeSource, draft, file, missingFields, password, savedPasswordRejected, uploadedFileAsset])
-  const recognized = Boolean(draft.code || draft.name || draft.host || draft.database || activeSource || fileInspection)
+  const recognized = Boolean(draft.code || draft.name || draft.host || draft.database || draft.username || activeSource || fileInspection)
+  const workflowSteps = [
+    { label: '识别配置', hint: '提取连接参数', icon: <Sparkle size={15} weight="fill" />, complete: recognized },
+    { label: '补齐信息', hint: draft.type === 'EXCEL' ? '确认文件与名称' : '确认账号与凭据', icon: <Key size={15} weight="duotone" />, complete: recognized && effectiveMissingFields.length === 0 },
+    { label: '连接验证', hint: draft.type === 'EXCEL' ? '检查文件可用性' : '分层测试连接', icon: <ShieldCheck size={15} weight="duotone" />, complete: testPassed },
+    { label: '提交发布', hint: '进入审批流程', icon: <PaperPlaneRight size={15} weight="fill" />, complete: submitted },
+  ]
+  const currentWorkflowStep = Math.max(0, workflowSteps.findIndex(step => !step.complete))
+  const workflowStatus = submitted
+    ? '已提交审核'
+    : testPassed
+      ? '验证通过，等待发布'
+      : busy === 'test'
+        ? '正在验证连接'
+        : recognized && effectiveMissingFields.length === 0
+          ? '信息完整，可以测试'
+          : recognized
+            ? `待补充 ${effectiveMissingFields.length} 项`
+            : modeChosen
+              ? '等待识别配置'
+              : '等待开始'
+  const draftSummary = draft.type === 'EXCEL'
+    ? [draft.type, uploadedFileAsset?.filename || file?.name].filter(Boolean).join(' · ')
+    : [draft.type, draft.host ? `${draft.host}${draft.port ? `:${draft.port}` : ''}` : ''].filter(Boolean).join(' · ')
 
   useEffect(() => {
     const log = logRef.current
     if (log) log.scrollTop = log.scrollHeight
-  }, [busy, checks.length, effectiveMissingFields.length, fixes.length, messages, submitted, testPassed])
+  }, [busy, checks.length, effectiveMissingFields.length, fixes.length, messages, pendingInstructions, submitted, testPassed])
+
+  useEffect(() => () => connectionTestAbortRef.current?.abort(), [])
 
   const resetConversation = (nextSourceId = '') => {
     const source = sources.find(item => item.id === nextSourceId)
@@ -243,6 +266,7 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
         : '好的，我们来新建数据源。请直接描述你已有的信息，例如：“新建 MySQL，地址 db.internal:3306，库名 sales”。不完整也没关系，我会继续追问。',
     }])
     setInstruction('')
+    setPendingInstructions([])
     setPassword('')
     setSavedPasswordRejected(false)
     setFile(null)
@@ -266,6 +290,7 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
     setDraft(blankDraft())
     setMessages([welcomeMessage])
     setInstruction('')
+    setPendingInstructions([])
     setPassword('')
     setSavedPasswordRejected(false)
     setFile(null)
@@ -282,7 +307,7 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
     setSubmitted(false)
   }
 
-  const runTurn = async (
+  const runTurn = useCallback(async (
     text: string,
     failure?: DataSourceAITestFailure,
     manageBusy = true,
@@ -318,20 +343,42 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
     } finally {
       if (manageBusy) setBusy('')
     }
-  }
+  }, [activeSource, draft, file, messages, password, savedPasswordRejected, uploadedFileAsset])
 
   const submitMessage = (event: FormEvent) => {
     event.preventDefault()
-    const prepared = prepareChatInstruction(instruction.trim())
-    if (!prepared.text || busy) return
+    const prepared = prepareDataSourceChatInstruction(instruction.trim())
+    if (!prepared.text || busy === 'publish') return
     setInstruction('')
     if (prepared.password) setPassword(prepared.password)
     setTestPassed(false)
     setSubmitted(false)
+    if (busy || pendingInstructions.length > 0) {
+      setPendingInstructions(current => [...current, {
+        text: prepared.text,
+        passwordProvided: Boolean(prepared.password),
+      }])
+      if (busy === 'test') {
+        connectionTestRevisionRef.current += 1
+        connectionTestAbortRef.current?.abort()
+      }
+      return
+    }
     void runTurn(prepared.text, undefined, true, undefined, prepared.password ? true : undefined)
   }
 
+  useEffect(() => {
+    if (busy || pendingInstructions.length === 0) return
+    const [next, ...remaining] = pendingInstructions
+    setPendingInstructions(remaining)
+    setTestPassed(false)
+    setSubmitted(false)
+    setConnectionTestJob(null)
+    void runTurn(next.text, undefined, true, undefined, next.passwordProvided ? true : undefined)
+  }, [busy, pendingInstructions, runTurn])
+
   const persistDraft = async (value: DataSourceAIDraft, current?: DataSourceRecord) => {
+    if (!value.type) throw new Error('请先确认数据库类型')
     if (value.type === 'EXCEL') {
       let liveCurrent = current
       let fileAssetId = uploadedFileAsset?.id || liveCurrent?.fileAssetId || ''
@@ -487,6 +534,9 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
     setSubmitted(false)
     setTestFailureCode('')
     setConnectionTestJob(null)
+    const testRevision = connectionTestRevisionRef.current
+    const testController = new AbortController()
+    connectionTestAbortRef.current = testController
     try {
       let saved = await persistDraft(draft, activeSource || undefined)
       const wasAlreadyListed = sources.some(source => source.id === saved.id)
@@ -494,14 +544,19 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
       setSourceId(saved.id)
       if (wasAlreadyListed) onSourceChanged(saved)
       if (draft.type === 'EXCEL') setFile(null)
+      if (testController.signal.aborted || testRevision !== connectionTestRevisionRef.current) return
       let retried = false
       while (true) {
         try {
           const test = await dataSourceAPI.test(
             saved.id,
-            draft.type === 'EXCEL' ? {} : { onProgress: setConnectionTestJob },
+            draft.type === 'EXCEL'
+              ? { signal: testController.signal }
+              : { signal: testController.signal, onProgress: setConnectionTestJob },
           )
+          if (testController.signal.aborted || testRevision !== connectionTestRevisionRef.current) return
           const latest = await dataSourceAPI.get(saved.id)
+          if (testController.signal.aborted || testRevision !== connectionTestRevisionRef.current) return
           setWorkingSource(latest)
           if (wasAlreadyListed) onSourceChanged(latest)
           setTestedSource(latest)
@@ -518,6 +573,7 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
           onNotice({ tone: 'success', message: `“${latest.name}”连接成功，等待提交审核` })
           break
         } catch (cause) {
+          if (testController.signal.aborted || testRevision !== connectionTestRevisionRef.current) return
           if (!(cause instanceof DataSourceConnectionTestError)) throw cause
           const passwordRejected = cause.code === 'CONNECTION_AUTH_FAILED'
           setTestFailureCode(cause.code)
@@ -529,6 +585,7 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
             code: cause.code,
             message: cause.message,
           }, false, saved.id, passwordRejected ? false : undefined)
+          if (testController.signal.aborted || testRevision !== connectionTestRevisionRef.current) return
           if (!passwordRejected && !retried && result?.autoRetry) {
             retried = true
             saved = await persistDraft(result.draft, saved)
@@ -553,12 +610,14 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
       }
       if (wasAlreadyListed) await onReload()
     } catch (cause) {
+      if (testController.signal.aborted || testRevision !== connectionTestRevisionRef.current || (cause instanceof Error && cause.name === 'AbortError')) return
       const message = cause instanceof Error ? cause.message : '保存或测试数据源失败'
       setTestFailureCode('DATA_SOURCE_TEST_FAILED')
       setChecks(current => current.length > 0 ? current : ['根据错误信息检查当前配置', '修正配置后通过对话重新确认'])
       setMessages(current => [...current, { role: 'assistant', content: `未能完成连接测试：${message}` }])
       onNotice({ tone: 'error', message })
     } finally {
+      if (connectionTestAbortRef.current === testController) connectionTestAbortRef.current = null
       setBusy('')
     }
   }
@@ -610,11 +669,11 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
             return
           }
 
-          if (!testRepairAttempted && (code === 'DATA_SOURCE_TEST_EXPIRED' || code === 'DATA_SOURCE_TEST_REQUIRED')) {
+          if (!testRepairAttempted && code === 'DATA_SOURCE_TEST_REQUIRED') {
             testRepairAttempted = true
             setMessages(current => [...current, {
               role: 'assistant',
-              content: `发布校验失败（${code}）：${message}。正在重新测试当前配置，测试通过后会自动再次发布。`,
+              content: `发布校验失败（${code}）：${message}。正在测试当前配置，测试通过后会自动再次发布。`,
             }])
             try {
               await dataSourceAPI.test(publicationSource.id)
@@ -699,20 +758,33 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
     </div>}
     {open && <section className="data-source-ai-panel" role="dialog" aria-label="数据源 AI 配置对话">
       <header>
-        <div className="data-source-ai-agent"><span><Sparkle size={18} weight="fill" /></span><div><small>AI DATA COPILOT</small><strong>数据源助手</strong></div></div>
+        <div className="data-source-ai-agent"><span><Sparkle size={18} weight="fill" /></span><div><small>AI CONFIGURATION</small><strong>数据源智能配置</strong></div></div>
         <div className="data-source-ai-header-actions">
           <AppButton text circle type="button" disabled={Boolean(busy)} aria-label="重新开始对话" title="重新开始" onClick={restart}><ArrowCounterClockwise size={17} /></AppButton>
           <AppButton text circle type="button" aria-label="关闭数据源 AI 助手" onClick={() => setOpen(false)}><X size={18} /></AppButton>
         </div>
       </header>
-      <div className="data-source-ai-context"><span className="online-dot" />{modeChosen ? activeSource ? `正在配置：${activeSource.name}` : '正在新建数据源' : '在线 · 等待你的指令'}</div>
+      <div className="data-source-ai-context">
+        <span className="data-source-ai-session"><i className="online-dot" /><span title={activeSource?.name}>{modeChosen ? activeSource ? `正在配置：${activeSource.name}` : '正在新建数据源' : '在线 · 等待你的指令'}</span></span>
+        <em className={submitted ? 'is-success' : testPassed ? 'is-ready' : ''}>{workflowStatus}</em>
+      </div>
+      <ol className="data-source-ai-workflow" aria-label="智能配置流程">
+        {workflowSteps.map((step, index) => <li className={`${step.complete ? 'is-complete' : ''}${!step.complete && index === currentWorkflowStep ? ' is-current' : ''}`} key={step.label}>
+          <span>{step.complete ? <CheckCircle size={16} weight="fill" /> : step.icon}</span>
+          <div><strong>{step.label}</strong><small>{step.hint}</small></div>
+        </li>)}
+      </ol>
       <div className="data-source-ai-conversation">
-        {modeChosen && recognized && <div className="data-source-ai-inline-card configuration pinned" tabIndex={0} aria-label="当前识别配置，悬停或聚焦后向左展开完整信息" title="悬停后向左展开完整配置">
-          <header><span><Sparkle size={14} weight="fill" />当前识别配置</span><small>{activeSource ? '修改' : '新建'}</small></header>
+        {modeChosen && recognized && <details className="data-source-ai-inline-card configuration pinned">
+          <summary>
+            <span><Sparkle size={14} weight="fill" /><span><strong>当前识别配置</strong><small title={draftSummary}>{draftSummary || '等待识别参数'}</small></span></span>
+            <em>{effectiveMissingFields.length > 0 ? `待补 ${effectiveMissingFields.length} 项` : activeSource ? '修改模式' : '新建模式'}</em>
+            <CaretDown size={15} weight="bold" />
+          </summary>
           <dl>
             <div className="wide"><dt>名称</dt><dd title={draft.name || undefined}>{draft.name || '待补充'}</dd></div>
             <div className="wide"><dt>编码</dt><dd title={draft.code || undefined}>{draft.code || '待生成'}</dd></div>
-            <div><dt>类型</dt><dd>{draft.type}</dd></div>
+            <div><dt>类型</dt><dd>{draft.type || '待识别'}</dd></div>
             <div><dt>可见性 / 范围</dt><dd>{draft.visibility || 'PRIVATE'} / {draft.sharingScope || 'PRIVATE'}</dd></div>
             {draft.type !== 'EXCEL' && <>
               <div className="wide"><dt>Host</dt><dd title={draft.host || undefined}>{draft.host || '待补充'}</dd></div>
@@ -725,17 +797,19 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
             {draft.type === 'EXCEL' && <><div><dt>附件</dt><dd>{uploadedFileAsset?.filename || activeSource?.name || file?.name || '待上传'}</dd></div><div><dt>解析结果</dt><dd>{fileInspection ? `${fileInspection.sheets.length} 个工作表` : '等待解析'}</dd></div></>}
           </dl>
           {effectiveMissingFields.length > 0 && <p>还需要：{effectiveMissingFields.map(item => fieldLabels[item] || item).join('、')}</p>}
-        </div>}
-
+        </details>}
         <div className="data-source-ai-log" ref={logRef} aria-live="polite">
         {messages.map((message, index) => <div className={`data-source-ai-message ${message.role}`} key={`${message.role}-${index}`}>
           {message.role === 'assistant' && <span className="data-source-ai-avatar"><Sparkle size={13} weight="fill" /></span>}
           <div><small>{message.role === 'assistant' ? 'AI 助手' : '你'}</small><p>{message.content}</p></div>
         </div>)}
+        {pendingInstructions.map((item, index) => <div className="data-source-ai-message user queued" key={`queued-${index}`}>
+          <div><small>你 · 已收到，待优先处理</small><p>{item.text}</p></div>
+        </div>)}
 
         {!modeChosen && <div className="data-source-ai-choices">
           <AppButton type="button" onClick={() => resetConversation('')}><Sparkle size={15} weight="fill" /><span><strong>新建数据源</strong><small>从一段描述开始</small></span></AppButton>
-          {sources.map(source => <AppButton type="button" key={source.id} onClick={() => resetConversation(source.id)}><PlugsConnected size={15} /><span><strong>修改 {source.name}</strong><small>{source.type} · {source.code}</small></span></AppButton>)}
+          {sources.map(source => <AppButton type="button" key={source.id} onClick={() => resetConversation(source.id)}><PlugsConnected size={15} /><span><strong title={source.name}>修改 {source.name}</strong><small title={`${source.type} · ${source.code}`}>{source.type} · {source.code}</small></span></AppButton>)}
         </div>}
 
         {modeChosen && assistantTurnCompleted && (!testFailureCode || passwordFailure) && (draft.type === 'EXCEL'
@@ -812,9 +886,15 @@ export function DataSourceAIAssistant({ sources, onSourceChanged, onReload, onNo
       <form className="data-source-ai-composer" onSubmit={submitMessage}>
         <AppButton text circle className="data-source-ai-attachment" type="button" disabled={Boolean(busy)} aria-label="添加 Excel 附件" title="添加 Excel / CSV 附件" onClick={() => attachmentInputRef.current?.click()}><FileArrowUp size={18} /></AppButton>
         <input ref={attachmentInputRef} className="data-source-ai-attachment-input" type="file" accept=".xlsx,.xls,.csv" disabled={Boolean(busy)} onChange={event => { const selected = event.target.files?.[0]; if (selected) void attachAndCreateExcelSource(selected) }} />
-        <textarea rows={2} value={instruction} disabled={Boolean(busy)} onChange={event => setInstruction(event.target.value)} placeholder="直接描述需求或继续补充信息…" />
-        <AppButton variant="primary" circle className="data-source-ai-send" type="submit" disabled={Boolean(busy) || !instruction.trim()} aria-label="发送消息"><PaperPlaneRight size={19} weight="fill" /></AppButton>
-        <small>可直接添加 Excel / CSV 附件 · 原始内容不会发送给配置模型</small>
+        <textarea rows={2} value={instruction} onChange={event => setInstruction(event.target.value)} placeholder={busy ? '可随时补充或更正信息…' : '直接描述需求或继续补充信息…'} />
+        <AppButton variant="primary" circle className="data-source-ai-send" type="submit" disabled={busy === 'publish' || !instruction.trim()} aria-label={busy ? '发送补充信息' : '发送消息'}><PaperPlaneRight size={19} weight="fill" /></AppButton>
+        <small>{pendingInstructions.length > 0
+          ? `已收到 ${pendingInstructions.length} 条补充信息，正在按顺序处理`
+          : busy === 'test'
+            ? '可随时补充更正；发送后会停止等待本轮测试并优先处理新信息'
+            : busy
+              ? busy === 'publish' ? '正在提交发布；你可以先编辑补充内容，完成后发送' : '可继续补充；发送后会在当前步骤结束后自动处理'
+              : '可直接添加 Excel / CSV 附件 · 原始内容不会发送给配置模型'}</small>
       </form>
     </section>}
   </aside>

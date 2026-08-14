@@ -13,7 +13,6 @@ var (
 	ErrCodeConflict               = errors.New("data source code already exists")
 	ErrConnectionConflict         = errors.New("data source connection and username already exist in the domain")
 	ErrTestRequired               = errors.New("a successful connection test is required for the current data source version")
-	ErrTestExpired                = errors.New("the successful connection test for the current data source version has expired")
 	ErrSourceVersionChanged       = errors.New("data source configuration changed during the operation")
 	ErrVersionConflict            = errors.New("data source was modified by another request")
 	ErrVersioningRequired         = errors.New("data source versioned publication is not supported by the repository")
@@ -28,9 +27,13 @@ var dataSourceCodePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}$`)
 type Type string
 
 const (
-	TypeMySQL  Type = "MYSQL"
-	TypeOracle Type = "ORACLE"
-	TypeExcel  Type = "EXCEL"
+	TypeMySQL      Type = "MYSQL"
+	TypeMariaDB    Type = "MARIADB"
+	TypePostgreSQL Type = "POSTGRESQL"
+	TypeOracle     Type = "ORACLE"
+	TypeSQLServer  Type = "SQLSERVER"
+	TypeClickHouse Type = "CLICKHOUSE"
+	TypeExcel      Type = "EXCEL"
 )
 
 type Status string
@@ -104,7 +107,6 @@ type Source struct {
 	PublicationStatus      PublicationStatus `json:"publicationStatus"`
 	HasUnpublishedChanges  bool              `json:"hasUnpublishedChanges"`
 	LastTestedAt           *time.Time        `json:"lastTestedAt,omitempty"`
-	TestExpiresAt          *time.Time        `json:"testExpiresAt,omitempty"`
 	ReviewStatus           ReviewStatus      `json:"reviewStatus"`
 	ReviewRequestID        string            `json:"reviewRequestId,omitempty"`
 	ReviewRequestVersion   int64             `json:"reviewRequestVersion,omitempty"`
@@ -155,7 +157,6 @@ type TestResult struct {
 	ConfigVersionID string     `json:"configVersionId,omitempty"`
 	ConfigHash      string     `json:"configHash,omitempty"`
 	TestedAt        *time.Time `json:"testedAt,omitempty"`
-	ExpiresAt       *time.Time `json:"expiresAt,omitempty"`
 }
 
 type ConnectionTestRun struct {
@@ -169,7 +170,6 @@ type ConnectionTestRun struct {
 	ErrorMessage  string
 	StartedAt     time.Time
 	CompletedAt   time.Time
-	ExpiresAt     *time.Time
 }
 type QueryResult struct {
 	Columns     []string          `json:"columns"`
@@ -343,7 +343,7 @@ func (s Source) Validate() error {
 		if s.FileAssetID == "" || s.SecretRef != "" {
 			return errors.New("excel source requires file asset only")
 		}
-	case TypeMySQL, TypeOracle:
+	case TypeMySQL, TypeMariaDB, TypePostgreSQL, TypeOracle, TypeSQLServer, TypeClickHouse:
 		if s.SecretRef == "" || s.FileAssetID != "" {
 			return errors.New("database source requires secret reference only")
 		}

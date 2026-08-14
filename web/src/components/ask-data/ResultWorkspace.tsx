@@ -83,7 +83,7 @@ function ResultChart({ result, view, compact = false }: ResultChartProps) {
       xAxis: { type: 'value', splitLine: { show: false }, axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false } },
       yAxis: { type: 'category', inverse: true, data: labels, axisLabel: { color: '#67717f', fontSize: 9 }, axisLine: { show: false }, axisTick: { show: false } },
       series: [{
-        type: 'bar', data: values.map((value, index) => ({ value, itemStyle: { color: index === 0 ? '#2864dc' : '#9bb7ee', borderRadius: [0, 4, 4, 0] } })),
+        type: 'bar', data: values.map((value, index) => ({ value, itemStyle: { color: index === 0 ? '#0872d3' : '#9cc5ec', borderRadius: [0, 4, 4, 0] } })),
         barWidth: compact ? 9 : 12, showBackground: true, backgroundStyle: { color: '#f1f4f8', borderRadius: 4 },
         label: { show: true, position: 'right', color: '#566171', fontSize: 7, formatter: ({ value }: { value: number }) => {
           const total = numericResultValue(result.summary.value) ?? 0
@@ -97,7 +97,7 @@ function ResultChart({ result, view, compact = false }: ResultChartProps) {
       yAxis: { type: 'value', min: 0, splitNumber: 3, axisLabel: { color: '#8d96a2', fontSize: 8, formatter: (value: number) => formatChartNumber(value) }, splitLine: { lineStyle: { color: '#edf0f4' } }, axisLine: { show: false }, axisTick: { show: false } },
       series: [{
         type: 'line', data: values, smooth: false, symbol: 'circle', symbolSize: 6,
-        lineStyle: { width: 2, color: '#2864dc' }, itemStyle: { color: '#2864dc', borderColor: '#fff', borderWidth: 2 },
+        lineStyle: { width: 2, color: '#0872d3' }, itemStyle: { color: '#0872d3', borderColor: '#fff', borderWidth: 2 },
         label: { show: true, position: 'top', color: '#687485', fontSize: 7, formatter: ({ value }: { value: number }) => value.toLocaleString('zh-CN') },
       }],
     })

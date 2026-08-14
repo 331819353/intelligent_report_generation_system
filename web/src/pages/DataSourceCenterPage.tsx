@@ -8,9 +8,12 @@ import {
   Database,
   DotsThree,
   FileXls,
+  IdentificationCard,
   MagnifyingGlass,
   PencilSimple,
+  PlugsConnected,
   Plus,
+  ShieldCheck,
   Sparkle,
   WarningCircle,
   X,
@@ -27,6 +30,9 @@ import { currentDomainID, subscribeDomainChange } from '../lib/domain-context'
 import { md5Hex } from '../lib/md5'
 import {
   dataSourceAPI,
+  databaseDriverDefinitions,
+  dataSourceTypeLabels,
+  defaultDatabasePort,
   type DataSourceConnectionInput,
   type DataSourceColumnRecord,
   type DataSourceRecord,
@@ -50,7 +56,7 @@ import {
 const statusLabels: Record<DataSourceStatus, string> = {
   DRAFT: '待验证', ACTIVE: '运行中', DISABLED: '已暂停', SYNCING: '同步中', ERROR: '异常', DELETING: '删除中',
 }
-const typeLabels: Record<DataSourceType, string> = { MYSQL: 'MySQL', ORACLE: 'Oracle', EXCEL: 'Excel / CSV' }
+const typeLabels = dataSourceTypeLabels
 
 const snapshotSources: DataSourceRecord[] = [
   {
@@ -60,7 +66,7 @@ const snapshotSources: DataSourceRecord[] = [
     config: { host: 'sales-db.internal', port: 3306, database: 'sales_prod', username: 'report_reader' },
     configVersionId: 'snapshot-sales-config-v3', publishedVersionId: 'snapshot-sales-published-v3', configVersion: 3,
     publishedConfigVersion: 3, validationStatus: 'PASSED', publicationStatus: 'PUBLISHED', hasUnpublishedChanges: false,
-    reviewStatus: 'APPROVED', lastTestedAt: '2026-08-11T09:18:00+08:00', testExpiresAt: '2026-08-12T09:18:00+08:00', updatedAt: '2026-08-11T09:18:00+08:00', version: 8,
+    reviewStatus: 'APPROVED', lastTestedAt: '2026-08-11T09:18:00+08:00', updatedAt: '2026-08-11T09:18:00+08:00', version: 8,
   },
   {
     id: 'snapshot-finance-oracle', tenantId: 'snapshot-tenant', code: 'finance_erp', name: '财务 ERP',
@@ -246,16 +252,12 @@ const publicationStatusOf = (source: DataSourceRecord) => source.publicationStat
 const hasUnpublishedDraft = (source: DataSourceRecord) => source.hasUnpublishedChanges
   ?? publicationStatusOf(source) === 'UNPUBLISHED'
 const reviewStatusOf = (source: DataSourceRecord): DataSourceReviewStatus => source.reviewStatus || 'NOT_SUBMITTED'
-const connectionReceiptExpired = (source: DataSourceRecord, now = Date.now()) => validationStatusOf(source) === 'PASSED'
-  && Boolean(source.testExpiresAt)
-  && (Number.isNaN(new Date(source.testExpiresAt!).getTime()) || new Date(source.testExpiresAt!).getTime() <= now)
-const effectiveValidationStatus = (source: DataSourceRecord) => connectionReceiptExpired(source) ? 'UNTESTED' : validationStatusOf(source)
-const validationLabel = (source: DataSourceRecord) => connectionReceiptExpired(source) ? '测试已过期' : validationLabels[validationStatusOf(source)]
+const validationLabel = (source: DataSourceRecord) => validationLabels[validationStatusOf(source)]
 const lifecycleLabel = (source: DataSourceRecord) => reviewStatusOf(source) === 'PENDING'
   ? '待审批'
   : reviewStatusOf(source) === 'REJECTED'
     ? '审核失败'
-    : source.status === 'DRAFT' && effectiveValidationStatus(source) === 'PASSED'
+    : source.status === 'DRAFT' && validationStatusOf(source) === 'PASSED'
   ? '待上线'
   : statusLabels[source.status]
 const formatDataSourceTime = (value?: string) => {
@@ -266,10 +268,9 @@ const formatDataSourceTime = (value?: string) => {
     : parsed.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 const connectionHealth = (source: DataSourceRecord) => {
-  if (connectionReceiptExpired(source)) return { tone: 'warning', label: '待复验', detail: '测试收据已过期' }
   if (validationStatusOf(source) === 'FAILED' || source.status === 'ERROR') return { tone: 'error', label: '异常', detail: '连接失败' }
   if (validationStatusOf(source) === 'PASSED') return { tone: 'healthy', label: '健康', detail: snapshotSourceMetrics[source.id]?.latency || '验证通过' }
-  return { tone: 'warning', label: '待验证', detail: '尚无测试收据' }
+  return { tone: 'warning', label: '待验证', detail: '尚未完成连接测试' }
 }
 const metadataAssetStats = (tables: DataSourceTableRecord[]): MetadataAssetStats => {
   const managed = tables.filter(table => table.assetStatus === 'ACTIVE' && table.managementStatus !== 'DISABLED')
@@ -280,7 +281,6 @@ const metadataReadiness = (source: DataSourceRecord, stats?: MetadataAssetStats)
   snapshotSourceMetrics[source.id]?.readiness ?? stats?.readiness ?? null
 const lifecycleSteps = (source: DataSourceRecord, stats?: MetadataAssetStats) => [
   { label: '已连接', complete: Boolean(source.configVersionId || source.fileAssetId) },
-  // 测试收据只有 30 分钟有效期，过期只影响发布门禁；这里看验证结果本身，否则勾会反复丢失。
   { label: '已验证', complete: validationStatusOf(source) === 'PASSED' },
   { label: '已发布', complete: publicationStatusOf(source) === 'PUBLISHED' },
   { label: '完善元数据', complete: metadataReadiness(source, stats) === 100 },
@@ -325,9 +325,9 @@ const draftFromSource = (source: DataSourceRecord): ConnectionDraft => ({
   description: source.description || '',
   visibility: source.visibility || 'PRIVATE',
   sharingScope: source.sharingScope || (source.visibility === 'TENANT_PUBLIC' ? 'DOMAIN' : 'PRIVATE'),
-  type: source.type === 'ORACLE' ? 'ORACLE' : 'MYSQL',
+  type: source.type === 'EXCEL' ? 'MYSQL' : source.type,
   host: configText(source, 'host'),
-  port: configText(source, 'port') || (source.type === 'ORACLE' ? '1521' : '3306'),
+  port: configText(source, 'port') || String(defaultDatabasePort(source.type) || 3306),
   database: configText(source, 'database'),
   oracleConnectMode: configText(source, 'oracleConnectMode') === 'SID' ? 'SID' : 'SERVICE_NAME',
   username: configText(source, 'username'),
@@ -390,6 +390,7 @@ export function DataSourceCenterPage() {
   const navigate = useNavigate()
   const searchParams = new URLSearchParams(window.location.search)
   const designSnapshot = import.meta.env.DEV && Boolean(searchParams.get('snapshot'))
+  const aiSuccessPreview = designSnapshot && searchParams.get('snapshot') === 'data-source-ai-success'
   const qaViewport1920 = designSnapshot && searchParams.get('qa') === '1920'
   const [sources, setSources] = useState<DataSourceRecord[]>(designSnapshot ? snapshotSources : [])
   const [sourceManagePermissions, setSourceManagePermissions] = useState<Record<string, boolean>>(
@@ -410,8 +411,25 @@ export function DataSourceCenterPage() {
   const [typeFilter, setTypeFilter] = useState<DataSourceType | 'ALL'>('ALL')
   const [statusFilter, setStatusFilter] = useState<DataSourceStatus | 'ALL'>('ALL')
   const [selectedSourceId, setSelectedSourceId] = useState('')
+  const [actionMenuSourceId, setActionMenuSourceId] = useState('')
+
+  useEffect(() => {
+    if (!actionMenuSourceId) return undefined
+    const closeOnOutsidePress = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest('.data-source-more')) setActionMenuSourceId('')
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setActionMenuSourceId('')
+    }
+    window.addEventListener('pointerdown', closeOnOutsidePress)
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      window.removeEventListener('pointerdown', closeOnOutsidePress)
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [actionMenuSourceId])
   const [assetStats, setAssetStats] = useState<Record<string, MetadataAssetStats>>({})
-  const [assistantOpen, setAssistantOpen] = useState(false)
+  const [assistantOpen, setAssistantOpen] = useState(aiSuccessPreview)
   const [metadataTables, setMetadataTables] = useState<DataSourceTableRecord[]>([])
   const [metadataColumns, setMetadataColumns] = useState<Record<string, DataSourceColumnRecord[]>>({})
   const [metadataLoading, setMetadataLoading] = useState(false)
@@ -1054,7 +1072,7 @@ export function DataSourceCenterPage() {
         editing.ownerId === signedInSubject &&
         editing.domainId === selectedDomainID
       ) ? { sharingScope: draft.sharingScope } : {}),
-      type: draft.type as 'MYSQL' | 'ORACLE', host: draft.host.trim(), port: Number(draft.port),
+      type: draft.type as Exclude<DataSourceType, 'EXCEL'>, host: draft.host.trim(), port: Number(draft.port),
       database: draft.database.trim(), oracleConnectMode: draft.type === 'ORACLE' ? draft.oracleConnectMode : undefined,
       username: draft.username.trim(), password: draft.password,
     }
@@ -1111,7 +1129,7 @@ export function DataSourceCenterPage() {
 
   const submitDraftForReview = async () => {
     const source = dialog?.mode === 'edit' ? dialog.source : undefined
-    if (!source || !draftMatchesSource(draft, source) || effectiveValidationStatus(source) !== 'PASSED') {
+    if (!source || !draftMatchesSource(draft, source) || validationStatusOf(source) !== 'PASSED') {
       setFormError('发布前必须先用当前表单完成一次成功的连接测试；修改任一字段后需要重新测试')
       return
     }
@@ -1301,8 +1319,12 @@ export function DataSourceCenterPage() {
   const editableFormSource = dialog?.mode === 'edit' ? dialog.source : undefined
   const currentDraftTested = draft.type !== 'EXCEL'
     && draftMatchesSource(draft, editableFormSource)
-    && effectiveValidationStatus(editableFormSource!) === 'PASSED'
+    && validationStatusOf(editableFormSource!) === 'PASSED'
     && reviewStatusOf(editableFormSource!) !== 'PENDING'
+  const basicConfigurationComplete = Boolean(draft.name.trim() && draft.code.trim())
+  const connectionConfigurationComplete = draft.type === 'EXCEL'
+    ? Boolean(excelFile || excelAsset)
+    : Boolean(draft.host.trim() && draft.port.trim() && draft.database.trim() && draft.username.trim() && (dialog?.mode === 'edit' || draft.password))
   const visibleMetadataJob = dialog?.source?.id === metadataJobSourceId ? metadataJob : null
   const metadataTaskActive = metadataJobActive(visibleMetadataJob)
   const metadataTaskBusy = metadataTaskActive || metadataJobLoading
@@ -1344,18 +1366,14 @@ export function DataSourceCenterPage() {
   const selectedReviewStatus = selectedSource ? reviewStatusOf(selectedSource) : 'NOT_SUBMITTED'
   const selectedUnavailable = selectedSource ? selectedSource.status === 'SYNCING' || selectedSource.status === 'DELETING' : false
   const selectedPendingDraft = selectedSource ? hasUnpublishedDraft(selectedSource) : false
-  const selectedCanTest = Boolean(selectedSource && selectedCanManage && !selectedUnavailable && selectedReviewStatus !== 'PENDING')
-  const selectedCanPublish = Boolean(selectedSource && selectedCanManage && !selectedUnavailable && selectedPendingDraft && selectedReviewStatus !== 'PENDING' && effectiveValidationStatus(selectedSource) === 'PASSED')
+  const selectedCanPublish = Boolean(selectedSource && selectedCanManage && !selectedUnavailable && selectedPendingDraft && selectedReviewStatus !== 'PENDING' && validationStatusOf(selectedSource) === 'PASSED')
   const selectedReadiness = selectedSource ? metadataReadiness(selectedSource, assetStats[selectedSource.id]) : null
   const selectedHealth = selectedSource ? connectionHealth(selectedSource) : null
   const selectedLifecycle = selectedSource ? lifecycleSteps(selectedSource, assetStats[selectedSource.id]) : []
   const selectedMetadataComplete = selectedReadiness === 100
   const selectedIsRequester = Boolean(selectedSource && (!signedInSubject || selectedSource.reviewRequesterId === signedInSubject))
-  // 收据过期只阻断发布；已上线且无待发布草稿时不应每 30 分钟就把下一步拉回“重新测试”。
-  const selectedNeedsRetest = Boolean(selectedSource && (
-    validationStatusOf(selectedSource) !== 'PASSED'
-    || (connectionReceiptExpired(selectedSource) && (selectedPendingDraft || publicationStatusOf(selectedSource) !== 'PUBLISHED'))
-  ))
+  // 成功测试永久绑定当前配置版本；只有当前草稿尚未通过测试时才引导重新测试。
+  const selectedNeedsRetest = Boolean(selectedSource && validationStatusOf(selectedSource) !== 'PASSED')
   const selectedNextAction = !selectedSource
     ? ''
     : !selectedCanManage
@@ -1375,9 +1393,8 @@ export function DataSourceCenterPage() {
   return (
     <AppShell
       className={`data-source-shell${selectedSource ? ' has-detail' : ''}${qaViewport1920 ? ' qa-viewport-1920' : ''}`}
-      title="数据资产"
-      eyebrow="数据与治理"
-      titleMeta={<span className="data-source-title-meta">管理当前领域的数据连接、验证状态与元数据资产</span>}
+      title="数据源"
+      titleMeta={<span className="data-source-title-meta">连接、验证与元数据资产</span>}
       actions={<>
         <AppButton className="data-source-ai-entry" type="button" onClick={() => setAssistantOpen(true)}><Sparkle size={17} weight="fill" />AI 配置</AppButton>
         <AppButton variant="primary" className="data-source-create-button" onClick={openCreate}><Plus size={17} weight="bold" />新建数据源</AppButton>
@@ -1399,7 +1416,7 @@ export function DataSourceCenterPage() {
         <section className="data-source-catalog" aria-labelledby="data-source-catalog-title">
           <div className="data-source-filters" aria-label="数据源筛选">
             <label className="data-source-search"><span className="data-source-search-control"><MagnifyingGlass size={18} /><input aria-label="搜索数据源" type="search" value={keyword} onChange={event => setKeyword(event.target.value)} placeholder="搜索数据源名称、编码或用途" /></span></label>
-            <label><select aria-label="按类型筛选" value={typeFilter} onChange={event => setTypeFilter(event.target.value as DataSourceType | 'ALL')}><option value="ALL">全部类型</option><option value="MYSQL">MySQL</option><option value="ORACLE">Oracle</option><option value="EXCEL">Excel / CSV</option></select></label>
+            <label><select aria-label="按类型筛选" value={typeFilter} onChange={event => setTypeFilter(event.target.value as DataSourceType | 'ALL')}><option value="ALL">全部类型</option>{databaseDriverDefinitions.map(driver => <option value={driver.type} key={driver.type}>{driver.label}</option>)}<option value="EXCEL">Excel / CSV</option></select></label>
             <label><select aria-label="按状态筛选" value={statusFilter} onChange={event => setStatusFilter(event.target.value as DataSourceStatus | 'ALL')}><option value="ALL">全部状态</option>{Object.entries(statusLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
             <AppButton className="data-source-filter-reset" type="button" aria-label="重置筛选" title="重置筛选" onClick={() => { setKeyword(''); setTypeFilter('ALL'); setStatusFilter('ALL') }}><ArrowClockwise size={17} /><span>重置</span></AppButton>
           </div>
@@ -1422,6 +1439,10 @@ export function DataSourceCenterPage() {
                 const unavailable = source.status === 'SYNCING' || source.status === 'DELETING'
                 const canManage = Boolean(sourceManagePermissions[source.id])
                 const canTest = canManage && !unavailable && reviewStatus !== 'PENDING'
+                const pendingDraft = hasUnpublishedDraft(source)
+                const canPublish = canManage && !unavailable && pendingDraft && reviewStatus !== 'PENDING' && validationStatusOf(source) === 'PASSED'
+                const isRequester = !signedInSubject || source.reviewRequesterId === signedInSubject
+                const menuOpen = actionMenuSourceId === source.id
                 const subtitle = `${typeLabels[source.type]} · ${source.code}${source.description ? ` · ${source.description}` : ''}`
                 const health = connectionHealth(source)
                 const readiness = metadataReadiness(source, assetStats[source.id])
@@ -1435,13 +1456,21 @@ export function DataSourceCenterPage() {
                     </span>
                     <span className="data-source-type-cell" role="cell"><strong>{source.type === 'EXCEL' ? '文件数据源' : '数据库'}</strong><small>{typeLabels[source.type]}</small></span>
                     <span className={`data-source-health-cell is-${health.tone}`} role="cell"><strong><i />{health.label}</strong><small title={health.detail}>{health.detail}</small></span>
-                    <span className="data-source-test-cell" role="cell"><strong className={`is-${effectiveValidationStatus(source).toLowerCase()}`}>{validationLabel(source)}</strong><small>{formatDataSourceTime(source.lastTestedAt || source.updatedAt)}</small></span>
+                    <span className="data-source-test-cell" role="cell"><strong className={`is-${validationStatusOf(source).toLowerCase()}`}>{validationLabel(source)}</strong><small>{formatDataSourceTime(source.lastTestedAt || source.updatedAt)}</small></span>
                     <span className="data-source-readiness-cell" role="cell"><strong>{readiness === null ? publicationLabels[publicationStatusOf(source)] : `${readiness}%`}</strong>{readiness === null ? <small title="进入数据表资产查看元数据完善进度">查看进度</small> : <progress aria-label={`${source.name}元数据完善度`} max="100" value={readiness} />}</span>
                   </AppButton>
                   <div className="data-source-actions" role="cell">
                     {canManage && <AppButton className="action-test" type="button" disabled={actionBusy || !canTest} onClick={() => void testConnection(source)}>{busyAction === `test:${source.id}` ? '测试中…' : '测试连接'}</AppButton>}
+                    <AppButton className="action-assets" type="button" disabled={reviewLocked} title={reviewLocked ? '审核完成后可查看数据表资产' : undefined} onClick={() => openAssetWorkspace(source)}>{canManage ? '资产配置' : '查看资产'}</AppButton>
                     {canManage && <AppButton className="action-edit" type="button" disabled={actionBusy || unavailable || reviewStatus === 'PENDING' || source.type === 'EXCEL'} aria-label={`编辑${source.name}`} onClick={() => openExisting('edit', source)}><PencilSimple size={15} /><span>编辑</span></AppButton>}
-                    <AppButton text circle className="action-more" type="button" disabled={reviewLocked} aria-label={`${canManage ? '管理' : '查看'}${source.name}的数据表资产`} title={reviewLocked ? '审核完成后可查看数据表资产' : canManage ? '管理数据表资产' : '查看数据表资产'} onClick={() => openAssetWorkspace(source)}><DotsThree size={19} weight="bold" /></AppButton>
+                    {(canManage || (reviewStatus === 'PENDING' && isRequester)) && <div className="data-source-more">
+                      <AppButton text circle className="action-more" type="button" aria-haspopup="menu" aria-expanded={menuOpen} aria-label={`更多${source.name}操作`} title="更多操作" onClick={() => setActionMenuSourceId(current => current === source.id ? '' : source.id)}><DotsThree size={19} weight="bold" /></AppButton>
+                      {menuOpen && <div className="data-source-more-menu" role="menu" aria-label={`${source.name}更多操作`}>
+                        {canManage && pendingDraft && reviewStatus !== 'PENDING' && <AppButton text type="button" role="menuitem" disabled={actionBusy || !canPublish} title={canPublish ? undefined : '连接测试通过后才能提交审批'} onClick={() => { setActionMenuSourceId(''); void publishSource(source) }}>提交审批</AppButton>}
+                        {reviewStatus === 'PENDING' && isRequester && <AppButton text type="button" role="menuitem" disabled={actionBusy} onClick={() => { setActionMenuSourceId(''); void withdrawReview(source) }}>撤销申请</AppButton>}
+                        {canManage && <AppButton text type="button" role="menuitem" className="menu-danger" disabled={actionBusy || unavailable || reviewStatus === 'PENDING'} onClick={() => { setActionMenuSourceId(''); void openRetirement(source) }}>安全下架</AppButton>}
+                      </div>}
+                    </div>}
                   </div>
                 </article>
               })}</div>}
@@ -1459,17 +1488,10 @@ export function DataSourceCenterPage() {
           </div>
           <AppButton text circle className="data-source-inspector-close" type="button" aria-label="关闭数据源详情" title="关闭" onClick={() => setSelectedSourceId('')}><X size={17} /></AppButton>
         </header>
-        <div className="data-source-inspector-actions">
-          {selectedCanManage && <AppButton variant="primary" className="action-test" type="button" disabled={actionBusy || !selectedCanTest} onClick={() => void testConnection(selectedSource)}>{busyAction === `test:${selectedSource.id}` ? '测试中…' : '测试连接'}</AppButton>}
-          {selectedCanManage && <AppButton className="action-edit" type="button" disabled={actionBusy || selectedUnavailable || selectedReviewStatus === 'PENDING' || selectedSource.type === 'EXCEL'} onClick={() => openExisting('edit', selectedSource)}><PencilSimple size={15} />编辑</AppButton>}
-          <AppButton className="action-assets" type="button" disabled={selectedReviewStatus === 'PENDING' || selectedReviewStatus === 'REJECTED'} onClick={() => openAssetWorkspace(selectedSource)}>{selectedCanManage ? '管理资产' : '查看资产'}</AppButton>
-          {selectedCanManage && <AppButton className="action-retire" type="button" disabled={actionBusy || selectedUnavailable || selectedReviewStatus === 'PENDING'} onClick={() => void openRetirement(selectedSource)}><WarningCircle size={15} />安全下架</AppButton>}
-        </div>
-
         <div className="data-source-inspector-scroll">
           <section className="data-source-inspector-card lifecycle-card">
             <header><strong>生命周期状态</strong><span className={`data-source-status ${selectedReviewStatus === 'PENDING' ? 'review-pending' : selectedReviewStatus === 'REJECTED' ? 'review-rejected' : selectedSource.status.toLowerCase()}`}>{lifecycleLabel(selectedSource)}</span></header>
-            <ol>{selectedLifecycle.map((step, index) => <li className={step.complete ? 'is-complete' : ''} key={step.label}>{step.complete ? <CheckCircle size={21} weight="fill" /> : <Circle size={21} />}<span>{step.label}<small>{index === 0 ? '连接配置' : index === 1 ? `${formatDataSourceTime(selectedSource.lastTestedAt)}${connectionReceiptExpired(selectedSource) ? ' · 需复验' : ''}` : index === 2 ? publicationLabels[publicationStatusOf(selectedSource)] : selectedReadiness === null ? '进入资产查看' : `${selectedReadiness}%`}</small></span></li>)}</ol>
+            <ol>{selectedLifecycle.map((step, index) => <li className={step.complete ? 'is-complete' : ''} key={step.label}>{step.complete ? <CheckCircle size={21} weight="fill" /> : <Circle size={21} />}<span>{step.label}<small>{index === 0 ? '连接配置' : index === 1 ? `${formatDataSourceTime(selectedSource.lastTestedAt)}` : index === 2 ? publicationLabels[publicationStatusOf(selectedSource)] : selectedReadiness === null ? '进入资产查看' : `${selectedReadiness}%`}</small></span></li>)}</ol>
           </section>
 
           <section className="data-source-inspector-card">
@@ -1487,14 +1509,14 @@ export function DataSourceCenterPage() {
           </section>
 
           <section className="data-source-inspector-card">
-            <header><strong>最近测试结果</strong><span className={`receipt-status is-${effectiveValidationStatus(selectedSource).toLowerCase()}`}>{validationLabel(selectedSource)}</span></header>
+            <header><strong>最近测试结果</strong><span className={`receipt-status is-${validationStatusOf(selectedSource).toLowerCase()}`}>{validationLabel(selectedSource)}</span></header>
             <dl className="receipt-facts">
               {[
                 { label: '测试时间', value: formatDataSourceTime(selectedSource.lastTestedAt || selectedSource.updatedAt) },
                 { label: '连接健康', value: selectedHealth.label },
                 { label: '响应延迟', value: selectedHealth.detail },
                 { label: '配置版本', value: `v${selectedSource.configVersion || selectedSource.version}` },
-                { label: '有效期至', value: selectedSource.testExpiresAt ? formatDataSourceTime(selectedSource.testExpiresAt) : '需要重新测试' },
+                { label: '测试绑定', value: validationStatusOf(selectedSource) === 'PASSED' ? '当前配置长期有效' : '当前配置尚未通过测试' },
               ].map(fact => <div key={fact.label}><dt>{fact.label}</dt><dd title={fact.value}>{fact.value}</dd></div>)}
             </dl>
           </section>
@@ -1506,7 +1528,7 @@ export function DataSourceCenterPage() {
         </div>
 
         <footer className="data-source-next-action">
-          <div><Sparkle size={18} weight="fill" /><span><strong>下一步：{selectedNextAction}</strong><small>{!selectedCanManage ? '以只读方式查看已共享的数据表、字段定义与治理状态。' : selectedReviewStatus === 'PENDING' ? '审核通过后继续元数据发现与资产完善。' : selectedReviewStatus === 'REJECTED' ? (selectedSource.reviewNote || '根据审核意见修改配置后重新提交。') : selectedNeedsRetest ? '生成新的连接测试收据，确认当前配置可用。' : selectedPendingDraft ? '固定当前已验证版本并进入发布审核。' : selectedMetadataComplete ? '表与字段业务元数据已完善，可作为稳定输入创建数据集。' : '补充业务定义、指标口径与血缘关系。'}</small></span></div>
+          <div><Sparkle size={18} weight="fill" /><span><strong>下一步：{selectedNextAction}</strong><small>{!selectedCanManage ? '以只读方式查看已共享的数据表、字段定义与治理状态。' : selectedReviewStatus === 'PENDING' ? '审核通过后继续元数据发现与资产完善。' : selectedReviewStatus === 'REJECTED' ? (selectedSource.reviewNote || '根据审核意见修改配置后重新提交。') : selectedNeedsRetest ? '当前配置尚未通过连接测试，测试通过后即可继续发布。' : selectedPendingDraft ? '固定当前已验证版本并进入发布审核。' : selectedMetadataComplete ? '表与字段业务元数据已完善，可作为稳定输入创建数据集。' : '补充业务定义、指标口径与血缘关系。'}</small></span></div>
           <AppButton variant="primary" type="button" disabled={actionBusy || (selectedReviewStatus === 'PENDING' && !selectedIsRequester)} onClick={() => {
             if (!selectedCanManage) openAssetWorkspace(selectedSource)
             else if (selectedReviewStatus === 'PENDING') void withdrawReview(selectedSource)
@@ -1519,45 +1541,60 @@ export function DataSourceCenterPage() {
         </footer>
       </aside>}
 
-		{(dialog?.mode === 'create' || dialog?.mode === 'edit') && <Dialog title={dialog.mode === 'edit' ? '修改数据源' : '新建数据源'} wide={draft.type === 'EXCEL'} onClose={closeDialog}>
+		{(dialog?.mode === 'create' || dialog?.mode === 'edit') && <Dialog className="data-source-config-dialog" title={dialog.mode === 'edit' ? '修改数据源' : '新建数据源'} wide={draft.type === 'EXCEL'} onClose={closeDialog}>
         <form className="data-source-form" onSubmit={submitConnection}>
-          <div className="data-source-form-grid">
-            <label>数据源名称<input autoFocus value={draft.name} onChange={event => updateDraft('name', event.target.value)} placeholder="例如：销售业务库" /></label>
-            <label>数据源编码<input aria-label="数据源编码" maxLength={128} value={draft.code} onChange={event => updateDraft('code', event.target.value)} placeholder="例如：sales_mysql" /><small>以英文字母开头，仅支持英文字母、数字和下划线；中文文件名会自动转换为 MD5 编码。</small></label>
-            <label>数据源描述<input value={draft.description} onChange={event => updateDraft('description', event.target.value)} placeholder="说明数据范围、用途和使用边界" /></label>
-            <label>分享状态<select
-              aria-label="分享状态"
-              value={draft.sharingScope}
-              disabled={dialog.mode === 'edit' && (
-                dialog.source?.ownerId !== signedInSubject ||
-                dialog.source?.domainId !== selectedDomainID
-              )}
-              title={dialog.mode === 'edit' && (
-                dialog.source?.ownerId !== signedInSubject ||
-                dialog.source?.domainId !== selectedDomainID
-              ) ? '仅数据源持有者可以在资产所属领域修改共享状态' : undefined}
-              onChange={event => setDraft(current => ({ ...current, sharingScope: event.target.value as AssetSharingScope }))}
-            ><option value="PRIVATE">仅自己</option><option value="DOMAIN">领域内共享</option></select>{dialog.mode === 'edit' && (
-              dialog.source?.ownerId !== signedInSubject ||
-              dialog.source?.domainId !== selectedDomainID
-            ) && <small>仅数据源持有者可以在资产所属领域修改共享状态。</small>}</label>
-            <label>数据源类型<select value={draft.type} onChange={event => {
-				const type = event.target.value as DataSourceType
-				setExcelFile(null)
-				setExcelAsset(null)
-				setFormError('')
-              setDraft(current => ({ ...current, type, port: current.port === '3306' || current.port === '1521' ? (type === 'ORACLE' ? '1521' : '3306') : current.port }))
-			}}><option value="MYSQL">MySQL</option><option value="ORACLE">Oracle</option>{dialog.mode === 'create' && <option value="EXCEL">Excel / CSV</option>}</select></label>
-			{draft.type !== 'EXCEL' && <>
-            <label>Host<input value={draft.host} onChange={event => updateDraft('host', event.target.value)} placeholder="db.example.internal" /></label>
-            <label>Port<input inputMode="numeric" value={draft.port} onChange={event => updateDraft('port', event.target.value)} placeholder={draft.type === 'ORACLE' ? '1521' : '3306'} /></label>
-            {draft.type === 'ORACLE' && <label>Oracle 连接模式<select value={draft.oracleConnectMode} onChange={event => updateDraft('oracleConnectMode', event.target.value as 'SERVICE_NAME' | 'SID')}><option value="SERVICE_NAME">Service Name</option><option value="SID">SID</option></select></label>}
-            <label>{draft.type === 'ORACLE' ? (draft.oracleConnectMode === 'SID' ? 'Oracle SID' : 'Oracle Service Name') : 'Database'}<input value={draft.database} onChange={event => updateDraft('database', event.target.value)} placeholder={draft.type === 'ORACLE' ? (draft.oracleConnectMode === 'SID' ? 'ORCL' : 'FREEPDB1') : 'sales'} /></label>
-            <label>Username<input autoComplete="username" value={draft.username} onChange={event => updateDraft('username', event.target.value)} placeholder="report_reader" /></label>
-            <label>Password{dialog.mode === 'edit' && <span className={`data-source-credential-state${draft.password ? ' is-rotating' : ''}`}>{draft.password ? '将轮换凭据' : '保留现有凭据'}</span>}<input aria-label="Password" type="password" autoComplete="new-password" value={draft.password} onChange={event => updateDraft('password', event.target.value)} placeholder={dialog.mode === 'edit' ? '留空表示保留原密码' : '请输入数据库密码'} /><small>{dialog.mode === 'edit' ? '密码不会回显；填写新值并测试成功后，草稿切换到新加密凭据，线上版本在审批通过前保持不变。' : '密码由服务端加密保存，不使用 JDBC 连接串。'}</small></label>
-			</>}
-          </div>
-			{draft.type === 'EXCEL' && <section className="excel-source-upload" aria-label="Excel 文件上传">
+			<div className="data-source-config-progress" aria-label="数据源配置流程">
+				<div className={basicConfigurationComplete ? 'is-complete' : 'is-current'}><IdentificationCard size={19} weight="duotone" /><span><strong>基本信息</strong><small>名称、编码与共享范围</small></span></div>
+				<div className={currentDraftTested || (basicConfigurationComplete && connectionConfigurationComplete) ? 'is-complete' : basicConfigurationComplete ? 'is-current' : 'is-pending'}><PlugsConnected size={19} weight="duotone" /><span><strong>连接配置</strong><small>类型、地址与安全凭据</small></span></div>
+				<div className={currentDraftTested ? 'is-complete' : basicConfigurationComplete && connectionConfigurationComplete ? 'is-current' : 'is-pending'}><ShieldCheck size={19} weight="duotone" /><span><strong>验证并提交</strong><small>{currentDraftTested ? '连接已验证，可提交审核' : '测试成功后开放提交'}</small></span></div>
+			</div>
+
+			<section className="data-source-config-section" aria-labelledby="data-source-basic-heading">
+				<header><span><IdentificationCard size={19} weight="duotone" /></span><div><strong id="data-source-basic-heading">基本信息</strong><small>用于识别、检索和控制数据源的可见范围</small></div></header>
+				<div className="data-source-form-grid">
+					<label>数据源名称<input autoFocus value={draft.name} onChange={event => updateDraft('name', event.target.value)} placeholder="例如：销售业务库" /></label>
+					<label>数据源编码<input aria-label="数据源编码" maxLength={128} value={draft.code} onChange={event => updateDraft('code', event.target.value)} placeholder="例如：sales_mysql" /><small>以英文字母开头，仅支持字母、数字和下划线。</small></label>
+					<label>数据源描述<input value={draft.description} onChange={event => updateDraft('description', event.target.value)} placeholder="说明数据范围、用途和使用边界" /></label>
+					<label>分享状态<select
+						aria-label="分享状态"
+						value={draft.sharingScope}
+						disabled={dialog.mode === 'edit' && (
+							dialog.source?.ownerId !== signedInSubject ||
+							dialog.source?.domainId !== selectedDomainID
+						)}
+						title={dialog.mode === 'edit' && (
+							dialog.source?.ownerId !== signedInSubject ||
+							dialog.source?.domainId !== selectedDomainID
+						) ? '仅数据源持有者可以在资产所属领域修改共享状态' : undefined}
+						onChange={event => setDraft(current => ({ ...current, sharingScope: event.target.value as AssetSharingScope }))}
+					><option value="PRIVATE">仅自己</option><option value="DOMAIN">领域内共享</option></select>{dialog.mode === 'edit' && (
+						dialog.source?.ownerId !== signedInSubject ||
+						dialog.source?.domainId !== selectedDomainID
+					) && <small>仅数据源持有者可以在资产所属领域修改共享状态。</small>}</label>
+				</div>
+			</section>
+
+			<section className="data-source-config-section" aria-labelledby="data-source-connection-heading">
+				<header><span><PlugsConnected size={19} weight="duotone" /></span><div><strong id="data-source-connection-heading">连接配置</strong><small>{draft.type === 'EXCEL' ? '上传受支持的文件并自动生成稳定连接标识' : '填写数据库地址和只读账号，密码仅加密保存'}</small></div></header>
+				<div className="data-source-form-grid">
+					<label>数据源类型<select value={draft.type} onChange={event => {
+						const type = event.target.value as DataSourceType
+						setExcelFile(null)
+						setExcelAsset(null)
+						setFormError('')
+						const currentDefaults = new Set(databaseDriverDefinitions.map(driver => String(driver.defaultPort)))
+						setDraft(current => ({ ...current, type, port: currentDefaults.has(current.port) ? String(defaultDatabasePort(type) || current.port) : current.port }))
+					}}>{databaseDriverDefinitions.map(driver => <option value={driver.type} key={driver.type}>{driver.label}</option>)}{dialog.mode === 'create' && <option value="EXCEL">Excel / CSV</option>}</select></label>
+					{draft.type !== 'EXCEL' && <>
+						<label>Host<input value={draft.host} onChange={event => updateDraft('host', event.target.value)} placeholder="db.example.internal" /></label>
+						<label>Port<input inputMode="numeric" value={draft.port} onChange={event => updateDraft('port', event.target.value)} placeholder={String(defaultDatabasePort(draft.type) || 3306)} /></label>
+						{draft.type === 'ORACLE' && <label>Oracle 连接模式<select value={draft.oracleConnectMode} onChange={event => updateDraft('oracleConnectMode', event.target.value as 'SERVICE_NAME' | 'SID')}><option value="SERVICE_NAME">Service Name</option><option value="SID">SID</option></select></label>}
+						<label>{draft.type === 'ORACLE' ? (draft.oracleConnectMode === 'SID' ? 'Oracle SID' : 'Oracle Service Name') : 'Database'}<input value={draft.database} onChange={event => updateDraft('database', event.target.value)} placeholder={draft.type === 'ORACLE' ? (draft.oracleConnectMode === 'SID' ? 'ORCL' : 'FREEPDB1') : 'sales'} /></label>
+						<label>Username<input autoComplete="username" value={draft.username} onChange={event => updateDraft('username', event.target.value)} placeholder="report_reader" /></label>
+						<label>Password{dialog.mode === 'edit' && <span className={`data-source-credential-state${draft.password ? ' is-rotating' : ''}`}>{draft.password ? '将轮换凭据' : '保留现有凭据'}</span>}<input aria-label="Password" type="password" autoComplete="new-password" value={draft.password} onChange={event => updateDraft('password', event.target.value)} placeholder={dialog.mode === 'edit' ? '留空表示保留原密码' : '请输入数据库密码'} /><small>{dialog.mode === 'edit' ? '密码不会回显；新凭据仅在测试成功并审核通过后生效。' : '密码由服务端加密保存，不使用 JDBC 连接串。'}</small></label>
+					</>}
+				</div>
+				{draft.type === 'EXCEL' && <section className="excel-source-upload" aria-label="Excel 文件上传">
 				<header><div><strong>{replacingFileSource ? '覆盖数据源文件' : '上传文件并创建数据源'}</strong><small>选择文件后自动填写数据源名称和稳定编码；相同编码会覆盖当前源文件并保留历史版本。</small></div><span>.xlsx / .xls / .csv</span></header>
 				<div className="excel-source-file-row upload-only">
 					<div className="excel-source-file-picker">
@@ -1577,16 +1614,17 @@ export function DataSourceCenterPage() {
 				{replacingFileSource && <div className="excel-source-replace-note" role="status">已识别已有数据源“{replacingFileSource.name}”。提交后会将文件资产切换到新版本，不会重复创建数据源。</div>}
 				<small className="excel-source-next-step">完成后先测试并上线，再进入“数据表资产”解析每个 Sheet；LLM 默认只使用技术元数据，业务样本必须在任务中另行明确授权。</small>
 				</section>}
+			</section>
 	          {draft.type !== 'EXCEL' && <div className={`data-source-test-readiness${currentDraftTested ? ' ready' : ''}`} role="status">
-	            <span aria-hidden="true">{currentDraftTested ? '✓' : '1'}</span>
-	            <div><strong>{currentDraftTested ? '当前配置已通过连接测试' : '先测试当前配置，再提交发布审核'}</strong><small>{currentDraftTested ? '发布按钮已启用；提交后数据源进入审核中状态。' : '测试会先保存表单草稿；修改任何连接字段后，需要重新测试。'}</small></div>
+	            <span aria-hidden="true">{currentDraftTested ? <CheckCircle size={18} weight="fill" /> : <ShieldCheck size={18} weight="duotone" />}</span>
+	            <div><strong>{currentDraftTested ? '连接验证已完成' : '完成连接测试后即可继续'}</strong><small>{currentDraftTested ? '当前配置版本已锁定，可以提交发布审核。' : '测试会安全保存表单草稿；修改连接信息后需要重新测试。'}</small></div>
 	          </div>}
 	          {formError && <div className="data-source-feedback error" role="alert">{formError}</div>}
 				{draft.type === 'EXCEL'
-				  ? <footer><AppButton className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</AppButton><AppButton variant="primary" className="primary-button" type="submit" disabled={actionBusy}>{actionBusy ? replacingFileSource ? '正在覆盖源文件…' : '正在上传并创建…' : replacingFileSource ? '覆盖并更新源文件' : '上传并创建数据源'}</AppButton></footer>
+				  ? <footer className="data-source-config-footer is-file-source"><span /><span><AppButton className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</AppButton><AppButton variant="primary" className="primary-button" type="submit" disabled={actionBusy}>{actionBusy ? replacingFileSource ? '正在覆盖源文件…' : '正在上传并创建…' : replacingFileSource ? '覆盖并更新源文件' : '上传并创建数据源'}</AppButton></span></footer>
 				  : <footer className="data-source-config-footer">
 				      <AppButton className="test-connection-button" type="submit" disabled={actionBusy}>{busyAction.startsWith('form-test:') ? '正在保存并测试…' : '测试连接'}</AppButton>
-				      <span><AppButton className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</AppButton><AppButton variant="primary" className="primary-button" type="button" disabled={actionBusy || !currentDraftTested} title={currentDraftTested ? '提交当前测试版本进入发布审核' : '请先测试当前表单并确保连接成功'} onClick={() => void submitDraftForReview()}>{busyAction.startsWith('review-submit:') ? '正在提交…' : '发布'}</AppButton></span>
+				      <span><AppButton className="quiet-button" type="button" disabled={actionBusy} onClick={closeDialog}>取消</AppButton><AppButton variant="primary" className="primary-button" type="button" disabled={actionBusy || !currentDraftTested} title={currentDraftTested ? '提交当前测试版本进入发布审核' : '请先测试当前表单并确保连接成功'} onClick={() => void submitDraftForReview()}>{busyAction.startsWith('review-submit:') ? '正在提交…' : dialog.mode === 'create' ? '创建数据源' : '发布'}</AppButton></span>
 				    </footer>}
 	        </form>
       </Dialog>}
@@ -1748,6 +1786,7 @@ export function DataSourceCenterPage() {
         open={assistantOpen}
         onOpenChange={setAssistantOpen}
         hideLauncher
+        previewMode={aiSuccessPreview ? 'success' : undefined}
         onSourceChanged={source => {
           setSources(current => {
             const exists = current.some(item => item.id === source.id)
@@ -1762,6 +1801,6 @@ export function DataSourceCenterPage() {
   )
 }
 
-function Dialog({ title, children, wide = false, onClose }: { title: string; children: ReactNode; wide?: boolean; onClose: () => void }) {
-  return <div className="data-source-dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><section className={`data-source-dialog${wide ? ' wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby="data-source-dialog-title"><header><div><span className="eyebrow">数据源配置</span><h2 id="data-source-dialog-title">{title}</h2></div><AppButton text circle aria-label={`关闭${title}`} onClick={onClose}><X size={18} /></AppButton></header>{children}</section></div>
+function Dialog({ title, children, wide = false, className = '', onClose }: { title: string; children: ReactNode; wide?: boolean; className?: string; onClose: () => void }) {
+  return <div className="data-source-dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><section className={`data-source-dialog${wide ? ' wide' : ''}${className ? ` ${className}` : ''}`} role="dialog" aria-modal="true" aria-labelledby="data-source-dialog-title"><header><span className="data-source-dialog-heading-icon"><Database size={20} weight="duotone" /></span><div><span className="eyebrow">数据源配置</span><h2 id="data-source-dialog-title">{title}</h2></div><AppButton text circle aria-label={`关闭${title}`} onClick={onClose}><X size={18} /></AppButton></header>{children}</section></div>
 }

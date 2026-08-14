@@ -1,5 +1,5 @@
 import { forwardRef, useMemo, useState, type DragEvent, type ReactNode } from 'react'
-import { RowsIcon } from '@phosphor-icons/react'
+import { CaretDownIcon, CaretRightIcon, DatabaseIcon, MagnifyingGlassIcon, RowsIcon, TreeStructureIcon } from '@phosphor-icons/react'
 import type { AssetTable, DesignerNode } from '../../lib/datasets'
 
 export type DatasetAssetSourceGroup = {
@@ -7,8 +7,7 @@ export type DatasetAssetSourceGroup = {
   name: string
   type: string
   tables: AssetTable[]
-  datasetTables: AssetTable[]
-  physicalSourceGroups: Array<{
+  dataSourceGroups: Array<{
     id: string
     name: string
     type: string
@@ -25,6 +24,8 @@ type DatasetAssetSidebarProps = {
 
 function DatasetAssetSidebar({ loading, groups, nodes, onSelectTable }: DatasetAssetSidebarProps) {
   const [query, setQuery] = useState('')
+  const [collapsedLayers, setCollapsedLayers] = useState<Set<string>>(new Set())
+  const [collapsedSources, setCollapsedSources] = useState<Set<string>>(new Set())
   const normalizedQuery = query.trim().toLocaleLowerCase()
   const instanceCountByTableID = useMemo(() => nodes.reduce<Record<string, number>>((counts, node) => {
     counts[node.table.id] = (counts[node.table.id] ?? 0) + 1
@@ -37,13 +38,12 @@ function DatasetAssetSidebar({ loading, groups, nodes, onSelectTable }: DatasetA
     table.dataSourceName,
   ].some(value => value?.toLocaleLowerCase().includes(normalizedQuery))
   const visibleCount = groups.reduce((total, group) => total +
-    group.physicalSourceGroups.reduce((subtotal, source) => subtotal + source.tables.filter(matches).length, 0) +
-    group.datasetTables.filter(matches).length, 0)
+    group.dataSourceGroups.reduce((subtotal, source) => subtotal + source.tables.filter(matches).length, 0), 0)
 
   const sourceButton = (table: AssetTable, detail: string) => {
     const instanceCount = instanceCountByTableID[table.id] ?? 0
     return <button
-      className="dataset-flat-source-item"
+      className={`dataset-flat-source-item${instanceCount > 0 ? ' is-referenced' : ''}`}
       key={table.id}
       type="button"
       draggable
@@ -62,13 +62,20 @@ function DatasetAssetSidebar({ loading, groups, nodes, onSelectTable }: DatasetA
     </button>
   }
 
+  const toggleCollapsed = (setter: typeof setCollapsedLayers, id: string) => setter(current => {
+    const next = new Set(current)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
+
   return <aside className="dataset-template-tree" aria-label="数据集清单">
     <header>
-      <div><strong>数据集清单</strong><small>纵向平铺 · 点击或拖入画布</small></div>
+      <div className="dataset-template-tree-title"><span aria-hidden="true"><RowsIcon size={18} weight="duotone" /></span><div><strong>数据集清单</strong><small>点击或拖入画布</small></div></div>
       <span>{visibleCount}</span>
     </header>
     <label className="dataset-source-search">
-      <span>搜索</span>
+      <span aria-hidden="true"><MagnifyingGlassIcon size={16} /></span>
       <input
         type="search"
         value={query}
@@ -79,27 +86,42 @@ function DatasetAssetSidebar({ loading, groups, nodes, onSelectTable }: DatasetA
     </label>
     {loading ? <p className="dataset-source-loading">正在加载数据资产…</p> : <div className="dataset-flat-source-list">
       {groups.map(group => {
-        const physicalSources = group.physicalSourceGroups.map(source => ({
+        const dataSources = group.dataSourceGroups.map(source => ({
           ...source,
           tables: source.tables.filter(matches),
         })).filter(source => source.tables.length)
-        const datasetTables = group.datasetTables.filter(matches)
-        const layerCount = physicalSources.reduce((total, source) => total + source.tables.length, 0) + datasetTables.length
+        const layerCount = dataSources.reduce((total, source) => total + source.tables.length, 0)
         if (normalizedQuery && !layerCount) return null
-        return <section className="dataset-flat-layer" key={group.id} aria-label={group.name}>
+        const layerCollapsed = !normalizedQuery && collapsedLayers.has(group.id)
+        return <section className={`dataset-flat-layer ${layerCollapsed ? 'is-collapsed' : ''}`} key={group.id} aria-label={group.name}>
           <header>
-            <div><strong>{group.name}</strong><small>{group.type}</small></div>
+            <button type="button" className="dataset-source-disclosure" aria-expanded={!layerCollapsed} aria-label={`${layerCollapsed ? '展开' : '收起'}${group.name}`} onClick={() => toggleCollapsed(setCollapsedLayers, group.id)}>
+              {layerCollapsed ? <CaretRightIcon size={14} weight="bold" /> : <CaretDownIcon size={14} weight="bold" />}
+              <span><strong>{group.name}</strong><small>{group.type}</small></span>
+            </button>
             <span>{layerCount}</span>
           </header>
-          {!layerCount && <p className="source-tree-empty">暂无可用数据集</p>}
-          {physicalSources.flatMap(source => source.tables.map(table => sourceButton(
-            table,
-            `${source.name} · ${table.schemaName}.${table.tableName} · ${table.columnCount} 字段`,
-          )))}
-          {datasetTables.map(table => sourceButton(
-            table,
-            `已发布版本 · ${table.tableName} · ${table.columnCount} 字段`,
-          ))}
+          {!layerCollapsed && <>
+            {!layerCount && <p className="source-tree-empty">暂无可用数据集</p>}
+            {dataSources.map(source => {
+              const sourceKey = `${group.id}:${source.id}`
+              const sourceCollapsed = !normalizedQuery && collapsedSources.has(sourceKey)
+              return <section className={`dataset-data-source-group ${sourceCollapsed ? 'is-collapsed' : ''}`} key={sourceKey} aria-label={`数据源 ${source.name}`}>
+                <button type="button" className="dataset-data-source-heading" aria-expanded={!sourceCollapsed} title={source.name} onClick={() => toggleCollapsed(setCollapsedSources, sourceKey)}>
+                  {sourceCollapsed ? <CaretRightIcon size={13} weight="bold" /> : <CaretDownIcon size={13} weight="bold" />}
+                  <DatabaseIcon size={15} weight="duotone" aria-hidden="true" />
+                  <span><strong>{source.name}</strong><small>{source.type}</small></span>
+                  <em>{source.tables.length}</em>
+                </button>
+                {!sourceCollapsed && <div>{source.tables.map(table => sourceButton(
+                  table,
+                  table.sourceKind === 'DATASET'
+                    ? `${table.tableName} · ${table.columnCount} 字段`
+                    : `${table.schemaName}.${table.tableName} · ${table.columnCount} 字段`,
+                ))}</div>}
+              </section>
+            })}
+          </>}
         </section>
       })}
       {normalizedQuery && !visibleCount && <p className="dataset-source-no-results">没有匹配的数据集</p>}
@@ -164,11 +186,14 @@ export const DatasetDesignWorkspace = forwardRef<HTMLElement, DatasetDesignWorks
       {assistant}
       <section className={`dataset-node-graph ${nodes.length ? '' : 'is-empty'}`} aria-label="组件关系画布">
         <header className="dataset-graph-heading">
-          <div>
-            <strong>组件关系画布</strong>
-            <small>{nodes.length} 个数据节点 · {relationCount} 个关联 · {groupCount} 个分组 · {hasEnd ? '1 个结束节点' : '尚无结束节点'} · {transformCount} 个字段处理</small>
+          <div className="dataset-graph-heading-main">
+            <span aria-hidden="true"><TreeStructureIcon size={18} weight="duotone" /></span>
+            <div>
+              <strong>组件关系画布</strong>
+              <small>{nodes.length} 个数据节点 · {relationCount} 个关联 · {groupCount} 个分组 · {hasEnd ? '1 个结束节点' : '尚无结束节点'} · {transformCount} 个字段处理</small>
+            </div>
           </div>
-          <span>{notice || '拖入组件并连线，结束节点定义最终产物'}</span>
+          <span className="dataset-graph-status">{notice || '拖入组件并连线，结束节点定义最终产物'}</span>
         </header>
         {canvas}
       </section>

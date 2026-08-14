@@ -42,7 +42,7 @@ const sourceProjection = `source.id::text,source.tenant_id::text,source.code::te
 	COALESCE(published_version.version_no,0),config_version.config_hash,
 	source.validation_status,source.publication_status,
 	source.current_draft_version_id IS DISTINCT FROM source.current_published_version_id,
-	source.last_tested_at,source.test_expires_at,
+	source.last_tested_at,
 	COALESCE(source.created_by::text,''),COALESCE(source.updated_by::text,''),
 	source.created_at,source.updated_at,source.version`
 
@@ -236,7 +236,7 @@ func (r *PostgresRepository) Update(ctx context.Context, s Source) (Source, erro
 				secret_ref=CASE WHEN current_published_version_id IS NULL THEN NULLIF($9,'') ELSE secret_ref END,
 				file_asset_id=CASE WHEN current_published_version_id IS NULL THEN NULLIF($10,'')::uuid ELSE file_asset_id END,
 				current_draft_version_id=$11,validation_status='UNTESTED',
-				last_tested_version_id=NULL,last_tested_config_hash=NULL,test_expires_at=NULL,last_tested_at=NULL,
+				last_tested_version_id=NULL,last_tested_config_hash=NULL,last_tested_at=NULL,
 				status=CASE WHEN current_published_version_id IS NULL THEN 'DRAFT'::platform.data_source_status ELSE status END,
 				last_error=CASE WHEN current_published_version_id IS NULL THEN NULL ELSE last_error END,
 				updated_by=NULLIF($12,'')::uuid,connection_identity=NULLIF($15,''),version=version+1
@@ -270,15 +270,15 @@ func (r *PostgresRepository) RecordConnectionTest(ctx context.Context, tenantID,
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO platform.data_source_test_runs(
 				id,tenant_id,data_source_id,data_source_version_id,config_hash,status,server_version,
-				latency_ms,error_message,started_at,completed_at,expires_at)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+				latency_ms,error_message,started_at,completed_at)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
 			run.ID, tenantID, id, run.ConfigVersion, run.ConfigHash, run.Status,
-			run.ServerVersion, run.LatencyMS, run.ErrorMessage, run.StartedAt, run.CompletedAt, run.ExpiresAt); err != nil {
+			run.ServerVersion, run.LatencyMS, run.ErrorMessage, run.StartedAt, run.CompletedAt); err != nil {
 			return err
 		}
 		tag, err := tx.Exec(ctx, `UPDATE platform.data_sources SET
 				validation_status=$1,last_tested_at=$2,last_tested_version_id=$3,
-				last_tested_config_hash=$4,test_expires_at=$5,
+				last_tested_config_hash=$4,
 				status=CASE
 					WHEN current_published_version_id IS NULL AND $1='FAILED'
 					  THEN 'ERROR'::platform.data_source_status
@@ -291,13 +291,13 @@ func (r *PostgresRepository) RecordConnectionTest(ctx context.Context, tenantID,
 					WHEN current_published_version_id IS NULL THEN NULL
 					ELSE last_error
 				END
-			WHERE id=$6 AND deleted_at IS NULL
+			WHERE id=$5 AND deleted_at IS NULL
 			  AND current_draft_version_id=$3
 			  AND EXISTS(
 			    SELECT 1 FROM platform.data_source_versions
-			    WHERE id=$3 AND data_source_id=$6 AND config_hash=$4
+			    WHERE id=$3 AND data_source_id=$5 AND config_hash=$4
 			  )`,
-			run.Status, run.CompletedAt, run.ConfigVersion, run.ConfigHash, run.ExpiresAt, id)
+			run.Status, run.CompletedAt, run.ConfigVersion, run.ConfigHash, id)
 		if err != nil {
 			return err
 		}
@@ -309,7 +309,7 @@ func (r *PostgresRepository) RecordConnectionTest(ctx context.Context, tenantID,
 	return run, err
 }
 
-// Publish 原子校验当前草稿及其未过期测试证据，再切换运行时发布指针。
+// Publish 原子校验当前草稿绑定精确版本的成功测试证据，再切换运行时发布指针。
 func (r *PostgresRepository) Publish(ctx context.Context, tenantID, id, actorID, configVersionID, configHash string, _ time.Time) (published Source, err error) {
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
 		var currentVersionID, currentHash, currentPublishedVersionID string
@@ -324,14 +324,13 @@ func (r *PostgresRepository) Publish(ctx context.Context, tenantID, id, actorID,
 		if currentVersionID != configVersionID || currentHash != configHash {
 			return ErrSourceVersionChanged
 		}
-		// 已发布的同一精确版本是安全幂等重放，不重新解释已经过期的测试记录。
+		// 已发布的同一精确版本是安全幂等重放。
 		if currentPublishedVersionID == currentVersionID {
 			return r.scanDraftSource(ctx, tx, id, &published)
 		}
-		var expiresAt time.Time
 		var valid bool
-		testErr := tx.QueryRow(ctx, `SELECT attestation.expires_at,
-				attestation.expires_at>clock_timestamp()
+		testErr := tx.QueryRow(ctx, `SELECT EXISTS(
+			SELECT 1
 			FROM platform.data_source_connection_test_attestations AS attestation
 			JOIN platform.data_source_connection_test_jobs AS job
 			  ON job.id=attestation.connection_test_job_id
@@ -344,16 +343,12 @@ func (r *PostgresRepository) Publish(ctx context.Context, tenantID, id, actorID,
 			  AND job.data_source_id=attestation.data_source_id
 			  AND job.data_source_version_id=attestation.data_source_version_id
 			  AND job.config_hash=attestation.config_hash
-			ORDER BY attestation.completed_at DESC
-			LIMIT 1`, id, currentVersionID, currentHash).Scan(&expiresAt, &valid)
-		if errors.Is(testErr, pgx.ErrNoRows) {
-			return ErrTestRequired
-		}
+		)`, id, currentVersionID, currentHash).Scan(&valid)
 		if testErr != nil {
 			return testErr
 		}
 		if !valid {
-			return ErrTestExpired
+			return ErrTestRequired
 		}
 		tag, err := tx.Exec(ctx, `UPDATE platform.data_sources AS source SET
 				current_published_version_id=source.current_draft_version_id,
@@ -392,7 +387,7 @@ func (r *PostgresRepository) UpdateStatus(ctx context.Context, tenantID, id stri
 		if status == StatusDeleted {
 			revokedReference := revokedSecretPrefix + "data-source/" + id
 			if _, err := tx.Exec(ctx, `UPDATE platform.data_sources
-				SET secret_ref=CASE WHEN source_type IN ('MYSQL','ORACLE') THEN $3 ELSE secret_ref END
+				SET secret_ref=CASE WHEN source_type<>'EXCEL' THEN $3 ELSE secret_ref END
 				WHERE tenant_id=$1 AND id=$2`, tenantID, id, revokedReference); err != nil {
 				return err
 			}
@@ -400,7 +395,7 @@ func (r *PostgresRepository) UpdateStatus(ctx context.Context, tenantID, id stri
 			// irreversible credential tombstone while the root is retiring. Every
 			// other version field remains append-only.
 			if _, err := tx.Exec(ctx, `UPDATE platform.data_source_versions
-				SET secret_ref=CASE WHEN source_type IN ('MYSQL','ORACLE') THEN $3 ELSE secret_ref END
+				SET secret_ref=CASE WHEN source_type<>'EXCEL' THEN $3 ELSE secret_ref END
 				WHERE tenant_id=$1 AND data_source_id=$2`, tenantID, id, revokedReference); err != nil {
 				return err
 			}
@@ -491,7 +486,7 @@ func (r *PostgresRepository) RetirementImpact(ctx context.Context, tenantID, id 
 		}
 		impact.BlockingDatasetCount = len(impact.Datasets)
 		impact.CanRetire = impact.BlockingDatasetCount == 0
-		impact.CredentialWillBeRevoked = sourceType == TypeMySQL || sourceType == TypeOracle
+		impact.CredentialWillBeRevoked = IsDatabaseType(sourceType)
 		impact.SourceFileWillBeRetained = sourceType == TypeExcel
 		return nil
 	})
@@ -577,7 +572,7 @@ func scanSource(row rowScanner, s *Source) error {
 		&s.FileAssetID, &s.FileVersionID,
 		&s.ConfigVersionID, &s.PublishedVersionID, &s.ConfigVersion, &s.PublishedConfigVersion,
 		&s.ConfigHash, &s.ValidationStatus, &s.PublicationStatus, &s.HasUnpublishedChanges,
-		&s.LastTestedAt, &s.TestExpiresAt, &s.CreatedBy, &s.UpdatedBy,
+		&s.LastTestedAt, &s.CreatedBy, &s.UpdatedBy,
 		&s.CreatedAt, &s.UpdatedAt, &s.Version,
 	); err != nil {
 		return err

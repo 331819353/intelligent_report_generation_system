@@ -38,7 +38,7 @@ func CompileExtractionScan(input ScanInput) (CompiledQuery, error) {
 }
 
 func compileScan(input ScanInput, maximumRows int, sqlLimit bool) (CompiledQuery, error) {
-	if input.Dialect != MySQL && input.Dialect != Oracle && input.Dialect != PostgreSQL {
+	if !supportedDialect(input.Dialect) {
 		return CompiledQuery{}, errors.New("unsupported query dialect")
 	}
 	if err := dataset.Validate(input.Document); err != nil {
@@ -141,6 +141,8 @@ func compileScan(input ScanInput, maximumRows int, sqlLimit bool) (CompiledQuery
 		// 当成完整结果；构建流则由 Connector 逐批检测上限。
 		if input.Dialect == Oracle {
 			sql += " FETCH FIRST " + c.bind(input.MaxRows) + " ROWS ONLY"
+		} else if input.Dialect == SQLServer {
+			sql += " ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT " + c.bind(input.MaxRows) + " ROWS ONLY"
 		} else {
 			sql += " LIMIT " + c.bind(input.MaxRows)
 		}

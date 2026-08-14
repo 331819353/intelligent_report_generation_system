@@ -43,12 +43,12 @@ export function DatasetComponentToolbar({
 }: DatasetComponentToolbarProps) {
   return <aside className="dataset-component-toolbar" aria-label="画布组件栏">
     <div className="dataset-component-toolbar-heading">
-      <strong>组件</strong>
-      <small>鼠标移入显示半圆端口，拖线时显示全部可连接端口</small>
+      <strong>组件库</strong>
+      <small>选择或拖入画布</small>
     </div>
     <div className="dataset-component-palette">
       <section className="dataset-component-palette-group component-flow" aria-label="流程组件">
-        <header><strong>流程组件</strong><small>按拼音 A–Z</small></header>
+        <header><strong>流程组件</strong></header>
         <button type="button" draggable onDragStart={event => startDrag(event, 'GROUP')} onClick={onAddGroup}>
           <RowsIcon data-component-icon="GROUP" aria-hidden="true" size={18} weight="bold" />
           <strong>分组组件</strong><small>可添加多个 / 分组聚合</small>
@@ -63,7 +63,7 @@ export function DatasetComponentToolbar({
         </button>
       </section>
       {categories.map(category => <section key={category.category} className={`dataset-component-palette-group ${category.className}`} aria-label={category.label}>
-        <header><strong>{category.label}</strong><small>按拼音 A–Z</small></header>
+        <header><strong>{category.label}</strong></header>
         {components
           .filter(item => item.category === category.category)
           .sort((left, right) => left.sortKey.localeCompare(right.sortKey, 'en'))

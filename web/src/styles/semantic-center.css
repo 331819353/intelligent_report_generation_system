@@ -903,3 +903,169 @@
   .semantic-row-access-list { grid-template-columns: minmax(0, 1fr); }
   .semantic-row-access-condition { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Visual refresh: keep the page title quiet and let the semantic catalog own the screen. */
+.semantic-center-shell > .main-stage { padding: 0 24px 24px; background: var(--canvas); }
+.semantic-center-shell .topbar { height: 88px; padding-inline: 0; }
+.semantic-center-shell .topbar h1 { color: var(--ink); font-size: 24px; font-weight: 680; letter-spacing: -.025em; }
+.semantic-center-shell .topbar-actions .app-button { min-height: 38px; border-radius: var(--radius-control); padding-inline: 15px; font-size: 13px; }
+.semantic-stage { grid-template-rows: 66px 68px 72px minmax(0, 1fr); gap: 12px; }
+.semantic-intro h2 { margin: 3px 0; color: var(--ink); font-size: 18px; font-weight: 660; letter-spacing: -.015em; }
+.semantic-intro p, .semantic-summary em, .semantic-flow small { color: var(--muted); font-size: 12px; }
+.semantic-domain-readiness strong { color: var(--ink); font-size: 27px; }
+.semantic-flow,
+.semantic-summary,
+.semantic-workbench,
+.semantic-release-list > article,
+.semantic-ops-grid,
+.semantic-ops-metrics article { border-color: var(--line-strong); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.semantic-flow { background: rgb(255 255 255 / 82%); }
+.semantic-flow li { padding: 10px 20px; }
+.semantic-flow li + li { border-color: var(--line); }
+.semantic-flow li.is-active { background: #f4f8fd; }
+.semantic-flow li.is-active::before { top: 13px; bottom: 13px; border-radius: 3px; }
+.semantic-summary { background: #fff; }
+.semantic-summary article { padding: 11px 18px; }
+.semantic-summary article + article { border-color: var(--line); }
+.semantic-summary article > span { width: 36px; height: 36px; border-radius: 10px; }
+.semantic-summary strong { color: var(--ink); font-size: 21px; }
+.semantic-workbench { overflow: hidden; background: #fff; }
+.semantic-tabs { gap: 6px; padding: 12px 10px; border-color: var(--line); background: #f8fafc; }
+.semantic-tabs button { min-height: 58px; border-radius: 10px; padding: 8px 10px; }
+.semantic-tabs button:hover { border-color: var(--line-strong); box-shadow: 0 5px 14px rgb(31 47 70 / 5%); }
+.semantic-tabs button.is-active { border-color: #d9e7f8; background: #eef5fd; box-shadow: inset 3px 0 #0872d3; }
+.semantic-content > header { min-height: 68px; border-color: var(--line); padding: 10px 16px; }
+.semantic-content > header h3 { color: var(--ink); font-size: 17px; font-weight: 660; }
+.semantic-toolbar { min-height: 54px; border-color: var(--line); padding: 8px 16px; background: #fafbfd; }
+.semantic-toolbar label, .semantic-toolbar > div { height: 38px; border-color: var(--line-strong); border-radius: var(--radius-control); }
+.semantic-toolbar label:focus-within, .semantic-toolbar > div:focus-within { border-color: #7eb3e5; box-shadow: var(--focus-ring); }
+.semantic-object-head { min-height: 40px; border-color: var(--line); background: #f7f9fc; }
+.semantic-object-table article { min-height: 82px; border-color: var(--line); }
+.semantic-object-table article:hover { background: #f7faff; }
+.semantic-object-name > i { border: 0; border-radius: 10px; background: #edf5fd; }
+.semantic-row-button.app-button { border-radius: 8px; }
+.semantic-release-list, .semantic-operations { background: #f8fafc; }
+.semantic-release-list > article { border-color: var(--line-strong); box-shadow: none; }
+.semantic-release-list > article:hover { border-color: #cbddef; box-shadow: 0 8px 22px rgb(31 47 70 / 6%); }
+.semantic-ops-grid, .semantic-ops-metrics article { box-shadow: none; }
+
+/* Semantic governance dialogs share one quiet, scalable shell. */
+.semantic-dialog-backdrop {
+  padding: 28px;
+  background: rgb(31 47 70 / 42%);
+  backdrop-filter: blur(7px);
+}
+
+.semantic-builder-dialog,
+.semantic-detail-dialog,
+.semantic-governance-dialog,
+.semantic-evaluation-dialog,
+.semantic-approval-dialog,
+.semantic-rollout-dialog,
+.semantic-diagnostic-dialog,
+.semantic-quality-dialog,
+.semantic-row-access-dialog {
+  max-height: calc(100dvh - 56px);
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  box-shadow: 0 24px 72px rgb(31 47 70 / 18%);
+}
+
+.semantic-builder-dialog { width: min(1680px, calc(100vw - 64px)); height: min(920px, calc(100dvh - 64px)); grid-template-rows: 84px minmax(0, 1fr) 68px; }
+.semantic-row-access-dialog { width: min(740px, calc(100vw - 56px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+
+.semantic-builder-dialog > header,
+.semantic-detail-dialog > header,
+.semantic-governance-dialog > header,
+.semantic-evaluation-dialog > header,
+.semantic-approval-dialog > header,
+.semantic-rollout-dialog > header,
+.semantic-diagnostic-dialog > header,
+.semantic-quality-dialog > header,
+.semantic-row-access-dialog > header {
+  min-height: 82px;
+  align-items: center;
+  padding: 16px 22px;
+  border-color: var(--line);
+  background: rgb(255 255 255 / 98%);
+}
+
+.semantic-builder-dialog > header h2,
+.semantic-detail-dialog > header h2,
+.semantic-governance-dialog > header h2,
+.semantic-evaluation-dialog > header h2,
+.semantic-approval-dialog > header h2,
+.semantic-rollout-dialog > header h2,
+.semantic-diagnostic-dialog > header h2,
+.semantic-quality-dialog > header h2,
+.semantic-row-access-dialog h2 { color: var(--ink); font-size: 20px; font-weight: 680; letter-spacing: -.02em; }
+
+.semantic-builder-dialog > header span,
+.semantic-detail-dialog > header span,
+.semantic-governance-dialog > header span,
+.semantic-evaluation-dialog > header span,
+.semantic-approval-dialog > header span,
+.semantic-rollout-dialog > header span,
+.semantic-diagnostic-dialog > header span,
+.semantic-quality-dialog > header span,
+.semantic-row-access-dialog > header span { color: var(--muted); font-size: 11px; letter-spacing: .06em; }
+
+.semantic-builder-dialog > header > button,
+.semantic-detail-dialog > header button,
+.semantic-governance-dialog > header > button,
+.semantic-evaluation-dialog > header button,
+.semantic-approval-dialog > header > button,
+.semantic-rollout-dialog > header > button,
+.semantic-diagnostic-dialog > header > button,
+.semantic-quality-dialog > header > button,
+.semantic-row-access-dialog > header button { width: 34px; height: 34px; flex: none; border: 1px solid var(--line); border-radius: 9px; background: #f7f9fc; color: #617086; }
+
+.semantic-builder-dialog > :nth-child(2),
+.semantic-detail-dialog > :nth-child(2),
+.semantic-governance-dialog > :nth-child(2),
+.semantic-evaluation-dialog > :nth-child(2),
+.semantic-approval-dialog > :nth-child(2),
+.semantic-rollout-dialog > :nth-child(2),
+.semantic-diagnostic-dialog > :nth-child(2),
+.semantic-quality-dialog > :nth-child(2),
+.semantic-row-access-dialog > :nth-child(2) {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+}
+
+.semantic-builder-dialog > :nth-child(2)::-webkit-scrollbar,
+.semantic-detail-dialog > :nth-child(2)::-webkit-scrollbar,
+.semantic-governance-dialog > :nth-child(2)::-webkit-scrollbar,
+.semantic-evaluation-dialog > :nth-child(2)::-webkit-scrollbar,
+.semantic-approval-dialog > :nth-child(2)::-webkit-scrollbar,
+.semantic-rollout-dialog > :nth-child(2)::-webkit-scrollbar,
+.semantic-diagnostic-dialog > :nth-child(2)::-webkit-scrollbar,
+.semantic-quality-dialog > :nth-child(2)::-webkit-scrollbar,
+.semantic-row-access-dialog > :nth-child(2)::-webkit-scrollbar { display: none; }
+
+.semantic-builder-dialog > footer,
+.semantic-detail-dialog > footer,
+.semantic-governance-dialog > footer,
+.semantic-evaluation-dialog > footer,
+.semantic-approval-dialog > footer,
+.semantic-rollout-dialog > footer,
+.semantic-diagnostic-dialog > footer,
+.semantic-quality-dialog > footer,
+.semantic-row-access-dialog > footer { min-height: 66px; align-items: center; padding: 12px 22px; border-color: var(--line); background: #fbfcfe; }
+
+@media (max-width: 760px) {
+  .semantic-dialog-backdrop { padding: 12px; }
+  .semantic-builder-dialog,
+  .semantic-detail-dialog,
+  .semantic-governance-dialog,
+  .semantic-evaluation-dialog,
+  .semantic-approval-dialog,
+  .semantic-rollout-dialog,
+  .semantic-diagnostic-dialog,
+  .semantic-quality-dialog,
+  .semantic-row-access-dialog { width: 100%; height: auto; max-height: calc(100dvh - 24px); }
+}

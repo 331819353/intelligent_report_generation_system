@@ -113,8 +113,6 @@ func writeDataSourceReviewError(writer http.ResponseWriter, request *http.Reques
 		writeDSError(writer, http.StatusConflict, "DATA_SOURCE_TEST_PENDING", "连接测试仍在执行，请等待测试完成后再提交审核")
 	case errors.Is(err, ErrConnectionTestFailed), errors.Is(err, ErrTestRequired):
 		writeDSError(writer, http.StatusConflict, "DATA_SOURCE_TEST_REQUIRED", "当前配置尚未通过连接测试；请先点击“测试连接”并处理失败原因")
-	case errors.Is(err, ErrTestExpired):
-		writeDSError(writer, http.StatusConflict, "DATA_SOURCE_TEST_EXPIRED", "连接测试结果已过期，请重新测试当前配置")
 	case errors.Is(err, ErrSourceVersionChanged):
 		writeDSError(writer, http.StatusConflict, "DATA_SOURCE_VERSION_CHANGED", "配置在测试或审核期间发生变化，请重新测试后提交")
 	case errors.Is(err, ErrReviewPending):

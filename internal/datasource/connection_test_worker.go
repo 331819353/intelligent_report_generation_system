@@ -61,8 +61,7 @@ func (w *ConnectionTestWorker) ProcessNext(
 	var stageUpdateErr error
 	var result TestResult
 	var testErr error
-	if staged, ok := connector.(StagedConnectionTester); ok &&
-		(claim.Source.Type == TypeMySQL || claim.Source.Type == TypeOracle) {
+	if staged, ok := connector.(StagedConnectionTester); ok && IsDatabaseType(claim.Source.Type) {
 		result, testErr = staged.TestWithProgress(
 			testCtx,
 			claim.Source,

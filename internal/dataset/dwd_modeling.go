@@ -3857,8 +3857,8 @@ func buildLLMDesignedDIMDocument(
 			strings.TrimSpace(planned.OutputDescription) == "" {
 			return Document{}, "", errDWDModelingInvalid
 		}
-		// 检查点可能来自旧提示词。生成边界重新按当前平台合同计算，避免旧
-		// CAST_DATETIME 或模型漏项绕过所有 STRING TRIM 和日粒度标准化。
+		// 检查点可能来自旧提示词。生成边界重新按当前最小侵害合同计算，
+		// 避免旧 TRIM/缺省哨兵或 CAST_DATETIME 继续改写关联键与空值语义。
 		standardization := mandatoryDIMCleaning(sourceField)
 		if err := validateDWDCleaning(
 			dwdPlanningField{
@@ -4413,6 +4413,12 @@ func applyLLMDWDCleaning(
 			if !supported {
 				return Expression{}, "", false, errDWDModelingInvalid
 			}
+			// STRING、DATE/DATETIME 与 BOOLEAN 的最小侵害缺省值是 SQL NULL。
+			// 对这些类型 COALESCE_DEFAULT 是兼容旧检查点的无操作；只有普通
+			// 数值字段会在当前策略中真正补 0。
+			if value == nil {
+				continue
+			}
 			expression = Expression{
 				Type: "COALESCE",
 				Arguments: []Expression{
@@ -4422,6 +4428,22 @@ func applyLLMDWDCleaning(
 			nullable = false
 		case "CAST_DATE":
 			argument := expression
+			if !strings.EqualFold(canonicalType, "STRING") {
+				source := argument
+				argument = Expression{
+					Type: "CAST", TargetType: "STRING", Argument: &source,
+				}
+			}
+			for _, zeroDate := range []string{
+				"0000-00-00", "0000-00-00 00:00:00",
+			} {
+				argument = Expression{
+					Type: "NULLIF",
+					Arguments: []Expression{
+						argument, {Type: "LITERAL", Value: zeroDate},
+					},
+				}
+			}
 			expression = Expression{Type: "CAST", TargetType: "DATE", Argument: &argument}
 			canonicalType = "DATE"
 		case "CAST_DATETIME":
@@ -4438,13 +4460,13 @@ func applyLLMDWDCleaning(
 func dwdDefaultNullValue(canonicalType string) (any, bool) {
 	switch strings.ToUpper(strings.TrimSpace(canonicalType)) {
 	case "STRING":
-		return "UNKNOWN", true
+		return nil, true
 	case "DATE", "DATETIME":
-		return "1970-01-01", true
+		return nil, true
 	case "INTEGER", "DECIMAL":
-		return 999999999, true
+		return 0, true
 	case "BOOLEAN":
-		return false, true
+		return nil, true
 	default:
 		return nil, false
 	}

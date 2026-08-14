@@ -306,9 +306,9 @@ func (e *Executor) loadNode(ctx context.Context, queryID string, document datase
 		}
 		return filequery.NodeTableData{}, fmt.Errorf("worksheet %s is absent from the fixed file version", resolved.Table.Name)
 	}
-	dialect := querycompiler.MySQL
-	if resolved.SourceType == datasource.TypeOracle {
-		dialect = querycompiler.Oracle
+	dialect, ok := querycompiler.DialectForSourceType(string(resolved.SourceType))
+	if !ok {
+		return filequery.NodeTableData{}, errors.New("unsupported database source type")
 	}
 	scanRows := rowLimit + 1
 	if truncateSource {

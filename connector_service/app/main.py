@@ -19,6 +19,9 @@ from typing import Any, Iterator, Literal
 
 import oracledb
 import pymysql
+import psycopg
+import pytds
+import clickhouse_connect
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, SecretStr, field_validator
@@ -425,7 +428,9 @@ TENANT_SLOTS_LOCK = threading.Lock()
 class ConnectionConfig(BaseModel):
     """描述单个数据源的连接参数、超时和并发上限。"""
 
-    source_type: Literal["MYSQL", "ORACLE"]
+    source_type: Literal[
+        "MYSQL", "MARIADB", "POSTGRESQL", "ORACLE", "SQLSERVER", "CLICKHOUSE",
+    ]
     host: str = Field(min_length=1, max_length=255)
     port: int = Field(gt=0, le=65535)
     database: str = Field(min_length=1, max_length=255)
@@ -449,12 +454,12 @@ class ConnectionConfig(BaseModel):
     @field_validator("schemas")
     @classmethod
     def validate_schemas(cls, values: list[str]) -> list[str]:
-        """规范化 Oracle 模式名，并拒绝可能形成标识符注入的值。"""
+        """规范化元数据模式名，并拒绝可能形成标识符注入的值。"""
         normalized = []
         for value in values:
-            value = value.strip().upper()
-            if not re.fullmatch(r"[A-Z][A-Z0-9_$#]{0,127}", value):
-                raise ValueError("invalid Oracle schema name")
+            value = value.strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$#]{0,127}", value):
+                raise ValueError("invalid database schema name")
             if value not in normalized: normalized.append(value)
         return normalized
 
@@ -738,7 +743,7 @@ def streaming_connection_cursor(config: ConnectionConfig):
     with pooled_connection(config) as connection:
         cursor = (
             connection.cursor(pymysql.cursors.SSCursor)
-            if config.source_type == "MYSQL"
+            if config.source_type in ("MYSQL", "MARIADB")
             else connection.cursor()
         )
         try:
@@ -867,7 +872,10 @@ def fetch(
     budget: MetadataCollectionBudget | None = None,
 ) -> list[dict[str, Any]]:
     """执行内部元数据查询，并在累计结果进入内存前分批计量。"""
-    cursor.execute(sql, parameters or [])
+    if parameters:
+        cursor.execute(sql, parameters)
+    else:
+        cursor.execute(sql)
     names = [item[0].lower() for item in cursor.description or []]
     result: list[dict[str, Any]] = []
     while True:
@@ -901,6 +909,62 @@ def collect_mysql(cursor) -> list[dict[str, Any]]:
         FROM information_schema.statistics WHERE table_schema=DATABASE()
         ORDER BY table_name,index_name,seq_in_index""", budget=budget)
     return assemble_metadata(tables, columns, constraints, indexes)
+
+
+def collect_information_schema(cursor, source_type: str) -> list[dict[str, Any]]:
+    """Collect PostgreSQL or SQL Server metadata through information_schema."""
+    budget = MetadataCollectionBudget()
+    if source_type == "POSTGRESQL":
+        table_filter = "table_schema NOT IN ('pg_catalog','information_schema')"
+        catalog_expression = "table_catalog"
+    else:
+        table_filter = "table_schema NOT IN ('sys','INFORMATION_SCHEMA')"
+        catalog_expression = "table_catalog"
+    tables = fetch(cursor, f"""SELECT {catalog_expression} catalog_name, table_schema schema_name,
+        table_name, table_type, '' source_comment, NULL estimated_row_count
+        FROM information_schema.tables WHERE {table_filter}
+        ORDER BY table_schema,table_name""", budget=budget)
+    columns = fetch(cursor, f"""SELECT table_schema schema_name,table_name,column_name,ordinal_position,
+        '' source_comment,data_type native_type,data_type,
+        character_maximum_length length,numeric_precision,numeric_scale,
+        is_nullable,column_default default_value,'' column_key
+        FROM information_schema.columns WHERE {table_filter}
+        ORDER BY table_schema,table_name,ordinal_position""", budget=budget)
+    constraints = fetch(cursor, f"""SELECT tc.table_schema schema_name,tc.table_name,
+        tc.constraint_name,tc.constraint_type,kcu.column_name,kcu.ordinal_position,
+        ccu.table_name referenced_table_name,ccu.column_name referenced_column_name
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_catalog=kcu.constraint_catalog
+         AND tc.constraint_schema=kcu.constraint_schema
+         AND tc.constraint_name=kcu.constraint_name
+        LEFT JOIN information_schema.constraint_column_usage ccu
+          ON tc.constraint_catalog=ccu.constraint_catalog
+         AND tc.constraint_schema=ccu.constraint_schema
+         AND tc.constraint_name=ccu.constraint_name
+        WHERE {table_filter.replace('table_schema', 'tc.table_schema')}
+          AND tc.constraint_type IN ('PRIMARY KEY','UNIQUE','FOREIGN KEY')
+        ORDER BY tc.table_schema,tc.table_name,tc.constraint_name,kcu.ordinal_position""", budget=budget)
+    # Index catalogs differ substantially. Constraints still provide primary and
+    # unique key semantics; engine-specific index enrichment can be added without
+    # changing the normalized metadata contract.
+    return assemble_metadata(tables, columns, constraints, [])
+
+
+def collect_clickhouse(cursor) -> list[dict[str, Any]]:
+    """Collect current ClickHouse database metadata from system catalogs."""
+    budget = MetadataCollectionBudget()
+    tables = fetch(cursor, """SELECT database catalog_name,database schema_name,name table_name,
+        engine table_type,comment source_comment,total_rows estimated_row_count
+        FROM system.tables WHERE database=currentDatabase() ORDER BY name""", budget=budget)
+    columns = fetch(cursor, """SELECT database schema_name,table table_name,name column_name,
+        position ordinal_position,comment source_comment,type native_type,type data_type,
+        NULL length,NULL numeric_precision,NULL numeric_scale,
+        if(startsWith(type,'Nullable('),'YES','NO') is_nullable,
+        default_expression default_value,'' column_key
+        FROM system.columns WHERE database=currentDatabase()
+        ORDER BY table,position""", budget=budget)
+    return assemble_metadata(tables, columns, [], [])
 
 
 def collect_oracle(cursor, schemas: list[str]) -> list[dict[str, Any]]:
@@ -1020,17 +1084,99 @@ def oracle_dsn(config: ConnectionConfig, pinned_host: str | None = None) -> str:
     return oracledb.makedsn(host, config.port, service_name=config.database)
 
 
+class ClickHouseCursor:
+    """Small DB-API cursor facade over the official ClickHouse HTTP client."""
+
+    def __init__(self, client):
+        self.client = client
+        self.result = None
+        self.rows: list[tuple[Any, ...]] = []
+        self.offset = 0
+        self.description: list[tuple[str]] = []
+
+    def execute(self, sql: str, parameters=None):
+        self.close_result()
+        self.result = self.client.query(sql, parameters=parameters or None)
+        self.rows = [tuple(row) for row in self.result.result_rows]
+        self.description = [(str(name),) for name in self.result.column_names]
+        self.offset = 0
+        return self
+
+    def fetchmany(self, size: int = 1):
+        end = min(len(self.rows), self.offset + max(0, size))
+        rows = self.rows[self.offset:end]
+        self.offset = end
+        return rows
+
+    def fetchall(self):
+        rows = self.rows[self.offset:]
+        self.offset = len(self.rows)
+        return rows
+
+    def fetchone(self):
+        rows = self.fetchmany(1)
+        return rows[0] if rows else None
+
+    def close_result(self) -> None:
+        if self.result is not None:
+            self.result.close()
+        self.result = None
+        self.rows = []
+        self.offset = 0
+
+    def close(self) -> None:
+        self.close_result()
+
+
+class ClickHouseConnection:
+    """Connection facade used by the shared pool and cursor lifecycle."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def cursor(self):
+        return ClickHouseCursor(self.client)
+
+    def close(self) -> None:
+        self.client.close()
+
+
 def open_connection(config: ConnectionConfig, pinned_host: str | None = None):
-    """创建配置了连接和查询超时的 MySQL 或 Oracle 物理连接。"""
+    """Create a physical connection through the selected database driver."""
     pinned_host = pinned_host or resolve_egress_target(config.host, config.port)
     password = config.password.get_secret_value()
-    if config.source_type == "MYSQL":
+    if config.source_type in ("MYSQL", "MARIADB"):
         return pymysql.connect(
             host=pinned_host, port=config.port, user=config.username, password=password,
             database=config.database, connect_timeout=int(config.connect_timeout_seconds),
             read_timeout=int(config.query_timeout_seconds), write_timeout=int(config.query_timeout_seconds),
             charset="utf8mb4", cursorclass=pymysql.cursors.Cursor, autocommit=True,
         )
+    if config.source_type == "POSTGRESQL":
+        connection = psycopg.connect(
+            host=pinned_host, port=config.port, user=config.username,
+            password=password, dbname=config.database,
+            connect_timeout=max(1, int(config.connect_timeout_seconds)),
+            options=f"-c statement_timeout={int(config.query_timeout_seconds * 1000)}",
+        )
+        connection.autocommit = True
+        return connection
+    if config.source_type == "SQLSERVER":
+        return pytds.connect(
+            server=pinned_host, port=config.port, database=config.database,
+            user=config.username, password=password,
+            timeout=max(1, int(config.connect_timeout_seconds)),
+            query_timeout=max(1, int(config.query_timeout_seconds)),
+            autocommit=True,
+        )
+    if config.source_type == "CLICKHOUSE":
+        client = clickhouse_connect.get_client(
+            host=pinned_host, port=config.port, database=config.database,
+            username=config.username, password=password,
+            connect_timeout=config.connect_timeout_seconds,
+            send_receive_timeout=config.query_timeout_seconds,
+        )
+        return ClickHouseConnection(client)
     connection = oracledb.connect(
         user=config.username, password=password,
         dsn=oracle_dsn(config, pinned_host),
@@ -1038,6 +1184,53 @@ def open_connection(config: ConnectionConfig, pinned_host: str | None = None):
     )
     connection.call_timeout = int(config.query_timeout_seconds * 1000)
     return connection
+
+
+def version_query(source_type: str) -> str:
+    """Return a side-effect-free server version query for every driver."""
+    return {
+        "MYSQL": "SELECT VERSION()",
+        "MARIADB": "SELECT VERSION()",
+        "POSTGRESQL": "SELECT VERSION()",
+        "ORACLE": "SELECT BANNER FROM V$VERSION WHERE ROWNUM = 1",
+        "SQLSERVER": "SELECT @@VERSION",
+        "CLICKHOUSE": "SELECT version()",
+    }[source_type]
+
+
+def collect_metadata(config: ConnectionConfig, cursor) -> list[dict[str, Any]]:
+    """Route metadata collection through a driver-neutral normalized contract."""
+    if config.source_type in ("MYSQL", "MARIADB"):
+        return collect_mysql(cursor)
+    if config.source_type in ("POSTGRESQL", "SQLSERVER"):
+        return collect_information_schema(cursor, config.source_type)
+    if config.source_type == "CLICKHOUSE":
+        return collect_clickhouse(cursor)
+    return collect_oracle(
+        cursor,
+        [value.upper() for value in (config.schemas or [config.username])],
+    )
+
+
+def adapt_query_parameters(
+    source_type: str,
+    sql: str,
+    parameters: list[Any],
+) -> tuple[str, list[Any]]:
+    """Adapt compiler placeholders to the selected Python DB-API driver."""
+    if source_type not in ("POSTGRESQL", "SQLSERVER"):
+        return sql, parameters
+    ordered: list[Any] = []
+
+    def replace(match: re.Match[str]) -> str:
+        index = int(match.group(1)) - 1
+        if index < 0 or index >= len(parameters):
+            raise ValueError("query parameter index is invalid")
+        ordered.append(parameters[index])
+        return "%s"
+
+    adapted = re.sub(r"\$([1-9][0-9]*)", replace, sql)
+    return adapted, ordered if ordered else parameters
 
 
 def validate_read_only_sql(sql: str) -> None:
@@ -1065,7 +1258,11 @@ def quoted_identifier(value: str, source_type: str) -> str:
     """只接受数据库元数据可返回的普通标识符，再按方言安全引用。"""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$#]{0,127}", value):
         raise HTTPException(status_code=400, detail="invalid table identifier")
-    return f"`{value}`" if source_type == "MYSQL" else f'"{value}"'
+    if source_type in ("MYSQL", "MARIADB", "CLICKHOUSE"):
+        return f"`{value}`"
+    if source_type == "SQLSERVER":
+        return f"[{value}]"
+    return f'"{value}"'
 
 
 def sql_tokens(sql: str) -> list[str]:
@@ -1209,7 +1406,7 @@ def metadata_sample_projection(
 ) -> list[str]:
     """从源端类型元数据构建非 LOB/非二进制显式投影。"""
     source_type = request.connection.source_type
-    if source_type == "MYSQL":
+    if source_type in ("MYSQL", "MARIADB"):
         cursor.execute(
             """SELECT column_name, data_type, column_type
                FROM information_schema.columns
@@ -1217,13 +1414,27 @@ def metadata_sample_projection(
                ORDER BY ordinal_position""",
             (request.schema_name, request.table_name),
         )
-    else:
+    elif source_type == "ORACLE":
         cursor.execute(
             """SELECT column_name, data_type, data_type
                FROM all_tab_columns
                WHERE owner=:1 AND table_name=:2
                ORDER BY column_id""",
             (request.schema_name.upper(), request.table_name.upper()),
+        )
+    elif source_type == "CLICKHOUSE":
+        cursor.execute(
+            """SELECT name, type, type FROM system.columns
+               WHERE database=%s AND table=%s ORDER BY position""",
+            (request.schema_name, request.table_name),
+        )
+    else:
+        cursor.execute(
+            """SELECT column_name, data_type, data_type
+               FROM information_schema.columns
+               WHERE table_schema=%s AND table_name=%s
+               ORDER BY ordinal_position""",
+            (request.schema_name, request.table_name),
         )
     discovered = cursor.fetchall()
     safe: dict[str, str] = {}
@@ -1351,6 +1562,9 @@ def connection_test_error_code(exc: Exception) -> str:
         or oracle_codes.intersection({"ORA-01017", "DPY-4001"})
         or "invalid credential" in lowered
         or "access denied" in lowered
+        or "password authentication failed" in lowered
+        or "authentication failed" in lowered
+        or "login failed" in lowered
     ):
         return "CONNECTION_AUTH_FAILED"
     if (
@@ -1366,6 +1580,9 @@ def connection_test_error_code(exc: Exception) -> str:
             },
         )
         or "unknown database" in lowered
+        or "database does not exist" in lowered
+        or "cannot open database" in lowered
+        or ("database" in lowered and "does not exist" in lowered)
         or "service is not registered" in lowered
         or "sid is not registered" in lowered
     ):
@@ -1540,11 +1757,7 @@ def connection_test_stream_events(config: ConnectionConfig) -> Iterator[bytes]:
             config,
             pinned_host,
         ) as connection, closing(connection.cursor()) as cursor:
-            cursor.execute(
-                "SELECT VERSION()"
-                if config.source_type == "MYSQL"
-                else "SELECT BANNER FROM V$VERSION WHERE ROWNUM = 1",
-            )
+            cursor.execute(version_query(config.source_type))
             version = str(cursor.fetchone()[0])
     except Exception as exc:
         code = database_handshake_error_code(exc)
@@ -1617,7 +1830,7 @@ def test_connection(config: ConnectionConfig) -> dict[str, Any]:
         # 连接测试不进入普通查询池：草稿测试无论成功或失败都 one-shot 关闭，
         # 避免大量不同配置在 TTL 窗口内累积空闲数据库会话。
         with one_shot_connection(config, pinned_host) as connection, closing(connection.cursor()) as cursor:
-            cursor.execute("SELECT VERSION()" if config.source_type == "MYSQL" else "SELECT BANNER FROM V$VERSION WHERE ROWNUM = 1")
+            cursor.execute(version_query(config.source_type))
             version = str(cursor.fetchone()[0])
     except ConnectionTestStageError as exc:
         raise HTTPException(status_code=502, detail=exc.code) from exc
@@ -1672,7 +1885,7 @@ def sync_metadata(config: ConnectionConfig) -> Response:
     """采集元数据并返回带时间水位和稳定哈希的完整快照。"""
     try:
         with streaming_connection_cursor(config) as (connection, cursor):
-            assets = collect_mysql(cursor) if config.source_type == "MYSQL" else collect_oracle(cursor, config.schemas or [config.username.upper()])
+            assets = collect_metadata(config, cursor)
     except ResourceBudgetExceeded as exc:
         raise HTTPException(status_code=413, detail=exc.code) from exc
     except Exception as exc:
@@ -1708,12 +1921,15 @@ def sample_metadata(request: MetadataSampleRequest) -> Response:
                 quoted_identifier(column, source_type)
                 for column in projection
             )
-            sql = (
-                f"SELECT {selected} FROM {schema}.{table} LIMIT {request.max_rows}"
-                if source_type == "MYSQL"
-                else f"SELECT {selected} FROM {schema}.{table} "
-                f"FETCH FIRST {request.max_rows} ROWS ONLY"
-            )
+            if source_type == "ORACLE":
+                sql = (
+                    f"SELECT {selected} FROM {schema}.{table} "
+                    f"FETCH FIRST {request.max_rows} ROWS ONLY"
+                )
+            elif source_type == "SQLSERVER":
+                sql = f"SELECT TOP {request.max_rows} {selected} FROM {schema}.{table}"
+            else:
+                sql = f"SELECT {selected} FROM {schema}.{table} LIMIT {request.max_rows}"
             cursor.execute(sql)
             columns = [str(item[0]) for item in cursor.description or []]
             rows = cursor.fetchmany(request.max_rows)
@@ -1735,7 +1951,15 @@ def query(request: QueryRequest) -> Response:
                 if request.query_id in ACTIVE_QUERIES: raise HTTPException(status_code=409, detail="query id is already active")
                 ACTIVE_QUERIES[request.query_id] = (request.connection.source_type, connection)
             try:
-                cursor.execute(request.sql, request.parameters)
+                sql, parameters = adapt_query_parameters(
+                    request.connection.source_type,
+                    request.sql,
+                    request.parameters,
+                )
+                if parameters:
+                    cursor.execute(sql, parameters)
+                else:
+                    cursor.execute(sql)
                 columns = [str(item[0]) for item in cursor.description or []]
                 if len(columns) > 1600:
                     raise ResourceBudgetExceeded(
@@ -1829,7 +2053,15 @@ def stream_query_events(request: StreamQueryRequest) -> Iterator[bytes]:
                     return
                 ACTIVE_QUERIES[request.query_id] = (request.connection.source_type, connection)
             try:
-                cursor.execute(request.sql, request.parameters)
+                sql, parameters = adapt_query_parameters(
+                    request.connection.source_type,
+                    request.sql,
+                    request.parameters,
+                )
+                if parameters:
+                    cursor.execute(sql, parameters)
+                else:
+                    cursor.execute(sql)
                 columns = [str(item[0]) for item in cursor.description or []]
                 schema_event = encode_stream_event(
                     {"type": "schema", "columns": columns},

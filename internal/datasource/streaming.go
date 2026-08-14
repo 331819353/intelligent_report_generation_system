@@ -66,7 +66,7 @@ func (c *PythonConnector) StreamQuery(
 	if consume == nil {
 		return StreamSummary{}, errors.New("stream consumer is required")
 	}
-	if source.Type != c.kind || (source.Type != TypeMySQL && source.Type != TypeOracle) {
+	if source.Type != c.kind || !IsDatabaseType(source.Type) {
 		return StreamSummary{}, errors.New("stream source type does not match the connector")
 	}
 	if strings.TrimSpace(source.ID) == "" || strings.TrimSpace(source.TenantID) == "" ||

@@ -122,7 +122,7 @@ func (stager *Stager) Stage(ctx context.Context, input StageInput) (StageResult,
 		input.Source.PublicationStatus != datasource.PublicationPublished ||
 		input.Source.ConfigVersionID == "" ||
 		input.Source.ConfigVersionID != input.Source.PublishedVersionID ||
-		(input.Source.Type != datasource.TypeMySQL && input.Source.Type != datasource.TypeOracle) {
+		!datasource.IsDatabaseType(input.Source.Type) {
 		return StageResult{}, fmt.Errorf("%w: source is not an active published database version", ErrInvalidBuild)
 	}
 	if input.Source.TenantID != input.TenantID {
@@ -131,9 +131,9 @@ func (stager *Stager) Stage(ctx context.Context, input StageInput) (StageResult,
 	if input.BatchSize < 1 || input.BatchSize > 5000 {
 		return StageResult{}, fmt.Errorf("%w: staging batch size is invalid", ErrInvalidBuild)
 	}
-	expectedDialect := querycompiler.MySQL
-	if input.Source.Type == datasource.TypeOracle {
-		expectedDialect = querycompiler.Oracle
+	expectedDialect, ok := querycompiler.DialectForSourceType(string(input.Source.Type))
+	if !ok {
+		return StageResult{}, fmt.Errorf("%w: unsupported database source type", ErrInvalidBuild)
 	}
 	if input.Scan.Dialect != expectedDialect {
 		return StageResult{}, fmt.Errorf("%w: scan dialect does not match the source", ErrInvalidBuild)

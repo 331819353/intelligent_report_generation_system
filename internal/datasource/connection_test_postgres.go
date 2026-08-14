@@ -23,7 +23,7 @@ const connectionTestJobProjection = `job.id::text,job.data_source_id::text,
 	job.data_source_version_id::text,job.status,job.stage,job.attempt,job.max_attempts,
 	job.error_code,job.error_message,COALESCE(attestation.server_version,''),
 	COALESCE(attestation.latency_ms,0),job.created_at,job.started_at,job.completed_at,
-	attestation.completed_at,attestation.expires_at`
+	attestation.completed_at`
 
 const connectionTestJobFrom = ` FROM platform.data_source_connection_test_jobs AS job
 	LEFT JOIN platform.data_source_connection_test_attestations AS attestation
@@ -100,7 +100,7 @@ func scanConnectionTestJob(row rowScanner, job *ConnectionTestJob) error {
 		&job.ID, &job.DataSourceID, &job.ConfigVersionID, &job.Status,
 		&job.Stage, &job.Attempt, &job.MaxAttempts, &job.ErrorCode, &job.ErrorMessage,
 		&job.ServerVersion, &job.LatencyMS, &job.RequestedAt, &job.StartedAt,
-		&job.CompletedAt, &job.TestedAt, &job.ExpiresAt,
+		&job.CompletedAt, &job.TestedAt,
 	)
 }
 

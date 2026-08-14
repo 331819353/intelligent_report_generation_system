@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"intelligent-report-generation-system/internal/dataset"
+	"intelligent-report-generation-system/internal/datasource"
 	"intelligent-report-generation-system/internal/platform/database"
 )
 
@@ -515,7 +516,7 @@ func deriveSourceInputTx(
 			RowCount: snapshot.EstimatedRowCount,
 		}, nil
 	}
-	if snapshot.SourceType != "MYSQL" && snapshot.SourceType != "ORACLE" ||
+	if !datasource.IsDatabaseType(datasource.Type(snapshot.SourceType)) ||
 		node.FileVersionID != "" || snapshot.FileVersionID != "" {
 		return InputSnapshot{}, ErrConflict
 	}

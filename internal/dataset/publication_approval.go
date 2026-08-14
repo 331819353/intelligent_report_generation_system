@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"unicode"
+
+	"github.com/google/uuid"
 )
 
 var (
@@ -146,6 +148,18 @@ func (s *PublicationApprovalService) Submit(
 	if err := s.store.ValidateDWDPublicationDependencies(
 		ctx, tenantID, datasetID, input.DraftVersionID,
 	); err != nil {
+		return PublicationRequest{}, err
+	}
+	// 提交发布申请就是用户发起“发布”的边界。此处先对冻结草稿执行与最终发布
+	// 相同的依赖、口径和安全查询试跑，失败时不创建待审批记录；审批通过时仍会
+	// 对同一快照复验，覆盖审批等待期间的外部依赖漂移。
+	if _, err := s.datasets.preparePublication(ctx, tenantID, actorID, datasetID, uuid.NewString(), PublishInput{
+		DraftVersionID:             input.DraftVersionID,
+		ExpectedVersion:            input.ExpectedVersion,
+		ExpectedDraftRecordVersion: input.ExpectedDraftRecordVersion,
+		ExpectedDSLHash:            input.ExpectedDSLHash,
+		ValidationParameters:       input.ValidationParameters,
+	}); err != nil {
 		return PublicationRequest{}, err
 	}
 	return s.store.SubmitPublicationRequest(ctx, tenantID, actorID, datasetID, SubmitPublicationPlan{

@@ -52,7 +52,6 @@ type ConnectionTestJob struct {
 	StartedAt       *time.Time              `json:"startedAt,omitempty"`
 	CompletedAt     *time.Time              `json:"completedAt,omitempty"`
 	TestedAt        *time.Time              `json:"testedAt,omitempty"`
-	ExpiresAt       *time.Time              `json:"expiresAt,omitempty"`
 }
 
 func (j ConnectionTestJob) Active() bool {

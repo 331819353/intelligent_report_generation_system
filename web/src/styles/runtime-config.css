@@ -5,7 +5,7 @@
 .runtime-config-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .runtime-config-metrics article { min-height: 74px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 10px; align-items: center; border: 1px solid #e0e7f2; border-radius: 11px; padding: 11px 13px; background: #fff; }
 .runtime-config-metrics article.attention { border-color: #f0d49b; background: #fffbf3; }
-.runtime-config-metrics svg { grid-column: 2; grid-row: 1 / span 2; color: #2864dc; }
+.runtime-config-metrics svg { grid-column: 2; grid-row: 1 / span 2; color: #0872d3; }
 .runtime-config-metrics span { color: #7a8799; font-size: 12px; font-weight: 750; }
 .runtime-config-metrics strong { color: #26354c; font-size: 21px; }
 .runtime-config-workspace { min-height: 590px; display: grid; grid-template-columns: 330px minmax(0, 1fr); overflow: hidden; border: 1px solid #dfe5ee; border-radius: 14px; background: #fff; }
@@ -17,7 +17,7 @@
 .runtime-config-versions > div { max-height: 704px; overflow: auto; padding: 8px; }
 .runtime-config-versions .app-button { width: 100%; min-height: 84px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 9px; align-items: start; border: 1px solid transparent; border-radius: 9px; padding: 11px 10px; text-align: left; white-space: normal; }
 .runtime-config-versions .app-button:hover, .runtime-config-versions .app-button.active { border-color: #cfddf6; background: #fff; box-shadow: 0 3px 10px #214f920b; }
-.runtime-config-versions .app-button.active { box-shadow: inset 3px 0 #2864dc, 0 3px 10px #214f920b; }
+.runtime-config-versions .app-button.active { box-shadow: inset 3px 0 #0872d3, 0 3px 10px #214f920b; }
 .runtime-config-versions .app-button > span:nth-child(2) { min-width: 0; display: grid; gap: 3px; }
 .runtime-config-versions strong, .runtime-config-versions small, .runtime-config-versions em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .runtime-config-versions strong { color: #344054; font-size: 13px; }
@@ -37,7 +37,7 @@
 .runtime-config-detail-header h2 { margin: 9px 0 5px; color: #26354c; font-size: 20px; }
 .runtime-config-detail-header p { margin: 0; color: #667085; font-size: 13px; line-height: 1.6; }
 .runtime-config-actions { display: flex; flex: none; gap: 8px; }
-.runtime-config-policy-note { display: flex; align-items: center; gap: 10px; border: 1px solid #cddcf5; border-radius: 10px; padding: 11px 13px; background: #f5f8ff; color: #2864dc; }
+.runtime-config-policy-note { display: flex; align-items: center; gap: 10px; border: 1px solid #cddcf5; border-radius: 10px; padding: 11px 13px; background: #f5f8ff; color: #0872d3; }
 .runtime-config-policy-note span { display: grid; gap: 3px; }
 .runtime-config-policy-note strong { color: #33547f; font-size: 13px; }
 .runtime-config-policy-note small { color: #6c7f9d; font-size: 12px; }
@@ -60,7 +60,7 @@
 .runtime-config-timeline > div > span::before { position: absolute; top: 6px; right: 0; left: 4px; height: 1px; background: #dfe5ed; content: ''; }
 .runtime-config-timeline > div > span:last-child::before { right: calc(100% - 5px); }
 .runtime-config-timeline i { position: absolute; z-index: 1; top: 2px; left: 0; width: 9px; height: 9px; border: 2px solid #c8d0dc; border-radius: 50%; background: #fff; }
-.runtime-config-timeline span:first-child i, .runtime-config-timeline span.done i { border-color: #2864dc; background: #2864dc; }
+.runtime-config-timeline span:first-child i, .runtime-config-timeline span.done i { border-color: #0872d3; background: #0872d3; }
 .runtime-config-timeline span.failed i { border-color: #c6423b; background: #c6423b; }
 .runtime-config-timeline strong { color: #475467; font-size: 12px; }
 .runtime-config-timeline small { color: #98a2b3; font-size: 11px; }
@@ -68,7 +68,7 @@
 .runtime-config-nodes { display: grid; }
 .runtime-config-nodes article { min-height: 60px; display: grid; grid-template-columns: 28px minmax(0, 1fr) auto auto; gap: 10px; align-items: center; border-top: 1px solid #edf0f4; padding: 10px 14px; }
 .runtime-config-nodes article:first-child { border-top: 0; }
-.runtime-config-nodes article > span { color: #2864dc; }
+.runtime-config-nodes article > span { color: #0872d3; }
 .runtime-config-nodes article > span.is-applied { color: #0a8a67; }
 .runtime-config-nodes article > span.is-failed { color: #c6423b; }
 .runtime-config-nodes article > div { display: grid; gap: 3px; }
@@ -83,7 +83,7 @@
 .runtime-config-deployment > header > div { display: grid; gap: 3px; }
 .runtime-config-deployment > header strong { color: #344054; font-size: 14px; }
 .runtime-config-deployment > header span { color: #8792a2; font-size: 12px; }
-.runtime-config-deployment > header svg { color: #2864dc; }
+.runtime-config-deployment > header svg { color: #0872d3; }
 .runtime-config-deployment > div { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .runtime-config-deployment article { min-width: 0; display: grid; grid-template-columns: 25px minmax(0, 1fr); gap: 8px; border-left: 1px solid #edf0f4; padding: 14px; }
 .runtime-config-deployment article:first-child { border-left: 0; }
@@ -98,7 +98,7 @@
 .runtime-config-scope { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; border: 0; margin: 0; padding: 0; }
 .runtime-config-scope legend { margin-bottom: 7px; color: #475467; font-size: 13px; font-weight: 750; }
 .runtime-config-scope label { min-width: 0; display: block; border: 1px solid #dfe4eb; border-radius: 9px; padding: 10px; cursor: pointer; }
-.runtime-config-scope label.active { border-color: #7fa3ec; background: #f4f8ff; box-shadow: 0 0 0 2px #2864dc0d; }
+.runtime-config-scope label.active { border-color: #7fa3ec; background: #f4f8ff; box-shadow: 0 0 0 2px #0872d30d; }
 .runtime-config-scope input { position: absolute; opacity: 0; }
 .runtime-config-scope span { display: grid; gap: 3px; }
 .runtime-config-scope strong { color: #344054; font-size: 13px; }
@@ -127,3 +127,22 @@
   .runtime-config-versions > div { max-height: 270px; }
   .runtime-config-detail-header { flex-direction: column; }
 }
+
+/* Match the quieter visual hierarchy used by the metadata workbench. */
+.runtime-config-overview,
+.runtime-config-workspace,
+.runtime-config-deployment,
+.runtime-config-section { border-color: var(--line-strong); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.runtime-config-overview { padding: 18px 20px; background: #fff; }
+.runtime-config-overview h2 { color: var(--ink); font-size: 18px; font-weight: 660; }
+.runtime-config-overview p { color: var(--muted); }
+.runtime-config-metrics article { border-color: var(--line); border-radius: 10px; background: #fafbfd; }
+.runtime-config-versions { border-color: var(--line); background: #f8fafc; }
+.runtime-config-versions > header,
+.runtime-config-detail-header,
+.runtime-config-section > header,
+.runtime-config-deployment > header { border-color: var(--line); }
+.runtime-config-versions .app-button.active { border-color: #d9e7f8; box-shadow: inset 3px 0 #0872d3; }
+.runtime-config-detail-header h2 { color: var(--ink); font-size: 18px; font-weight: 660; }
+.runtime-config-section { border-radius: 10px; box-shadow: none; }
+.runtime-config-section > header { background: #fafbfd; }

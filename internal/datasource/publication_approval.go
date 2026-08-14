@@ -88,9 +88,6 @@ func (s *PublicationApprovalService) Submit(
 	if draft.ValidationStatus != ValidationPassed {
 		return PublicationRequest{}, ErrTestRequired
 	}
-	if draft.TestExpiresAt == nil || !draft.TestExpiresAt.After(s.sources.now().UTC()) {
-		return PublicationRequest{}, ErrTestExpired
-	}
 	if s.sources.connectionTests != nil {
 		latest, latestErr := s.sources.connectionTests.LatestConnectionTest(
 			ctx, tenantID, sourceID, draft.ConfigVersionID, draft.ConfigHash,

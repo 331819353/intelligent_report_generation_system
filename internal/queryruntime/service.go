@@ -388,9 +388,9 @@ func (s *Service) previewDatabase(ctx context.Context, source datasource.Source,
 	if connector == nil {
 		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
 	}
-	dialect := querycompiler.MySQL
-	if resolved.SourceType == datasource.TypeOracle {
-		dialect = querycompiler.Oracle
+	dialect, ok := querycompiler.DialectForSourceType(string(resolved.SourceType))
+	if !ok {
+		return dataset.PreviewResult{}, dataset.ErrPreviewUnsupported
 	}
 	compiled, err := querycompiler.Compile(querycompiler.Input{
 		Document: document, Dialect: dialect, Tables: resolved.Tables, Parameters: parameters,

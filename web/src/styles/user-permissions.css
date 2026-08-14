@@ -389,3 +389,53 @@
 @media (max-width: 1280px) {
   .subject-attributes-form { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Visual refresh: the directory is primary, the access editor is a companion card. */
+.user-permissions-shell > .main-stage { padding: 0 24px; background: var(--canvas); }
+.user-permissions-page { padding-top: 18px; }
+.user-permissions-heading { min-height: 96px; }
+.user-permissions-heading h1 { margin: 11px 0 3px; color: var(--ink); font-size: 24px; font-weight: 680; letter-spacing: -.025em; }
+.user-permissions-heading p { color: var(--muted); font-size: 13px; }
+.user-permissions-breadcrumb { color: #94a0b0; font-size: 11px; }
+.user-permissions-search,
+.user-permissions-filters select,
+.user-access-add-domain select,
+.user-access-role select { border-color: var(--line-strong); border-radius: var(--radius-control); }
+.user-permissions-search:focus-within,
+.user-permissions-filters select:focus,
+.user-access-add-domain select:focus,
+.user-access-role select:focus { border-color: #7eb3e5; box-shadow: var(--focus-ring); }
+.user-permissions-filters .app-button { border-radius: var(--radius-control); }
+.user-permissions-workspace,
+.user-access-editor,
+.user-lifecycle-dialog { border-color: var(--line-strong); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.user-permissions-workspace { margin-top: 16px; }
+.user-permissions-table-header { min-height: 52px; border-color: var(--line); background: #f8fafc; color: #748296; font-size: 12px; }
+.user-permissions-row { min-height: 62px; border-color: var(--line); }
+.user-permissions-row:hover { background: #f7faff; }
+.user-permissions-row.is-selected { background: #eef5fc; box-shadow: inset 3px 0 #0872d3; }
+.user-permissions-pagination { border-color: var(--line); }
+.user-permissions-pagination .app-button,
+.user-page-size, .user-page-input, .user-page-current { border-radius: 8px; }
+.user-access-editor { top: 70px; box-shadow: 0 12px 32px rgb(31 47 70 / 9%); }
+.user-access-editor > header,
+.user-access-identity,
+.user-access-domains,
+.user-access-role,
+.user-effective-access { border-color: var(--line); }
+.user-access-domain-list article,
+.user-access-empty-domain,
+.user-access-fixed { border-color: var(--line-strong); border-radius: 10px; }
+.user-access-domain-list article:hover,
+.user-access-domain-list article.is-active { border-color: #c6dcf3; background: #f4f8fd; }
+.user-access-editor > footer .app-button:first-child { border-radius: var(--radius-control); }
+.user-lifecycle-items article,
+.user-lifecycle-summary > div,
+.subject-attributes { border-color: var(--line-strong); border-radius: 10px; }
+
+.user-lifecycle-backdrop { padding: 28px; background: rgb(31 47 70 / 42%); backdrop-filter: blur(7px); }
+.user-lifecycle-dialog { max-height: calc(100dvh - 56px); overflow: hidden; border: 1px solid var(--line-strong); border-radius: 16px; box-shadow: 0 24px 72px rgb(31 47 70 / 18%); }
+.user-lifecycle-dialog > header { min-height: 84px; border-color: var(--line); background: rgb(255 255 255 / 98%); }
+.user-lifecycle-items { overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; scrollbar-width: none; }
+.user-lifecycle-items::-webkit-scrollbar { display: none; }
+.user-lifecycle-dialog > footer { min-height: 66px; border-color: var(--line); background: #fbfcfe; }

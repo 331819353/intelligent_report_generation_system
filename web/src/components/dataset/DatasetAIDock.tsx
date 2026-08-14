@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
-import { MagicWandIcon } from '@phosphor-icons/react'
+import { MagicWandIcon, XIcon } from '@phosphor-icons/react'
 import type { CanvasPoint } from '../../lib/dataset-graph'
 
 type DatasetAIDockProps = {
   hasProposal: boolean
+  existingDAG?: boolean
   children: ReactNode
 }
 
-export function DatasetAIDock({ hasProposal, children }: DatasetAIDockProps) {
+export function DatasetAIDock({ hasProposal, existingDAG = false, children }: DatasetAIDockProps) {
   const dockRef = useRef<HTMLElement | null>(null)
   const dragRef = useRef<{
     parent: HTMLElement
@@ -20,6 +21,8 @@ export function DatasetAIDock({ hasProposal, children }: DatasetAIDockProps) {
   const [position, setPosition] = useState<CanvasPoint | null>(null)
   const [dragging, setDragging] = useState(false)
   const [opensRight, setOpensRight] = useState(false)
+  const [open, setOpen] = useState(false)
+  const suppressClickRef = useRef(false)
 
   const beginDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
     if (event.button !== 0 || !event.isPrimary) return
@@ -40,6 +43,7 @@ export function DatasetAIDock({ hasProposal, children }: DatasetAIDockProps) {
     }
     setPosition({ x, y })
     setDragging(true)
+    suppressClickRef.current = false
     event.preventDefault()
     event.stopPropagation()
   }
@@ -50,6 +54,7 @@ export function DatasetAIDock({ hasProposal, children }: DatasetAIDockProps) {
       const drag = dragRef.current
       if (!drag || event.pointerId !== drag.pointerID) return
       event.preventDefault()
+      if (Math.abs(event.clientX - drag.clientX) > 4 || Math.abs(event.clientY - drag.clientY) > 4) suppressClickRef.current = true
       const minX = drag.parent.scrollLeft + 12
       const minY = drag.parent.scrollTop + 12
       const maxX = minX + Math.max(0, drag.parent.clientWidth - 76)
@@ -77,18 +82,19 @@ export function DatasetAIDock({ hasProposal, children }: DatasetAIDockProps) {
 
   return <section
     ref={dockRef}
-    className={`dataset-ai-composer ${hasProposal ? 'has-proposal' : ''} ${dragging ? 'is-dragging' : ''} ${opensRight ? 'opens-right' : ''}`}
+    className={`dataset-ai-composer ${hasProposal ? 'has-proposal' : ''} ${dragging ? 'is-dragging' : ''} ${opensRight ? 'opens-right' : ''} ${open ? 'is-open' : ''}`}
     style={position ? { left: position.x, top: position.y, right: 'auto', transform: 'none' } : undefined}
     aria-label="AI 自动配置数据流"
     onMouseDown={event => event.stopPropagation()}
     onClick={event => event.stopPropagation()}
     onDrop={event => event.stopPropagation()}
   >
-    <button className="dataset-ai-dock-trigger" type="button" aria-label="拖动或悬停打开 AI 助手" onPointerDown={beginDrag}>
+    <button className="dataset-ai-dock-trigger" type="button" aria-label={open ? '关闭 AI 数据流助手' : '打开 AI 数据流助手'} aria-expanded={open} onPointerDown={beginDrag} onClick={() => { if (suppressClickRef.current) { suppressClickRef.current = false; return } setOpen(current => !current) }}>
       <MagicWandIcon aria-hidden="true" size={22} weight="fill" />
       <span>AI</span>
     </button>
     <div className="dataset-ai-conversation" role="dialog" aria-label="AI 数据流助手">
+      <header className="dataset-ai-conversation-header"><span aria-hidden="true"><MagicWandIcon size={18} weight="fill" /></span><div><strong>AI 数据流助手</strong><small>{existingDAG ? hasProposal ? '继续调整组件方案，确认后应用修改' : '修改、新增或删除当前 DAG 组件' : hasProposal ? '对话调整方案，确认后生成到画布' : '分阶段确认并生成可编辑 DAG'}</small></div><button type="button" aria-label="关闭 AI 数据流助手" onClick={() => setOpen(false)}><XIcon size={16} weight="bold" /></button></header>
       {children}
     </div>
   </section>

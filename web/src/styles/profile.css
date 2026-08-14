@@ -6,21 +6,36 @@
 .profile-feedback { min-height: 42px; display: flex; align-items: center; gap: 8px; border: 1px solid #cde7da; border-radius: 7px; padding: 0 14px; background: #f3fbf7; color: #217a58; font-size: 14px; }
 .profile-feedback.is-error { border-color: #f0d3d1; background: #fff6f5; color: #b42318; }
 .profile-overview { min-height: 112px; display: grid; grid-template-columns: 66px minmax(0,1fr) auto; align-items: center; gap: 18px; border: 1px solid #dce5f1; border-radius: 8px; padding: 20px 24px; background: #fff; box-shadow: 0 1px 2px #24426808; }
-.profile-overview > span { width: 58px; height: 58px; display: grid; place-items: center; border-radius: 50%; background: #edf5ff; color: #1677ff; }
+.profile-overview > span { width: 58px; height: 58px; display: grid; place-items: center; border-radius: 50%; background: #edf5ff; color: #0872d3; }
 .profile-overview h2 { margin: 0 0 6px; color: #26354a; font-size: 22px; }
 .profile-overview p { margin: 0; color: #718096; font-size: 14px; }
 .profile-overview em { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #cfe0f8; border-radius: 16px; padding: 6px 10px; background: #f5f9ff; color: #2468bd; font-size: 13px; font-style: normal; }
 .profile-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
 .profile-card { min-height: 478px; display: flex; flex-direction: column; gap: 18px; border: 1px solid #dce5f1; border-radius: 8px; padding: 24px; background: #fff; }
 .profile-card > header { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #e7edf4; padding-bottom: 18px; }
-.profile-card > header > span { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 7px; background: #edf5ff; color: #1677ff; }
+.profile-card > header > span { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 7px; background: #edf5ff; color: #0872d3; }
 .profile-card h2 { margin: 0 0 3px; color: #26354a; font-size: 18px; }
 .profile-card p { margin: 0; color: #7b8798; font-size: 13px; }
 .profile-card label { display: grid; gap: 7px; color: #445168; font-size: 14px; font-weight: 630; }
 .profile-card input { height: 43px; border: 1px solid #ccd7e5; border-radius: 6px; padding: 0 12px; color: #26354a; font: inherit; outline: 0; }
-.profile-card input:focus { border-color: #5797e6; box-shadow: 0 0 0 3px #1677ff12; }
+.profile-card input:focus { border-color: #5797e6; box-shadow: 0 0 0 3px #0872d312; }
 .profile-card input:disabled { background: #f5f7fa; color: #7f8a9a; }
 .profile-card small { color: #8995a5; font-size: 12px; font-weight: 400; }
 .profile-card footer { margin-top: auto; display: flex; justify-content: flex-end; border-top: 1px solid #e7edf4; padding-top: 18px; }
 .profile-card footer .app-button { min-width: 118px; }
 @media(max-width:980px){.profile-grid{grid-template-columns:1fr}.profile-card{min-height:auto}.profile-overview{grid-template-columns:58px 1fr}.profile-overview em{grid-column:2}}
+
+/* Personal settings use the same soft title and card language as the workbench. */
+.profile-shell > .main-stage { background: var(--canvas); }
+.profile-shell .topbar { height: 88px; }
+.profile-shell .topbar h1 { color: var(--ink); font-size: 24px; font-weight: 680; }
+.profile-shell .topbar-title-row span { color: var(--muted); font-size: 13px; }
+.profile-overview, .profile-card { border-color: var(--line-strong); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.profile-overview { min-height: 104px; }
+.profile-overview > span, .profile-card > header > span { border-radius: 10px; background: #edf5fd; color: #0872d3; }
+.profile-overview h2 { color: var(--ink); font-size: 19px; font-weight: 660; }
+.profile-card { min-height: 450px; }
+.profile-card > header, .profile-card footer { border-color: var(--line); }
+.profile-card h2 { color: var(--ink); font-size: 17px; font-weight: 660; }
+.profile-card input { border-color: var(--line-strong); border-radius: var(--radius-control); }
+.profile-card input:focus { border-color: #7eb3e5; box-shadow: var(--focus-ring); }

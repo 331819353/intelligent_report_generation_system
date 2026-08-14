@@ -55,6 +55,8 @@ type AppShellProps = {
   title?: string
   titleMeta?: ReactNode
   eyebrow?: string
+  /** 页头前导插槽：渲染在标题区之前，用于返回入口等导航控件。 */
+  leading?: ReactNode
   children: ReactNode
   actions?: ReactNode
   className?: string
@@ -170,7 +172,7 @@ const snapshotNotifications: NotificationItem[] = [
 ]
 
 /** 为业务、协同和治理页面提供统一的全局框架。 */
-export function AppShell({ title = '智能分析决策平台', titleMeta, eyebrow = '工作台', children, actions, className = '', controlPlane = false, hidePageHeader = false }: AppShellProps) {
+export function AppShell({ title = '智能分析决策平台', titleMeta, eyebrow = '工作台', leading, children, actions, className = '', controlPlane = false, hidePageHeader = false }: AppShellProps) {
   const navigate = useNavigate()
   const location = useLocation()
   const domainSwitcherRef = useRef<HTMLDivElement>(null)
@@ -527,6 +529,7 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
 
       <main className="main-stage">
         {!hidePageHeader && <header className="topbar">
+          {leading}
           <div><span className="eyebrow">{eyebrow}</span><div className="topbar-title-row"><h1>{title}</h1>{titleMeta}</div></div>
           <div className="topbar-actions">{actions}</div>
         </header>}
