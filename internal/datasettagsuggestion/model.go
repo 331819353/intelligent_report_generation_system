@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	PromptVersion      = "dataset-tag-suggestion-v7"
+	PromptVersion      = "dataset-tag-suggestion-v9"
 	MaxSuggestions     = 256
 	MaxTaxonomyTags    = 1024
 	MaxTaxonomyAliases = 4096

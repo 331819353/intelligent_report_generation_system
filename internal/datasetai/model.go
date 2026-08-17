@@ -9,8 +9,9 @@ import (
 
 const (
 	SchemaVersion       = "2.4"
-	PromptVersion       = "dataset-dag-planner-v15"
-	IntentPromptVersion = "dataset-dag-intent-v12"
+	PromptVersion       = "dataset-dag-planner-v19"
+	IntentPromptVersion = "dataset-dag-intent-v15"
+	IntakePromptVersion = "dataset-ai-intake-v3"
 
 	maxInstructionRunes = 4000
 	maxPlanNodes        = 16
@@ -23,6 +24,7 @@ const (
 	InvalidOutputStagePlannerResponse     = "PLANNER_RESPONSE"
 	InvalidOutputStagePlanValidation      = "PLAN_VALIDATION"
 	InvalidOutputStageChangeSetValidation = "CHANGESET_VALIDATION"
+	InvalidOutputStageBlueprintValidation = "BLUEPRINT_VALIDATION"
 
 	InvalidOutputReasonResponseFormat    = "RESPONSE_FORMAT_INVALID"
 	InvalidOutputReasonProviderResponse  = "PROVIDER_RESPONSE_INVALID"
@@ -37,6 +39,7 @@ const (
 	InvalidOutputReasonTransform         = "TRANSFORM_REQUIRED"
 	InvalidOutputReasonOutput            = "OUTPUT_INVALID"
 	InvalidOutputReasonChangeScope       = "CHANGE_SCOPE_INVALID"
+	InvalidOutputReasonBlueprint         = "BLUEPRINT_VIOLATION"
 	InvalidOutputReasonUnknown           = "INVALID_OUTPUT"
 )
 
@@ -49,6 +52,7 @@ var (
 
 	planIdentifierPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}$`)
 	physicalFieldPattern  = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_$#]{0,127}$`)
+	planFieldKeyPattern   = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,127}\.[A-Za-z][A-Za-z0-9_$#]{0,127}$`)
 )
 
 // InvalidOutputError exposes only stable, non-sensitive failure metadata at the HTTP
@@ -75,10 +79,54 @@ func (e *InvalidOutputError) Error() string {
 func (e *InvalidOutputError) Unwrap() error { return ErrInvalidOutput }
 
 // PlanRequest asks the model for a complete candidate graph. Current is optional so the
-// same endpoint supports both a blank canvas and iterative edits without persisting chat text.
+// same endpoint supports both a blank canvas and iterative edits.
+//
+// SessionID attaches the turn to a persisted modeling session: the service loads the
+// session's confirmed decisions as trusted prompt context, enforces a confirmed CREATE
+// scope on catalog loading, and records this turn's clarification or proposal into the
+// session. ClarificationAnswer is the structured reply to the session's open question —
+// never re-encoded as instruction prose.
 type PlanRequest struct {
-	Instruction string     `json:"instruction"`
-	Current     *GraphPlan `json:"current,omitempty"`
+	Instruction         string               `json:"instruction"`
+	Current             *GraphPlan           `json:"current,omitempty"`
+	SessionID           string               `json:"sessionId,omitempty"`
+	ClarificationAnswer *ClarificationAnswer `json:"clarificationAnswer,omitempty"`
+}
+
+// TableSuggestionRequest asks the same tenant-scoped metadata retrieval used by the
+// planner to rank candidate source tables before a user confirms the modeling scope.
+// CurrentTableIDs are excluded from the result because this endpoint is also used while
+// repairing an existing draft.
+type TableSuggestionRequest struct {
+	Instruction     string   `json:"instruction"`
+	CurrentTableIDs []string `json:"currentTableIds,omitempty"`
+	Limit           int      `json:"limit,omitempty"`
+	// SessionID lets retrieval consume the already confirmed structured business
+	// intent without trusting the client to reconstruct it as prose.
+	SessionID string `json:"sessionId,omitempty"`
+	// ModelKind (DIM/DWD/DWS/ADS) lets ranking prefer the layers a model of that
+	// kind should be built from: DWS from published DWD/DIM, ADS from DWS/DIM,
+	// DIM/DWD from raw tables. Empty keeps pure relevance order.
+	ModelKind string `json:"modelKind,omitempty"`
+	// Role makes PRIMARY_SOURCE and DIMENSION_SOURCE two explicit retrieval
+	// passes. Empty preserves the legacy combined-scope behavior.
+	Role string `json:"role,omitempty"`
+}
+
+type TableSuggestion struct {
+	TableID string  `json:"tableId"`
+	Score   float64 `json:"score,omitempty"`
+	// Layer is the source layer the ranking assumed (ODS for physical tables,
+	// the published layer for dataset versions).
+	Layer string `json:"layer,omitempty"`
+}
+
+type TableSuggestionResult struct {
+	Items          []TableSuggestion `json:"items"`
+	RetrievalMode  string            `json:"retrievalMode"`
+	EmbeddingReady bool              `json:"embeddingReady"`
+	Degraded       bool              `json:"degraded"`
+	DegradedReason string            `json:"degradedReason,omitempty"`
 }
 
 // TransformRequirement is a deterministic CREATE-mode constraint derived from explicit
@@ -169,10 +217,21 @@ type ChangeIntent struct {
 	ChangeSet  ChangeSet      `json:"changeSet"`
 }
 
+// ClarificationCandidate is one resolvable answer to a clarification question. The
+// name comes from the caller's own current graph, never from model output, so the
+// UI can render trusted component labels without re-deriving id-to-name maps.
+type ClarificationCandidate struct {
+	ComponentKind string `json:"componentKind"`
+	ComponentID   string `json:"componentId"`
+	ComponentName string `json:"componentName"`
+}
+
 // ClarificationRequiredError preserves a model-generated, bounded question for an
 // ambiguous modification while preventing the planner from guessing a target.
+// Candidates are limited to components that exist in the current graph.
 type ClarificationRequiredError struct {
-	Question string
+	Question   string
+	Candidates []ClarificationCandidate
 }
 
 func (e *ClarificationRequiredError) Error() string {
@@ -303,6 +362,18 @@ type PlanTransform struct {
 	ComponentType string              `json:"componentType"`
 	Input         PlanInput           `json:"input"`
 	Rules         []PlanTransformRule `json:"rules"`
+	// Conditions carries the row filter of a FILTER component (family CONDITION,
+	// no rules). A FILTER passes every upstream field through unchanged and the
+	// designer turns its conditions into DSL filters.
+	Conditions []PlanFilterCondition `json:"conditions,omitempty"`
+}
+
+type PlanFilterCondition struct {
+	ID        string `json:"id"`
+	InputKey  string `json:"inputKey"`
+	Operator  string `json:"operator"`
+	ValueMode string `json:"valueMode"`
+	Value     string `json:"value"`
 }
 
 type PlanOutput struct {
@@ -331,6 +402,16 @@ type CatalogTable struct {
 	BusinessDescription string          `json:"businessDescription"`
 	Tags                []string        `json:"tags"`
 	Columns             []CatalogColumn `json:"columns"`
+	// Declared keys from the source schema; empty for tables whose source does
+	// not report constraints (files, dataset versions).
+	PrimaryKeyColumns []string            `json:"primaryKeyColumns,omitempty"`
+	ForeignKeys       []CatalogForeignKey `json:"foreignKeys,omitempty"`
+}
+
+type CatalogForeignKey struct {
+	Columns           []string `json:"columns"`
+	ReferencedTable   string   `json:"referencedTable"`
+	ReferencedColumns []string `json:"referencedColumns"`
 }
 
 type CatalogColumn struct {
@@ -341,12 +422,16 @@ type CatalogColumn struct {
 	CanonicalType       string   `json:"canonicalType"`
 	SemanticType        string   `json:"semanticType"`
 	Nullable            bool     `json:"nullable"`
+	PrimaryKey          bool     `json:"primaryKey,omitempty"`
+	ForeignKey          bool     `json:"foreignKey,omitempty"`
+	Unique              bool     `json:"unique,omitempty"`
 }
 
 type plannerPromptEnvelope struct {
 	Instruction           string                 `json:"instruction"`
 	Mode                  string                 `json:"mode"`
 	Current               *GraphPlan             `json:"current,omitempty"`
+	Context               *promptModelingContext `json:"context,omitempty"`
 	TransformRequirements []TransformRequirement `json:"transformRequirements"`
 	ChangeSet             ChangeSet              `json:"changeSet"`
 	Assets                []CatalogTable         `json:"assets"`
@@ -356,14 +441,52 @@ type intentPromptEnvelope struct {
 	Instruction           string                 `json:"instruction"`
 	Current               GraphPlan              `json:"current"`
 	EditContext           *promptEditContext     `json:"editContext,omitempty"`
+	Context               *promptModelingContext `json:"context,omitempty"`
 	TransformRequirements []TransformRequirement `json:"transformRequirements"`
 	Assets                []CatalogTable         `json:"assets"`
+}
+
+// promptModelingContext is server-injected, trusted session context: the user's own
+// confirmed decisions, never model output and never free instruction text. The
+// planner sees it only in CREATE mode (goal, kind and scope); the intent model
+// additionally sees the clarification history so follow-up turns stay grounded.
+type promptModelingContext struct {
+	Goal              string   `json:"goal,omitempty"`
+	ModelKind         string   `json:"modelKind,omitempty"`
+	ConfirmedTableIDs []string `json:"confirmedTableIds,omitempty"`
+	// Blueprint is the confirmed modeling calibre (grain, metrics, joins,
+	// transforms, filters, outputs) the planner must realise; see blueprint_context.go.
+	Blueprint      *promptBlueprintContext   `json:"blueprint,omitempty"`
+	Clarifications []promptClarificationTurn `json:"clarifications,omitempty"`
+	// ExecutionFindings are the latest preview conclusions of the applied
+	// proposal (empty result, fan-out, cardinality mismatch, error).
+	ExecutionFindings []promptExecutionFinding `json:"executionFindings,omitempty"`
+}
+
+type promptExecutionFinding struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	JoinID  string `json:"joinId,omitempty"`
+}
+
+type promptClarificationTurn struct {
+	Question          string        `json:"question"`
+	Answer            string        `json:"answer,omitempty"`
+	SelectedComponent *ComponentRef `json:"selectedComponent,omitempty"`
 }
 
 func normalizePlanRequest(input PlanRequest) (PlanRequest, error) {
 	input.Instruction = strings.TrimSpace(input.Instruction)
 	if input.Instruction == "" || len([]rune(input.Instruction)) > maxInstructionRunes {
 		return PlanRequest{}, fmt.Errorf("%w: instruction must contain 1 to %d characters", ErrInvalidRequest, maxInstructionRunes)
+	}
+	input.SessionID = strings.TrimSpace(input.SessionID)
+	if input.ClarificationAnswer != nil {
+		answer := input.ClarificationAnswer.normalized()
+		if err := answer.validate(); err != nil {
+			return PlanRequest{}, err
+		}
+		input.ClarificationAnswer = &answer
 	}
 	if input.Current != nil {
 		current := normalizeGraphPlan(*input.Current)
@@ -473,6 +596,23 @@ func normalizeGraphPlan(value GraphPlan) GraphPlan {
 				rule.ConditionValues[k].Value = strings.TrimSpace(rule.ConditionValues[k].Value)
 			}
 		}
+		if transform.ComponentType == "FILTER" && transform.Conditions == nil {
+			transform.Conditions = []PlanFilterCondition{}
+		}
+		if transform.ComponentType != "FILTER" && len(transform.Conditions) == 0 {
+			transform.Conditions = nil
+		}
+		for j := range transform.Conditions {
+			condition := &transform.Conditions[j]
+			condition.ID = strings.TrimSpace(condition.ID)
+			condition.InputKey = strings.TrimSpace(condition.InputKey)
+			condition.Operator = strings.ToUpper(strings.TrimSpace(condition.Operator))
+			condition.ValueMode = strings.ToUpper(strings.TrimSpace(condition.ValueMode))
+			if condition.ValueMode == "" {
+				condition.ValueMode = "LITERAL"
+			}
+			condition.Value = strings.TrimSpace(condition.Value)
+		}
 	}
 	value.End.Name = strings.TrimSpace(value.End.Name)
 	value.End.Input = normalizeInput(value.End.Input)
@@ -565,8 +705,20 @@ func validateGraphShape(value GraphPlan) error {
 		}
 	}
 	for _, transform := range value.Transforms {
-		if !validIdentifier(transform.ID) || !boundedText(transform.Name, 1, 200) || len(transform.Rules) < 1 || len(transform.Rules) > 64 {
-			return fmt.Errorf("transform %s identity or rule count is invalid", transform.ID)
+		if !validIdentifier(transform.ID) || !boundedText(transform.Name, 1, 200) {
+			return fmt.Errorf("transform %s identity is invalid", transform.ID)
+		}
+		if transform.ComponentType == "FILTER" {
+			if len(transform.Rules) != 0 || len(transform.Conditions) < 1 || len(transform.Conditions) > 32 {
+				return fmt.Errorf("filter %s must carry 1 to 32 conditions and no rules", transform.ID)
+			}
+			for _, condition := range transform.Conditions {
+				if detail := filterConditionValidationDetail(condition); detail != "" {
+					return fmt.Errorf("filter %s condition %s is invalid: %s", transform.ID, condition.ID, detail)
+				}
+			}
+		} else if len(transform.Rules) < 1 || len(transform.Rules) > 64 || len(transform.Conditions) != 0 {
+			return fmt.Errorf("transform %s rule count is invalid", transform.ID)
 		}
 		if !validTransformComponent(transform) {
 			return fmt.Errorf("transform %s family %s does not match component type %s", transform.ID, transform.Family, transform.ComponentType)
@@ -590,9 +742,36 @@ func validTransformComponent(value PlanTransform) bool {
 	families := map[string]string{
 		"TEXT_CASE": "TEXT", "TEXT_UPPER": "TEXT", "TEXT_TRIM": "TEXT", "TEXT_REPLACE": "TEXT", "TEXT_LOWER": "TEXT", "TEXT_SUBSTRING": "TEXT", "TEXT_CONCAT": "TEXT",
 		"NUMBER_ABSOLUTE": "NUMBER", "NUMBER_ROUNDING": "NUMBER", "NUMBER_ARITHMETIC": "NUMBER", "DATE_CALCULATION": "DATE", "DATE_FORMAT": "DATE",
-		"NULL": "NULL", "CAST": "CAST", "CONDITION": "CONDITION",
+		"NULL": "NULL", "CAST": "CAST", "CONDITION": "CONDITION", "FILTER": "CONDITION",
 	}
 	return families[value.ComponentType] == value.Family
+}
+
+// filterConditionValidationDetail checks one FILTER condition's shape; field
+// availability is proven by the graph walk in validateGraphPlan.
+func filterConditionValidationDetail(condition PlanFilterCondition) string {
+	if !validIdentifier(condition.ID) {
+		return "condition id is invalid"
+	}
+	if !planFieldKeyPattern.MatchString(condition.InputKey) {
+		return "condition inputKey must be nodeId.column or transformId.outputId"
+	}
+	if !oneOf(condition.Operator, "EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "CONTAINS", "NOT_CONTAINS", "IN", "NOT_IN", "IS_NULL", "IS_NOT_NULL") {
+		return "condition operator is unsupported"
+	}
+	if !oneOf(condition.ValueMode, "LITERAL", "FIELD") {
+		return "condition valueMode must be LITERAL or FIELD"
+	}
+	if oneOf(condition.Operator, "IS_NULL", "IS_NOT_NULL") {
+		return ""
+	}
+	if !boundedText(condition.Value, 1, 500) {
+		return "condition value is required"
+	}
+	if condition.ValueMode == "FIELD" && !planFieldKeyPattern.MatchString(condition.Value) {
+		return "condition FIELD value must be a field key"
+	}
+	return ""
 }
 
 func validTransformRule(componentType string, rule PlanTransformRule) bool {
@@ -762,7 +941,8 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 	}
 	transforms := make(map[string]PlanTransform, len(value.Transforms))
 	for _, transform := range value.Transforms {
-		if componentIDs[transform.ID] || !validTransformComponent(transform) || len(transform.Rules) < 1 {
+		hasBody := len(transform.Rules) >= 1 || (transform.ComponentType == "FILTER" && len(transform.Conditions) >= 1)
+		if componentIDs[transform.ID] || !validTransformComponent(transform) || !hasBody {
 			return invalidOutput("transform identity, type, or rules are invalid")
 		}
 		componentIDs[transform.ID] = true
@@ -905,6 +1085,17 @@ func validateGraphPlan(value GraphPlan, catalog []CatalogTable) error {
 				return nil, nil, err
 			}
 			fields := cloneSet(upstream)
+			for _, condition := range transform.Conditions {
+				if detail := filterConditionValidationDetail(condition); detail != "" {
+					return nil, nil, fmt.Errorf("filter %s condition %s is invalid: %s", transform.ID, condition.ID, detail)
+				}
+				if !upstream[condition.InputKey] {
+					return nil, nil, errors.New("filter condition references an unavailable input field")
+				}
+				if condition.ValueMode == "FIELD" && !upstream[condition.Value] {
+					return nil, nil, errors.New("filter condition compares against an unavailable field")
+				}
+			}
 			for _, rule := range transform.Rules {
 				if detail := transformRuleValidationDetail(transform.ComponentType, rule); detail != "" {
 					return nil, nil, fmt.Errorf("transform %s rule %s is invalid: %s", transform.ID, rule.ID, detail)

@@ -1,4 +1,6 @@
-import { apiRequest, apiResponse, RequestError, type APIError } from './api'
+import { apiRequest } from './api'
+import { requestDatasetAIStream, type DatasetAIProgressEvent } from './dataset-ai-stream'
+export { requestDatasetAIStream, type DatasetAIProgressEvent } from './dataset-ai-stream'
 import {
   graphContains,
   graphLeaves,
@@ -26,7 +28,7 @@ import {
   type FieldOption,
   type JoinOption,
 } from './datasets'
-export { datasetAIRequestContext } from './dataset-ai-context'
+export { datasetAICanvasMode, datasetAIRequestContext } from './dataset-ai-context'
 
 export type DatasetAIInput = { kind: 'NODE' | 'JOIN' | 'GROUP' | 'TRANSFORM'; id: string }
 export type DatasetAIPlanNode = { id: string; tableId: string; alias: string; selectedColumns: string[] }
@@ -43,9 +45,16 @@ export type DatasetAIPlanGroup = {
   id: string; name: string; input: DatasetAIInput
   dimensions: DatasetAIPlanDimension[]; metrics: DatasetAIPlanMetric[]
 }
+export type DatasetAIPlanFilterCondition = {
+  id: string; inputKey: string
+  operator: 'EQUALS' | 'NOT_EQUALS' | 'GT' | 'GTE' | 'LT' | 'LTE' | 'CONTAINS' | 'NOT_CONTAINS' | 'IN' | 'NOT_IN' | 'IS_NULL' | 'IS_NOT_NULL'
+  valueMode: 'LITERAL' | 'FIELD'; value: string
+}
 export type DatasetAIPlanTransform = {
   id: string; name: string; input: DatasetAIInput
   family: GraphTransformFamily; componentType: GraphTransformComponentType; rules: GraphTransformRule[]
+  /** FILTER components carry conditions instead of rules; every upstream field passes through. */
+  conditions?: DatasetAIPlanFilterCondition[]
 }
 export type DatasetAIPlanOutput = { nodeId: string; column: string; key?: string; name: string; code: string }
 export type DatasetAIGraphPlan = {
@@ -90,11 +99,12 @@ export type DatasetAIProposal = {
   plan: DatasetAIGraphPlan
 }
 export type DatasetAIPlanResult = { requestId: string; proposal: DatasetAIProposal }
-export type DatasetAIProgressEvent = {
-  timestamp: string
-  stage: 'CONTEXT' | 'CATALOG' | 'INTENT' | 'PLANNER' | 'VALIDATION' | 'REPAIR' | 'COMPLETE'
-  status: 'RUNNING' | 'SUCCEEDED' | 'WARN'
-  message: string
+export type DatasetAITableSuggestionResult = {
+  items: Array<{ tableId: string; score?: number; layer?: string }>
+  retrievalMode: 'LEXICAL' | 'SHADOW' | 'HYBRID'
+  embeddingReady: boolean
+  degraded: boolean
+  degradedReason?: string
 }
 
 export type MaterializedDatasetAIPlan = {
@@ -144,8 +154,9 @@ export function datasetAIPlanFromEditor(
   graph: DesignerGraphV1,
   metadata: { name: string; description: string },
 ): DatasetAIGraphPlan | undefined {
-  if (!draft.nodes.length) return undefined
-  const nodeIDs = new Set(draft.nodes.map(node => node.id))
+  const eligibleNodes = draft.nodes.filter(node => node.selected.length > 0)
+  if (!eligibleNodes.length) return undefined
+  const nodeIDs = new Set(eligibleNodes.map(node => node.id))
   const joinIDs = new Set(graph.joins.map(join => join.id))
   const groupIDs = new Set(graph.groups.map(group => group.id))
   const transformIDs = new Set((graph.transforms ?? []).map(transform => transform.id))
@@ -169,28 +180,36 @@ export function datasetAIPlanFromEditor(
   const includedJoinIDs = new Set(joins.map(join => join.id))
   const groups = graph.groups.flatMap((group): DatasetAIPlanGroup[] => {
     if (!group.input || !inputExists(group.input as DatasetAIInput, nodeIDs, includedJoinIDs, groupIDs, transformIDs)) return []
+    const dimensions = group.dimensions.flatMap(item => {
+      const parts = keyParts(item.key)
+      return parts.nodeId && parts.column ? [{ nodeId: parts.nodeId, column: parts.column, grouping: (item.grouping || '') as DatasetAIPlanDimension['grouping'] }] : []
+    })
+    const metrics = group.metrics.flatMap(item => {
+      const parts = keyParts(item.key)
+      return parts.nodeId && parts.column ? [{ nodeId: parts.nodeId, column: parts.column, aggregation: item.aggregation as DatasetAIPlanMetric['aggregation'] }] : []
+    })
+    if (!dimensions.length || !metrics.length) return []
     return [{
       id: group.id, name: group.name, input: group.input as DatasetAIInput,
-      dimensions: group.dimensions.flatMap(item => {
-        const parts = keyParts(item.key)
-        return parts.nodeId && parts.column ? [{ nodeId: parts.nodeId, column: parts.column, grouping: (item.grouping || '') as DatasetAIPlanDimension['grouping'] }] : []
-      }),
-      metrics: group.metrics.flatMap(item => {
-        const parts = keyParts(item.key)
-        return parts.nodeId && parts.column ? [{ nodeId: parts.nodeId, column: parts.column, aggregation: item.aggregation as DatasetAIPlanMetric['aggregation'] }] : []
-      }),
+      dimensions,
+      metrics,
     }]
   })
   const includedGroupIDs = new Set(groups.map(group => group.id))
-  const transforms: DatasetAIPlanTransform[] = (graph.transforms ?? []).flatMap(transform => transform.input && inputExists(transform.input as DatasetAIInput, nodeIDs, includedJoinIDs, includedGroupIDs, transformIDs) && transform.rules.length
-    ? [{
+  const transforms: DatasetAIPlanTransform[] = (graph.transforms ?? []).flatMap(transform => {
+    if (!transform.input || !inputExists(transform.input as DatasetAIInput, nodeIDs, includedJoinIDs, includedGroupIDs, transformIDs)) return []
+    const componentType = transformComponentType(transform)
+    const isFilter = componentType === 'FILTER'
+    if (isFilter ? !(transform.conditions?.length) : !transform.rules.length) return []
+    return [{
       id: transform.id, name: transform.name, input: transform.input as DatasetAIInput,
-      family: transform.family, componentType: transformComponentType(transform),
-      rules: transform.rules.map(rule => ({ ...rule, inputKeys: [...rule.inputKeys], output: { ...rule.output }, ...(rule.conditionValues ? { conditionValues: rule.conditionValues.map(value => ({ ...value })) } : {}) })),
+      family: isFilter ? 'CONDITION' as const : transform.family, componentType,
+      rules: isFilter ? [] : transform.rules.map(rule => ({ ...rule, inputKeys: [...rule.inputKeys], output: { ...rule.output }, ...(rule.conditionValues ? { conditionValues: rule.conditionValues.map(value => ({ ...value })) } : {}) })),
+      ...(isFilter ? { conditions: (transform.conditions ?? []).map(condition => ({ id: condition.id, inputKey: condition.inputKey, operator: condition.operator as DatasetAIPlanFilterCondition['operator'], valueMode: condition.valueMode ?? 'LITERAL', value: condition.value })) } : {}),
     }]
-    : [])
+  })
   const includedTransformIDs = new Set(transforms.map(transform => transform.id))
-  const compactGraph = {
+  const completeGraph = {
     joins: joins.map(join => ({ ...join, position: { x: 0, y: 0 }, outputKeys: [] })),
     groups: groups.map(group => {
       const configured = graph.groups.find(item => item.id === group.id)
@@ -204,28 +223,54 @@ export function datasetAIPlanFromEditor(
     }),
     transforms: transforms.map(transform => ({ ...transform, position: { x: 0, y: 0 } })),
   }
-  const fallbackInput = graphRoot([...nodeIDs], compactGraph) ?? { kind: 'NODE' as const, id: draft.nodes[0].id }
+  const fallbackInput = graphRoot([...nodeIDs], completeGraph) ?? { kind: 'NODE' as const, id: eligibleNodes[0].id }
   const endInput = inputExists(graph.end?.input as DatasetAIInput | undefined, nodeIDs, includedJoinIDs, includedGroupIDs, includedTransformIDs)
     ? graph.end!.input as DatasetAIInput
     : fallbackInput as DatasetAIInput
-  const endFields = new Map(graphProducedFields(endInput as GraphInput, compactGraph, draft.nodes, draft.fields).map(field => [field.key, field]))
+  // A half-built draft may contain disconnected or invalid components. Keep the largest valid
+  // executable branch as the trusted MODIFY baseline; the page sends the omitted draft pieces as
+  // repair context so the model can complete, replace, or remove them without treating the canvas
+  // as a brand-new DAG.
+  const activeNodeIDs = new Set(graphLeaves(endInput as GraphInput, completeGraph))
+  const activeNodes = eligibleNodes.filter(node => activeNodeIDs.has(node.id))
+  const activeJoins = joins.filter(join => graphContains(endInput as GraphInput, { kind: 'JOIN', id: join.id }, completeGraph))
+  const activeGroups = groups.filter(group => graphContains(endInput as GraphInput, { kind: 'GROUP', id: group.id }, completeGraph))
+  const activeTransforms = transforms.filter(transform => graphContains(endInput as GraphInput, { kind: 'TRANSFORM', id: transform.id }, completeGraph))
+  const activeGraph = {
+    joins: completeGraph.joins.filter(join => activeJoins.some(item => item.id === join.id)),
+    groups: completeGraph.groups.filter(group => activeGroups.some(item => item.id === group.id)),
+    transforms: completeGraph.transforms.filter(transform => activeTransforms.some(item => item.id === transform.id)),
+  }
+  const endFields = new Map(graphProducedFields(endInput as GraphInput, activeGraph, activeNodes, draft.fields).map(field => [field.key, field]))
   const outputs = (graph.end?.outputs ?? []).flatMap(output => {
     const produced = endFields.get(output.key)
     return produced ? [{ nodeId: produced.binding.nodeId, column: produced.binding.field, key: output.key, name: output.name, code: output.code }] : []
   })
   const fallbackOutput = (() => {
-    const node = draft.nodes[0]
+    const node = activeNodes[0]
+    if (!node) return []
     const column = node.columns.find(item => node.selected.includes(item.columnName))
     return column ? [{ nodeId: node.id, column: column.columnName, key: fieldKey(node.id, column.columnName), name: column.businessName || column.columnName, code: identifier(column.columnName) }] : []
   })()
   return {
     dataset: { name: metadata.name || draft.name, description: metadata.description || draft.description },
-    nodes: draft.nodes.map(node => ({ id: node.id, tableId: node.table.id, alias: node.alias, selectedColumns: [...node.selected] })),
-    joins,
-    groups,
-    transforms,
+    nodes: activeNodes.map(node => ({ id: node.id, tableId: node.table.id, alias: node.alias, selectedColumns: [...node.selected] })),
+    joins: activeJoins,
+    groups: activeGroups,
+    transforms: activeTransforms,
     end: { name: graph.end?.name || '最终输出', input: endInput, outputs: outputs.length ? outputs : fallbackOutput },
   }
+}
+
+export type DatasetAIClarificationAnswer = {
+  question: string
+  text?: string
+  selectedComponent?: { componentKind: string; componentId: string }
+}
+
+export type DatasetAIProposalOptions = {
+  sessionId?: string
+  clarificationAnswer?: DatasetAIClarificationAnswer
 }
 
 export async function requestDatasetAIProposal(
@@ -233,50 +278,34 @@ export async function requestDatasetAIProposal(
   instruction: string,
   current?: DatasetAIGraphPlan,
   onProgress?: (event: DatasetAIProgressEvent) => void,
+  options: DatasetAIProposalOptions = {},
 ): Promise<DatasetAIPlanResult> {
   const path = datasetId ? `/v1/datasets/${encodeURIComponent(datasetId)}/ai/proposals` : '/v1/datasets/ai/proposals'
   const init: RequestInit = {
     method: 'POST',
-    body: JSON.stringify({ instruction, ...(current ? { current } : {}) }),
+    body: JSON.stringify({
+      instruction,
+      ...(current ? { current } : {}),
+      ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      ...(options.clarificationAnswer ? { clarificationAnswer: options.clarificationAnswer } : {}),
+    }),
   }
-  if (!onProgress) return apiRequest<DatasetAIPlanResult>(path, init)
+  return requestDatasetAIStream<DatasetAIPlanResult>(path, init, 'result', onProgress)
+}
 
-  const response = await apiResponse(path, {
-    ...init,
-    headers: { Accept: 'application/x-ndjson' },
+/** Rank source tables with the same metadata/tag hybrid retrieval used by DAG planning. */
+export function requestDatasetAITableSuggestions(
+  instruction: string,
+  currentTableIds: string[] = [],
+  limit = 4,
+  modelKind?: 'DIM' | 'DWD' | 'DWS' | 'ADS',
+	role?: 'PRIMARY' | 'DIMENSION',
+	sessionId?: string,
+): Promise<DatasetAITableSuggestionResult> {
+  return apiRequest<DatasetAITableSuggestionResult>('/v1/datasets/ai/table-suggestions', {
+    method: 'POST',
+    body: JSON.stringify({ instruction, currentTableIds, limit, ...(modelKind ? { modelKind } : {}), ...(role ? { role } : {}), ...(sessionId ? { sessionId } : {}) }),
   })
-  if (!response.body || !response.headers?.get('Content-Type')?.includes('application/x-ndjson')) {
-    return response.json() as Promise<DatasetAIPlanResult>
-  }
-
-  type StreamFrame =
-    | { type: 'progress'; progress: DatasetAIProgressEvent }
-    | { type: 'result'; result: DatasetAIPlanResult }
-    | { type: 'error'; status: number; error: APIError }
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let result: DatasetAIPlanResult | undefined
-  const consume = (line: string) => {
-    if (!line.trim()) return
-    const frame = JSON.parse(line) as StreamFrame
-    if (frame.type === 'progress') onProgress(frame.progress)
-    if (frame.type === 'result') result = frame.result
-    if (frame.type === 'error') throw new RequestError(frame.error, frame.status)
-  }
-  while (true) {
-    const chunk = await reader.read()
-    buffer += decoder.decode(chunk.value, { stream: !chunk.done })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-    for (const line of lines) consume(line)
-    if (chunk.done) break
-  }
-  consume(buffer)
-  if (!result) {
-    throw new RequestError({ code: 'AI_STREAM_INCOMPLETE', message: 'AI 生成连接提前结束，请重试' }, 502)
-  }
-  return result
 }
 
 /** Convert a reviewed proposal into one atomic editor snapshot; no partial state is applied. */
@@ -395,6 +424,7 @@ export async function materializeDatasetAIPlan(
       family: transform.family, componentType: transform.componentType,
       position: sameTopology ? previous!.position : { x: 0, y: 0 },
       rules: transform.rules.map(rule => ({ ...rule, inputKeys: [...rule.inputKeys], output: { ...rule.output }, ...(rule.conditionValues ? { conditionValues: rule.conditionValues.map(value => ({ ...value })) } : {}) })),
+      ...(transform.componentType === 'FILTER' && transform.conditions ? { conditions: transform.conditions.map(condition => ({ ...condition })) } : {}),
     }
   })
   const outputFilterGraph: DesignerGraphV1 = {

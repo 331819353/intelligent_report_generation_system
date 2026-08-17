@@ -8,30 +8,27 @@ import (
 	"intelligent-report-generation-system/internal/askdata/registry"
 )
 
+// validateL3 的整批规则按行类型分组执行：单类型批行为不变，BUNDLE 批的每个
+// 类型组各自独立评估（公式环只看 METRIC 组，层级连续性只看 HIERARCHY 组）。
 func validateL3(rows []parsedImportRow, batch batchIndex, snapshot ValidationSnapshot) {
-	assetType := inferBatchAssetType(rows, batch)
-	if assetType == AssetMetric {
-		validateFormulaCycles(rows)
-	}
-	if assetType == AssetHierarchy {
-		validateHierarchyContinuity(rows)
-	}
-	if assetType == AssetMetricDimension {
-		validateCompatibilityRows(rows, snapshot)
-	}
+	validateFormulaCycles(rowsOfType(rows, AssetMetric))
+	validateHierarchyContinuity(rowsOfType(rows, AssetHierarchy))
+	validateCompatibilityRows(rowsOfType(rows, AssetMetricDimension), snapshot)
 	for index := range rows {
 		row := &rows[index]
 		if row.Layer != 2 {
 			continue
 		}
-		switch assetType {
+		switch row.Type {
 		case AssetMeasure, AssetMetric:
-			validateAdditivityConsistency(row, assetType)
-			if assetType == AssetMetric {
-				validateTimeGrain(row, snapshot)
+			validateAdditivityConsistency(row, row.Type)
+			if row.Type == AssetMetric {
+				validateTimeGrain(row, batch, snapshot)
 			}
 		case AssetRelationship:
 			validateFanoutCombination(row)
+		case AssetKnowledge:
+			validateKnowledgeShape(row)
 		}
 		if len(row.Issues) == 0 {
 			row.Layer = 3
@@ -39,18 +36,34 @@ func validateL3(rows []parsedImportRow, batch batchIndex, snapshot ValidationSna
 	}
 }
 
-func inferBatchAssetType(rows []parsedImportRow, batch batchIndex) AssetType {
-	if len(rows) == 0 {
-		return ""
+func rowsOfType(rows []parsedImportRow, assetType AssetType) []*parsedImportRow {
+	selected := []*parsedImportRow{}
+	for index := range rows {
+		if rows[index].Type == assetType {
+			selected = append(selected, &rows[index])
+		}
 	}
-	return rowType(&rows[0], batch)
+	return selected
 }
 
-func validateFormulaCycles(rows []parsedImportRow) {
+// validateKnowledgeShape 校验知识词条自身的结构自洽：DEFINES 必须指向一个
+// 注册对象，权威定义必须给出正文。
+func validateKnowledgeShape(row *parsedImportRow) {
+	if row.Values["relation"] == "DEFINES" &&
+		(row.Values["targetType"] == "" || row.Values["targetCode"] == "") {
+		addIssue(row, "relation", ImportTypeInvalid, "DEFINES 关系必须指向具体对象",
+			"targetType 与 targetCode 均非空", row.Values["relation"])
+	}
+	if row.Values["targetCode"] != "" && row.Values["targetType"] == "" {
+		addIssue(row, "targetType", ImportRequiredMissing, "给出 targetCode 时必须声明 targetType",
+			"METRIC | DIMENSION | MEMBER | TIME", "")
+	}
+}
+
+func validateFormulaCycles(rows []*parsedImportRow) {
 	codeToRow := map[string]*parsedImportRow{}
 	graph := map[string][]string{}
-	for index := range rows {
-		row := &rows[index]
+	for _, row := range rows {
 		if row.Layer != 2 {
 			continue
 		}
@@ -100,10 +113,9 @@ func validateFormulaCycles(rows []parsedImportRow) {
 	}
 }
 
-func validateHierarchyContinuity(rows []parsedImportRow) {
+func validateHierarchyContinuity(rows []*parsedImportRow) {
 	groups := map[string][]*parsedImportRow{}
-	for index := range rows {
-		row := &rows[index]
+	for _, row := range rows {
 		if row.Layer == 2 {
 			groups[canonicalLookup(row.Values["code"])] = append(groups[canonicalLookup(row.Values["code"])], row)
 		}
@@ -130,10 +142,9 @@ func validateHierarchyContinuity(rows []parsedImportRow) {
 	}
 }
 
-func validateCompatibilityRows(rows []parsedImportRow, snapshot ValidationSnapshot) {
+func validateCompatibilityRows(rows []*parsedImportRow, snapshot ValidationSnapshot) {
 	pairs := map[string]map[string][]*parsedImportRow{}
-	for index := range rows {
-		row := &rows[index]
+	for _, row := range rows {
 		if row.Layer != 2 {
 			continue
 		}
@@ -206,20 +217,41 @@ func validateAdditivityConsistency(row *parsedImportRow, assetType AssetType) {
 	}
 }
 
-func validateTimeGrain(row *parsedImportRow, snapshot ValidationSnapshot) {
+func validateTimeGrain(row *parsedImportRow, batch batchIndex, snapshot ValidationSnapshot) {
 	grain := row.Values["timeGrain"]
 	if grain == "" || grain == "NONE" {
 		return
 	}
-	model := snapshot.References["MODEL"][canonicalLookup(row.Values["modelCode"])]
-	if len(model.TimeGrains) == 0 {
+	modelCode := canonicalLookup(row.Values["modelCode"])
+	model := snapshot.References["MODEL"][modelCode]
+	grains := model.TimeGrains
+	if len(grains) == 0 {
+		// BUNDLE 批：模型可能与指标同批创建。此时用同批 MODEL 行声明的时间
+		// 合同 code 解析认证合同的支持粒度。
+		grains = batchModelTimeGrains(batch, modelCode, snapshot)
+	}
+	if len(grains) == 0 {
 		addIssue(row, "timeGrain", ImportAdditivityInconsistent, "模型没有可证明支持该时间粒度的认证时间合同", "modelCode 绑定的 CERTIFIED time contract supportedGrains", grain)
 		return
 	}
-	for _, allowed := range model.TimeGrains {
+	for _, allowed := range grains {
 		if allowed == grain {
 			return
 		}
 	}
-	addIssue(row, "timeGrain", ImportAdditivityInconsistent, "时间合同不支持指标粒度", fmt.Sprintf("supportedGrains=%v", model.TimeGrains), grain)
+	addIssue(row, "timeGrain", ImportAdditivityInconsistent, "时间合同不支持指标粒度", fmt.Sprintf("supportedGrains=%v", grains), grain)
+}
+
+func batchModelTimeGrains(batch batchIndex, modelCode string, snapshot ValidationSnapshot) []string {
+	for _, rowNo := range batch.Codes["MODEL"][modelCode] {
+		modelRow := batch.Rows[rowNo]
+		if modelRow == nil {
+			continue
+		}
+		contract := snapshot.References["TIME_CONTRACT"][canonicalLookup(modelRow.Values["timeContractCode"])]
+		if len(contract.TimeGrains) > 0 {
+			return contract.TimeGrains
+		}
+	}
+	return nil
 }

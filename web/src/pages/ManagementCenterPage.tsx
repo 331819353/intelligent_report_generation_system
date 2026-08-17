@@ -56,6 +56,64 @@ type DialogState =
   | { kind: 'approval-rejection'; approval: PlatformApproval }
   | null
 
+const snapshotAdministrators = [
+  { id: 'snapshot-admin-1', employeeNo: 'ZW00123', email: 'zhangwei@haier.com', displayName: '张伟' },
+  { id: 'snapshot-admin-2', employeeNo: 'LN00876', email: 'lina@haier.com', displayName: '李娜' },
+]
+
+const snapshotDomains: BusinessDomain[] = [
+  { id: 'snapshot-domain-1', code: 'ENTERPRISE_OPERATION', name: '企业经营', description: '统一承载经营分析、收入利润与管理驾驶舱的数据资产。', status: 'ACTIVE', default: true, version: 6, createdAt: '2026-07-18T09:00:00+08:00', accessSensitivity: 'INTERNAL', administrators: snapshotAdministrators },
+  { id: 'snapshot-domain-2', code: 'SUPPLY_CHAIN', name: '供应链管理', description: '覆盖采购、库存、物流履约与供应商协同。', status: 'ACTIVE', default: false, version: 3, createdAt: '2026-07-22T09:00:00+08:00', accessSensitivity: 'CONFIDENTIAL', administrators: [snapshotAdministrators[1]] },
+  { id: 'snapshot-domain-3', code: 'CHANNEL_SALES', name: '渠道销售', description: '聚合门店、电商和区域渠道的销售分析。', status: 'ACTIVE', default: false, version: 2, createdAt: '2026-08-01T09:00:00+08:00', accessSensitivity: 'RESTRICTED', administrators: [snapshotAdministrators[0]] },
+  { id: 'snapshot-domain-4', code: 'MANUFACTURING_QUALITY', name: '制造质量', description: '沉淀生产、质检与异常追踪主题数据。', status: 'DISABLED', default: false, version: 1, createdAt: '2026-08-03T09:00:00+08:00', accessSensitivity: 'INTERNAL', administrators: [snapshotAdministrators[1]] },
+]
+
+const snapshotUsers: AdminUser[] = [
+  { ...snapshotAdministrators[0], status: 'ACTIVE', platformAdministrator: true, domains: [], lastLoginAt: '2026-08-14T09:35:00+08:00', createdAt: '2026-06-02T10:00:00+08:00' },
+  { ...snapshotAdministrators[1], status: 'ACTIVE', platformAdministrator: false, domains: [{ id: 'snapshot-domain-1', code: 'ENTERPRISE_OPERATION', name: '企业经营', default: true, memberRole: 'DOMAIN_ADMIN' }, { id: 'snapshot-domain-2', code: 'SUPPLY_CHAIN', name: '供应链管理', default: false, memberRole: 'DOMAIN_ADMIN' }], lastLoginAt: '2026-08-14T08:55:00+08:00', createdAt: '2026-06-18T10:00:00+08:00' },
+  { id: 'snapshot-user-3', employeeNo: 'ZM00632', email: 'zhaomin@haier.com', displayName: '赵敏', status: 'ACTIVE', platformAdministrator: false, domains: [{ id: 'snapshot-domain-3', code: 'CHANNEL_SALES', name: '渠道销售', default: false, memberRole: 'DOMAIN_ADMIN' }], lastLoginAt: '2026-08-13T17:42:00+08:00', createdAt: '2026-07-01T10:00:00+08:00' },
+  { id: 'snapshot-user-4', employeeNo: 'WY00468', email: 'wangyu@haier.com', displayName: '王宇', status: 'ACTIVE', platformAdministrator: false, domains: [{ id: 'snapshot-domain-1', code: 'ENTERPRISE_OPERATION', name: '企业经营', default: true, memberRole: 'MEMBER' }], lastLoginAt: '2026-08-13T15:10:00+08:00', createdAt: '2026-07-08T10:00:00+08:00' },
+  { id: 'snapshot-user-5', employeeNo: 'CY00911', email: 'chenyu@haier.com', displayName: '陈宇', status: 'DISABLED', platformAdministrator: false, domains: [{ id: 'snapshot-domain-2', code: 'SUPPLY_CHAIN', name: '供应链管理', default: false, memberRole: 'MEMBER' }], lastLoginAt: '2026-08-09T11:20:00+08:00', createdAt: '2026-07-15T10:00:00+08:00' },
+]
+
+const snapshotApprovals: PlatformApproval[] = [
+  { id: 'snapshot-approval-1', kind: 'DOMAIN_ACCESS', version: 2, resourceId: 'snapshot-domain-3', resourceName: '渠道销售访问申请', domainId: 'snapshot-domain-3', domainCode: 'CHANNEL_SALES', domainName: '渠道销售', requesterUserId: 'snapshot-user-4', requesterEmail: 'wangyu@haier.com', requesterDisplayName: '王宇', status: 'PENDING', note: '需要查看华东区域渠道经营数据，用于月度复盘。', submittedAt: '2026-08-14T08:40:00+08:00', requiresDualApproval: true, approvedRoles: ['DOMAIN_OWNER'], openSeats: ['SECURITY'], slaDueAt: '2026-08-14T18:00:00+08:00', slaStatus: 'DUE_SOON', escalationLevel: 0 },
+  { id: 'snapshot-approval-2', kind: 'DATA_SOURCE', version: 1, resourceId: 'snapshot-source-1', resourceName: 'MySQL 销售业务库', domainId: 'snapshot-domain-1', domainCode: 'ENTERPRISE_OPERATION', domainName: '企业经营', requesterUserId: 'snapshot-user-3', requesterEmail: 'zhaomin@haier.com', requesterDisplayName: '赵敏', status: 'PENDING', note: '已完成连接验证与元数据扫描，申请正式发布。', submittedAt: '2026-08-14T09:12:00+08:00', requiresDualApproval: false, approvedRoles: [], openSeats: [], slaStatus: 'NOT_APPLICABLE', escalationLevel: 0 },
+  { id: 'snapshot-approval-3', kind: 'DATASET', version: 3, resourceId: 'snapshot-dataset-1', resourceName: '销售订单明细数据集', domainId: 'snapshot-domain-1', domainCode: 'ENTERPRISE_OPERATION', domainName: '企业经营', requesterUserId: 'snapshot-user-5', requesterEmail: 'chenyu@haier.com', requesterDisplayName: '陈宇', status: 'APPROVED', note: '完成字段校验和业务口径确认。', reviewerDisplayName: '张伟', submittedAt: '2026-08-13T10:10:00+08:00', reviewedAt: '2026-08-13T14:25:00+08:00', requiresDualApproval: false, approvedRoles: [], openSeats: [], slaStatus: 'NOT_APPLICABLE', escalationLevel: 0 },
+]
+
+const snapshotTasks: BackgroundTask[] = [
+  { id: 'snapshot-task-1', kind: 'DATA_SOURCE_DISCOVERY', kindLabel: '元数据发现', name: '销售业务库增量扫描', description: '正在读取新增表与字段变更', status: 'RUNNING', sourceStatus: 'RUNNING', resourceType: 'DATA_SOURCE', resourceId: 'snapshot-source-1', progressPercent: 68, progressText: '已处理 34 / 50 张表', attempt: 1, maxAttempts: 3, canCancel: true, canRetry: false, createdAt: '2026-08-14T09:00:00+08:00', startedAt: '2026-08-14T09:01:00+08:00', updatedAt: '2026-08-14T09:26:00+08:00' },
+  { id: 'snapshot-task-2', kind: 'DATASET_MATERIALIZATION', kindLabel: '数据集物化', name: '客户维度表版本 V6', description: '生成下游可复用的物化版本', status: 'QUEUED', sourceStatus: 'QUEUED', resourceType: 'DATASET', resourceId: 'snapshot-dataset-2', progressPercent: 0, progressText: '等待可用执行节点', attempt: 0, maxAttempts: 3, canCancel: true, canRetry: false, createdAt: '2026-08-14T09:18:00+08:00', updatedAt: '2026-08-14T09:18:00+08:00' },
+  { id: 'snapshot-task-3', kind: 'SEMANTIC_ENRICHMENT', kindLabel: '语义补全', name: '渠道主题业务语义生成', description: '部分字段生成失败，可安全重试', status: 'FAILED', sourceStatus: 'FAILED', resourceType: 'DATASET', resourceId: 'snapshot-dataset-3', progressPercent: 82, progressText: '已完成 41 / 50 个字段', attempt: 3, maxAttempts: 3, canCancel: false, canRetry: true, errorCode: 'AI_INVALID_OUTPUT', errorMessage: '模型输出未通过字段语义结构校验', createdAt: '2026-08-14T08:05:00+08:00', startedAt: '2026-08-14T08:06:00+08:00', updatedAt: '2026-08-14T08:34:00+08:00' },
+]
+
+const snapshotAuditLogs: PlatformAuditLog[] = [
+  { id: 'snapshot-log-1', action: 'UPDATE_STATUS', resourceType: 'BUSINESS_DOMAIN', resourceId: 'CHANNEL_SALES', result: 'SUCCESS', actorDisplayName: '张伟', actorEmail: 'zhangwei@haier.com', occurredAt: '2026-08-14T09:32:00+08:00' },
+  { id: 'snapshot-log-2', action: 'SET_PLATFORM_ADMINISTRATOR', resourceType: 'USER', resourceId: 'LN00876', result: 'SUCCESS', actorDisplayName: '张伟', actorEmail: 'zhangwei@haier.com', occurredAt: '2026-08-14T09:05:00+08:00' },
+  { id: 'snapshot-log-3', action: 'REVIEW_DOMAIN_APPLICATION', resourceType: 'DOMAIN_ACCESS', resourceId: 'CHANNEL_SALES', result: 'DENIED', actorDisplayName: '赵敏', actorEmail: 'zhaomin@haier.com', occurredAt: '2026-08-13T17:44:00+08:00' },
+  { id: 'snapshot-log-4', action: 'RETRY_BACKGROUND_TASK', resourceType: 'BACKGROUND_TASK', resourceId: 'snapshot-task-3', result: 'FAILURE', actorDisplayName: '系统任务', actorEmail: '', occurredAt: '2026-08-13T16:20:00+08:00' },
+]
+
+const snapshotSupportTickets: SupportTicket[] = [
+  { id: 'snapshot-ticket-1', category: 'DATA', priority: 'HIGH', subject: '数据源增量扫描未识别新增表', description: '昨晚新增的两张订单扩展表没有出现在资产清单中。', pageUrl: '/data-sources/snapshot-source-1/assets', errorCode: 'DISCOVERY_PARTIAL', status: 'OPEN', resolutionNote: '', reporterUserId: 'snapshot-user-4', reporterName: '王宇', recordVersion: 1, createdAt: '2026-08-14T08:28:00+08:00', updatedAt: '2026-08-14T08:28:00+08:00' },
+  { id: 'snapshot-ticket-2', category: 'QUESTION', priority: 'NORMAL', subject: '智能问数结果缺少渠道维度', description: '查询华东区域销量时无法选择二级渠道。', pageUrl: '/ask-data', errorCode: '', status: 'IN_PROGRESS', resolutionNote: '', reporterUserId: 'snapshot-user-5', reporterName: '陈宇', assigneeUserId: 'snapshot-admin-1', assigneeName: '张伟', recordVersion: 2, createdAt: '2026-08-13T15:42:00+08:00', updatedAt: '2026-08-14T09:10:00+08:00' },
+  { id: 'snapshot-ticket-3', category: 'ACCESS', priority: 'NORMAL', subject: '供应链领域访问范围确认', description: '申请人需要确认审批通过后的数据可见范围。', pageUrl: '/domain-access', errorCode: '', status: 'RESOLVED', resolutionNote: '已说明仅开放聚合指标，明细数据仍受行级权限控制。', reporterUserId: 'snapshot-user-3', reporterName: '赵敏', assigneeUserId: 'snapshot-admin-2', assigneeName: '李娜', recordVersion: 3, createdAt: '2026-08-12T11:20:00+08:00', updatedAt: '2026-08-13T13:40:00+08:00', resolvedAt: '2026-08-13T13:40:00+08:00' },
+]
+
+const snapshotObservability: OperationalSnapshot = {
+  generatedAt: '2026-08-14T09:40:00+08:00', window: '24h', health: 'ATTENTION',
+  ai: { enabled: true, requestsToday: 1842, requestsDailyLimit: 3000, requestUtilization: 61.4, tokensThisMonth: 18600000, tokensMonthlyLimit: 30000000, tokenUtilization: 62, costMicrosThisMonth: 425600000, costMicrosMonthlyLimit: 800000000, costUtilization: 53.2, requestsInWindow: 1842, succeededInWindow: 1794, failedInWindow: 48, runningInWindow: 7, successRate: 97.4, averageLatencyMs: 786, p95LatencyMs: 1680 },
+  askData: { runsInWindow: 426, answeredInWindow: 401, blockedInWindow: 9, clarificationInWindow: 16, activeInWindow: 4, answerRate: 94.1, averageDurationMs: 2480, p95DurationMs: 5720 },
+  queues: [
+    { code: 'metadata', name: '元数据处理', pending: 3, running: 2, failed: 0, oldestPendingSeconds: 95, status: 'HEALTHY' },
+    { code: 'dataset', name: '数据集建模', pending: 7, running: 3, failed: 1, oldestPendingSeconds: 860, status: 'ATTENTION' },
+    { code: 'report', name: '报告生成', pending: 0, running: 2, failed: 0, oldestPendingSeconds: 0, status: 'HEALTHY' },
+  ],
+  failureCodes: [{ source: 'AI', code: 'AI_PROVIDER_TIMEOUT', count: 21 }, { source: 'ASK_DATA', code: 'AI_INVALID_OUTPUT', count: 9 }],
+  purposes: [{ purpose: 'SEMANTIC_QUESTION', count: 426, tokens: 4800000, costMicros: 126000000 }, { purpose: 'METADATA_COMPLETION', count: 618, tokens: 7200000, costMicros: 148000000 }, { purpose: 'REPORT_GENERATION', count: 324, tokens: 5100000, costMicros: 112000000 }],
+}
+
 const fixedCapabilities = {
   platform: ['进入全部业务领域', '管理全平台配置与授权', '审计运行与治理记录'],
   domain: ['查看领域全部信息', '管理领域数据配置', '审批用户与资产发布'],
@@ -66,20 +124,21 @@ const fixedCapabilities = {
 /** 按平台、领域、用户三级固定边界管理身份与归属。 */
 export function ManagementCenterPage() {
   const { section } = useParams<{ section: string }>()
+  const designSnapshot = import.meta.env.DEV && new URLSearchParams(window.location.search).has('snapshot')
   const view: ConfigurationView = section === 'permissions' || section === 'approvals' || section === 'tasks' || section === 'logs' || section === 'support' || section === 'observability'
     ? section
     : 'domains'
-  const [domains, setDomains] = useState<BusinessDomain[]>([])
-  const [users, setUsers] = useState<AdminUser[]>([])
-  const [approvals, setApprovals] = useState<PlatformApproval[]>([])
-  const [tasks, setTasks] = useState<BackgroundTask[]>([])
-  const [auditLogs, setAuditLogs] = useState<PlatformAuditLog[]>([])
-  const [supportTickets, setSupportTickets] = useState<SupportTicket[]>([])
-  const [observability, setObservability] = useState<OperationalSnapshot | null>(null)
+  const [domains, setDomains] = useState<BusinessDomain[]>(designSnapshot ? snapshotDomains : [])
+  const [users, setUsers] = useState<AdminUser[]>(designSnapshot ? snapshotUsers : [])
+  const [approvals, setApprovals] = useState<PlatformApproval[]>(designSnapshot ? snapshotApprovals : [])
+  const [tasks, setTasks] = useState<BackgroundTask[]>(designSnapshot ? snapshotTasks : [])
+  const [auditLogs, setAuditLogs] = useState<PlatformAuditLog[]>(designSnapshot ? snapshotAuditLogs : [])
+  const [supportTickets, setSupportTickets] = useState<SupportTicket[]>(designSnapshot ? snapshotSupportTickets : [])
+  const [observability, setObservability] = useState<OperationalSnapshot | null>(designSnapshot ? snapshotObservability : null)
   const [operationalWindow, setOperationalWindow] = useState<OperationalWindow>('24h')
   const [permissionView, setPermissionView] = useState<PermissionView>('platform')
   const [dialog, setDialog] = useState<DialogState>(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(!designSnapshot)
   const [busyKey, setBusyKey] = useState('')
   const [failedModules, setFailedModules] = useState<Record<string, boolean>>({})
   const currentSectionFailed = Boolean(failedModules[sectionModule[view] ?? view])
@@ -88,6 +147,7 @@ export function ManagementCenterPage() {
   const signedInUserID = currentSubject()
 
   const load = useCallback(async () => {
+    if (designSnapshot) return
     setLoading(true)
     setError('')
     try {
@@ -125,7 +185,7 @@ export function ManagementCenterPage() {
     } finally {
       setLoading(false)
     }
-  }, [operationalWindow])
+  }, [designSnapshot, operationalWindow])
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void load() }, 0)
@@ -479,25 +539,22 @@ export function ManagementCenterPage() {
 
   return (
     <AppShell
-      title="平台管理中心"
-      eyebrow="平台控制面"
+      title={sectionLabels[view]}
+      eyebrow="平台管理"
       actions={view === 'domains' || view === 'permissions'
         ? undefined
-        : <button className="primary-button" type="button" disabled={loading} onClick={() => void load()}>
-          <ArrowsClockwise className={loading ? 'spin' : ''} size={17} />刷新运行状态
+        : <button className="quiet-button platform-refresh-button" type="button" disabled={loading} onClick={() => void load()}>
+          <ArrowsClockwise className={loading ? 'spin' : ''} size={16} />刷新
         </button>}
       className="administration-shell"
       controlPlane
     >
       <section className="administration-stack platform-page-stack">
-        <div className="platform-management-intro">
-          <div><span className="eyebrow">PLATFORM CONTROL PLANE</span><h2>平台治理与运行控制面</h2><p>平台管理员拥有全平台最高权限，可治理租户并进入全部业务领域；领域管理员与普通用户按领域和分享范围授权。</p></div>
-          <div className="administration-metrics platform-management-metrics" aria-label="平台运行概览">
+        <div className="administration-metrics platform-management-metrics" aria-label="平台运行概览">
           <article><GlobeHemisphereWest size={20} weight="duotone" /><span>业务领域</span><strong>{domains.filter(item => item.status === 'ACTIVE').length}</strong><small>{domainAdministratorCount} 位领域管理员</small></article>
           <article><UsersThree size={20} weight="duotone" /><span>活跃用户</span><strong>{users.filter(item => item.status === 'ACTIVE').length}</strong><small>{platformAdministrators.length} 位平台管理员</small></article>
           <article className={pendingApprovalCount > 0 ? 'attention' : ''}><ClipboardText size={20} weight="duotone" /><span>待处理审批</span><strong>{pendingApprovalCount}</strong><small>领域准入与资产发布</small></article>
           <article className={failedTaskCount > 0 ? 'warning' : ''}><Pulse size={20} weight="duotone" /><span>运行中任务</span><strong>{activeTaskCount}</strong><small>{failedTaskCount} 个异常或部分完成</small></article>
-          </div>
         </div>
 
         {(error || notice) && <div className={`administration-feedback ${error ? 'error' : 'success'}`} role={error ? 'alert' : 'status'}>
@@ -688,7 +745,7 @@ function OperationalObservabilityCenter({ snapshot, window, onWindowChange }: {
   const askData = snapshot.askData
   return <div className="operational-center">
     <header className="platform-section-heading operational-heading">
-      <div><span className="eyebrow">OPERATIONS & QUOTA</span><h3>运行健康与资源用量</h3><p>聚合展示问数链路、AI 配额和异步队列；仅保留计数与稳定错误码，不展示业务数据。</p></div>
+      <div><h3>运行健康与资源用量</h3><p>聚合问数链路、AI 配额和异步队列，只展示运行计数与稳定错误码。</p></div>
       <div className="operational-heading-actions">
         <span className={`operational-health is-${snapshot.health.toLowerCase()}`}><Pulse size={16} weight="fill" />{operationalHealthLabel[snapshot.health]}</span>
         <label><span>观察窗口</span><select value={window} onChange={event => onWindowChange(event.target.value as OperationalWindow)}><option value="1h">最近 1 小时</option><option value="6h">最近 6 小时</option><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option></select></label>
@@ -789,7 +846,7 @@ function PermissionGovernance({
   const ordinaryUsers = users.filter(user => !user.platformAdministrator && !user.domains.some(domain => domain.memberRole === 'DOMAIN_ADMIN'))
   return <div className="administration-view permission-management-view">
     <header className="administration-view-heading platform-section-heading">
-      <div><span className="eyebrow">SERVICE ADMINISTRATION</span><h2>角色配置</h2><p>在这里统一维护平台管理员、领域管理员和普通用户。</p></div>
+      <div><h2>角色成员</h2><p>统一维护平台管理员、领域管理员和普通用户。</p></div>
       <div className="permission-view-switch" role="tablist" aria-label="权限管理对象">
         <button type="button" role="tab" aria-selected={permissionView === 'platform'} className={permissionView === 'platform' ? 'active' : ''} onClick={() => onPermissionViewChange('platform')}>平台管理员</button>
         <button type="button" role="tab" aria-selected={permissionView === 'domains'} className={permissionView === 'domains' ? 'active' : ''} onClick={() => onPermissionViewChange('domains')}>领域管理员</button>
@@ -858,9 +915,8 @@ function DomainGovernance({ domains, busyKey, onCreate, onStatus, onSensitivity 
   onSensitivity: (domain: BusinessDomain, sensitivity: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED') => void
 }) {
   return <div className="administration-view">
-    <header className="administration-view-heading"><div><span className="eyebrow">DOMAIN LIFECYCLE</span><h2>领域管理</h2><p>这里只负责领域的新建、启用和停用；管理员请前往权限管理配置。</p></div><small>{domains.length} 个领域</small></header>
+    <header className="administration-view-heading"><div><h2>业务领域</h2><p>创建、启用或停用业务数据边界，管理员身份在角色配置中维护。</p></div><div className="administration-heading-actions"><small>{domains.length} 个领域</small><button className="primary-button compact" type="button" onClick={onCreate}><Plus size={15} />新建领域</button></div></header>
     <div className="domain-governance-list">
-      <AddManagementSlot title="新建领域" description="创建新的业务数据边界" onClick={onCreate} />
       {domains.map(domain => <article key={domain.id}>
           <div className="domain-management-avatar">{domain.name.slice(0, 1)}</div>
           <div className="domain-governance-name"><strong>{domain.name}</strong><small>{domain.code}{domain.default ? ' · 默认领域' : ''}</small></div>
@@ -941,7 +997,7 @@ function ApprovalCenter({ approvals, busyKey, onDecision, onEscalate }: {
   }
   return <div className="administration-view platform-approval-view">
     <header className="administration-view-heading platform-section-heading">
-      <div><span className="eyebrow">APPROVAL CENTER</span><h2>审批中心</h2><p>统一查看并处理领域准入和资产发布队列；平台管理员与所属领域管理员均可审批发布申请。</p></div>
+      <div><h2>待办审批</h2><p>统一处理领域准入与资产发布申请，保留每次签署和审核记录。</p></div>
       <div className="platform-view-switch" aria-label="审批筛选">
         <button className={filter === 'PENDING' ? 'active' : ''} type="button" onClick={() => setFilter('PENDING')}>待处理</button>
         <button className={filter === 'ALL' ? 'active' : ''} type="button" onClick={() => setFilter('ALL')}>全部记录</button>
@@ -1018,7 +1074,7 @@ function BackgroundTaskCenter({ tasks, busyKey, onOperate }: {
     || (filter === 'ACTIVE' ? task.status === 'QUEUED' || task.status === 'RUNNING' : task.status === 'FAILED' || task.status === 'PARTIAL'))
   return <div className="administration-view platform-task-view">
     <header className="administration-view-heading platform-section-heading">
-      <div><span className="eyebrow">BACKGROUND OPERATIONS</span><h2>后台任务</h2><p>查看平台异步任务的阶段、进度与故障；中止和重试均保留审计记录。</p></div>
+      <div><h2>异步任务</h2><p>查看任务阶段、进度与故障，中止和重试均保留审计记录。</p></div>
       <div className="platform-view-switch" aria-label="任务筛选">
         <button className={filter === 'ACTIVE' ? 'active' : ''} type="button" onClick={() => setFilter('ACTIVE')}>运行中</button>
         <button className={filter === 'FAILED' ? 'active' : ''} type="button" onClick={() => setFilter('FAILED')}>异常</button>
@@ -1072,7 +1128,7 @@ function SupportTicketCenter({ tickets, unavailable, busyKey, onStart, onReopen,
     : ticket.status === 'RESOLVED' || ticket.status === 'CLOSED'))
   return <div className="administration-view platform-support-view">
     <header className="administration-view-heading platform-section-heading">
-      <div><span className="eyebrow">SERVICE DESK</span><h2>支持工单</h2><p>处理当前领域的产品使用与运行问题；处理结论会同步给提交人。</p></div>
+      <div><h2>工单队列</h2><p>处理产品使用与运行问题，处理结论会同步给提交人。</p></div>
       <div className="platform-view-switch" aria-label="工单筛选">
         <button className={filter === 'ACTIVE' ? 'active' : ''} type="button" onClick={() => setFilter('ACTIVE')}>待跟进</button>
         <button className={filter === 'RESOLVED' ? 'active' : ''} type="button" onClick={() => setFilter('RESOLVED')}>已处理</button>
@@ -1116,7 +1172,7 @@ function PlatformLogCenter({ logs }: { logs: PlatformAuditLog[] }) {
     .some(value => value.toLowerCase().includes(normalized)))
   return <div className="administration-view platform-log-view">
     <header className="administration-view-heading platform-section-heading">
-      <div><span className="eyebrow">IMMUTABLE AUDIT TRAIL</span><h2>平台日志</h2><p>记录平台治理、身份调整和运行操作。日志只追加、不可修改，不展示领域业务数据。</p></div>
+      <div><h2>审计记录</h2><p>记录平台治理、身份调整和运行操作，日志只追加、不可修改。</p></div>
       <label className="platform-log-search"><span>搜索日志</span><input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="操作、资源或操作者" /></label>
     </header>
     <div className="platform-log-table" role="table" aria-label="平台操作日志">
@@ -1199,20 +1255,27 @@ function UserIdentity({ user }: { user: AdminUser }) {
   </div>
 }
 
-function DialogFrame({ title, description, busy, error, onClose, children }: {
+function DialogFrame({ title, description, busy, error, onClose, children, icon, eyebrow = '平台管理', tone = 'blue', size = 'standard' }: {
   title: string
   description: string
   busy: boolean
   error: string
   onClose: () => void
   children: React.ReactNode
+  icon?: React.ReactNode
+  eyebrow?: string
+  tone?: 'blue' | 'green' | 'red'
+  size?: 'compact' | 'standard' | 'wide'
 }) {
   return <div className="administration-dialog-backdrop" role="presentation" onMouseDown={event => {
     if (event.target === event.currentTarget) onClose()
   }}>
-    <section className="administration-dialog governance-dialog" role="dialog" aria-modal="true" aria-labelledby="governance-dialog-title">
+    <section className={`administration-dialog governance-dialog dialog-tone-${tone} dialog-size-${size}`} role="dialog" aria-modal="true" aria-labelledby="governance-dialog-title" aria-describedby="governance-dialog-description">
       <header>
-        <div><span className="eyebrow">ACCESS GOVERNANCE</span><h2 id="governance-dialog-title">{title}</h2><p>{description}</p></div>
+        <div className="dialog-title-group">
+          <span className="dialog-title-icon" aria-hidden="true">{icon ?? <ShieldCheck size={21} />}</span>
+          <div><span className="eyebrow">{eyebrow}</span><h2 id="governance-dialog-title">{title}</h2><p id="governance-dialog-description">{description}</p></div>
+        </div>
         <button type="button" aria-label="关闭" disabled={busy} onClick={onClose}><X size={19} /></button>
       </header>
       {children}
@@ -1229,12 +1292,15 @@ function DomainDialog({ title, description, busy, error, onClose, onSubmit }: {
   onClose: () => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
 }) {
-  return <DialogFrame title={title} description={description} busy={busy} error={error} onClose={onClose}>
-    <form onSubmit={onSubmit}>
-      <label>领域名称<input name="name" autoFocus placeholder="例如：客户运营" /></label>
-      <label>领域编码<input name="code" placeholder="customer_operations" /><small>以小写字母开头，可使用数字、下划线和短横线。</small></label>
-      <label>说明<textarea name="description" placeholder="说明该领域承载的数据范围" /></label>
-      <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy}>{busy ? <SpinnerGap className="spin" size={16} /> : <CheckCircle size={16} />}{busy ? '正在创建…' : '创建领域'}</button></footer>
+  return <DialogFrame title={title} description={description} busy={busy} error={error} onClose={onClose} icon={<GlobeHemisphereWest size={21} />} eyebrow="领域配置" size="standard">
+    <form className="dialog-form" onSubmit={onSubmit}>
+      <div className="dialog-field-grid">
+        <label>领域名称<input name="name" autoFocus placeholder="例如：客户运营" /></label>
+        <label>领域编码<input name="code" placeholder="customer_operations" /><small>小写字母开头，可使用数字与下划线。</small></label>
+      </div>
+      <label>领域说明<textarea name="description" placeholder="说明该领域承载的数据范围与业务边界" /></label>
+      <div className="dialog-guidance"><CheckCircle size={17} /><div><strong>创建后立即启用</strong><span>可继续前往角色配置，为该领域分配管理员与成员。</span></div></div>
+      <footer><span className="dialog-footer-note">默认按“内部”敏感级别创建</span><div><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy}>{busy ? <SpinnerGap className="spin" size={16} /> : <CheckCircle size={16} />}{busy ? '正在创建…' : '创建领域'}</button></div></footer>
     </form>
   </DialogFrame>
 }
@@ -1253,10 +1319,15 @@ function ApprovalRejectionDialog({ approval, busy, error, onClose, onSubmit }: {
     busy={busy}
     error={error}
     onClose={onClose}
+    icon={<WarningCircle size={21} />}
+    eyebrow="审批决策"
+    tone="red"
+    size="standard"
   >
-    <form onSubmit={event => { event.preventDefault(); if (reason.trim().length >= 4) onSubmit(reason.trim()) }}>
+    <form className="dialog-form" onSubmit={event => { event.preventDefault(); if (reason.trim().length >= 4) onSubmit(reason.trim()) }}>
+      <div className="dialog-resource-summary is-danger"><WarningCircle size={19} /><div><small>待驳回申请</small><strong>{approval.resourceName}</strong><span>{approvalKindLabels[approval.kind]} · {approval.domainName || '平台级申请'}</span></div></div>
       <label>审核意见<textarea autoFocus minLength={4} maxLength={1000} required value={reason} onChange={event => setReason(event.target.value)} placeholder="说明需要修改的配置、口径或风险；申请人将据此修改后重新提交。" /><small>{reason.trim().length}/1000 · 至少 4 个字符</small></label>
-      <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button danger" type="submit" disabled={busy || reason.trim().length < 4}>{busy ? <SpinnerGap className="spin" size={16} /> : <X size={16} />}{busy ? '正在驳回…' : '确认驳回'}</button></footer>
+      <footer><span className="dialog-footer-note danger-text">驳回后申请人可修改并重新提交</span><div><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button danger" type="submit" disabled={busy || reason.trim().length < 4}>{busy ? <SpinnerGap className="spin" size={16} /> : <X size={16} />}{busy ? '正在驳回…' : '确认驳回'}</button></div></footer>
     </form>
   </DialogFrame>
 }
@@ -1275,10 +1346,16 @@ function SupportTransitionDialog({ ticket, status, busy, error, onClose, onSubmi
     busy={busy}
     error={error}
     onClose={onClose}
+    icon={<Lifebuoy size={21} />}
+    eyebrow="工单处理"
+    tone="green"
+    size="standard"
   >
-    <form onSubmit={onSubmit}>
+    <form className="dialog-form" onSubmit={onSubmit}>
+      <div className="dialog-resource-summary is-success"><CheckCircle size={19} /><div><small>{status === 'RESOLVED' ? '准备标记解决' : '准备关闭工单'}</small><strong>{ticket.subject}</strong><span>{supportCategoryLabels[ticket.category]} · {ticket.reporterName}</span></div></div>
       <label>处理结果<textarea name="resolutionNote" autoFocus minLength={4} maxLength={2000} required placeholder="说明定位结果、处理措施或后续建议，提交人会看到这段内容。" /></label>
-      <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy}>{busy ? <SpinnerGap className="spin" size={16} /> : <CheckCircle size={16} />}{busy ? '保存中…' : status === 'RESOLVED' ? '确认解决' : '确认关闭'}</button></footer>
+      <div className="dialog-guidance is-success"><CheckCircle size={17} /><div><strong>处理结论会同步给提交人</strong><span>请保留可复现的定位结果和明确的后续建议。</span></div></div>
+      <footer><span className="dialog-footer-note">该操作将记录到平台审计日志</span><div><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy}>{busy ? <SpinnerGap className="spin" size={16} /> : <CheckCircle size={16} />}{busy ? '保存中…' : status === 'RESOLVED' ? '确认解决' : '确认关闭'}</button></div></footer>
     </form>
   </DialogFrame>
 }
@@ -1297,10 +1374,14 @@ function PlatformAdministratorDialog({ users, busy, error, onClose, onSubmit }: 
     busy={busy}
     error={error}
     onClose={onClose}
+    icon={<Crown size={21} />}
+    eyebrow="角色配置"
+    size="standard"
   >
-    <form onSubmit={onSubmit}>
+    <form className="dialog-form" onSubmit={onSubmit}>
+      <div className="dialog-guidance"><ShieldCheck size={17} /><div><strong>平台管理员拥有全局管理权限</strong><span>仅无其他管理员或领域成员身份的活跃用户可被分配。</span></div></div>
       <SelectionList label="可选用户" name="userIds" users={candidates} />
-      <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy || candidates.length === 0}>{busy ? <SpinnerGap className="spin" size={16} /> : <Plus size={16} />}{busy ? '新增中…' : '新增管理员'}</button></footer>
+      <footer><span className="dialog-footer-note">共 {candidates.length} 位可选用户</span><div><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy || candidates.length === 0}>{busy ? <SpinnerGap className="spin" size={16} /> : <Plus size={16} />}{busy ? '新增中…' : '新增管理员'}</button></div></footer>
     </form>
   </DialogFrame>
 }
@@ -1327,8 +1408,11 @@ function DomainAdministratorDialog({ user, domains, users, busy, error, onClose,
     busy={busy}
     error={error}
     onClose={onClose}
+    icon={<UsersThree size={21} />}
+    eyebrow="角色配置"
+    size="wide"
   >
-    <form onSubmit={onSubmit}>
+    <form className="dialog-form" onSubmit={onSubmit}>
       {user
         ? <div className="dialog-selected-user"><UserIdentity user={user} /><span className="identity-badge">领域管理员</span></div>
         : <label>选择用户<select name="userId" autoFocus defaultValue=""><option value="" disabled>请选择用户</option>{candidates.map(item => <option key={item.id} value={item.id}>{item.displayName} · {item.employeeNo}</option>)}</select></label>}
@@ -1339,7 +1423,8 @@ function DomainAdministratorDialog({ user, domains, users, busy, error, onClose,
           <span><strong>{domain.name}</strong><small>{domain.code}{domain.status === 'DISABLED' ? ' · 已停用' : ''}</small></span>
         </label>)}
       </fieldset>
-      <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy || (!user && candidates.length === 0)}>{busy ? <SpinnerGap className="spin" size={16} /> : <Check size={16} />}{busy ? '保存中…' : user ? '保存管理领域' : '新增管理员'}</button></footer>
+      <div className="dialog-guidance"><ShieldCheck size={17} /><div><strong>权限仅在已选领域内生效</strong><span>同一位管理员可以负责多个领域，调整后立即更新访问边界。</span></div></div>
+      <footer><span className="dialog-footer-note">可管理 {visibleDomains.length} 个活跃或已分配领域</span><div><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy || (!user && candidates.length === 0)}>{busy ? <SpinnerGap className="spin" size={16} /> : <Check size={16} />}{busy ? '保存中…' : user ? '保存管理领域' : '新增管理员'}</button></div></footer>
     </form>
   </DialogFrame>
 }
@@ -1359,8 +1444,11 @@ function UserDomainDialog({ user, domains, busy, error, onClose, onSubmit }: {
     busy={busy}
     error={error}
     onClose={onClose}
+    icon={<GlobeHemisphereWest size={21} />}
+    eyebrow="成员归属"
+    size="wide"
   >
-    <form onSubmit={onSubmit}>
+    <form className="dialog-form" onSubmit={onSubmit}>
       <div className="dialog-selected-user"><UserIdentity user={user} /><span className="identity-badge">普通用户</span></div>
       <fieldset className="governance-selection"><legend>所属领域</legend>
         {domains.map(domain => {
@@ -1372,7 +1460,8 @@ function UserDomainDialog({ user, domains, busy, error, onClose, onSubmit }: {
           </label>
         })}
       </fieldset>
-      <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy}>{busy ? <SpinnerGap className="spin" size={16} /> : <Check size={16} />}{busy ? '保存中…' : '保存所属领域'}</button></footer>
+      <div className="dialog-guidance"><ShieldCheck size={17} /><div><strong>成员仅能访问所属领域</strong><span>停用领域不会接受新的归属，已存在的归属仍会保留用于审计。</span></div></div>
+      <footer><span className="dialog-footer-note">当前已加入 {selectedDomainIDs.size} 个领域</span><div><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={busy}>{busy ? <SpinnerGap className="spin" size={16} /> : <Check size={16} />}{busy ? '保存中…' : '保存所属领域'}</button></div></footer>
     </form>
   </DialogFrame>
 }
@@ -1383,11 +1472,13 @@ function SelectionList({ label, name, users, selected = new Set<string>() }: {
   users: AdminUser[]
   selected?: Set<string>
 }) {
+  const activeUsers = users.filter(user => user.status === 'ACTIVE')
   return <fieldset className="governance-selection"><legend>{label}</legend>
-    {users.filter(user => user.status === 'ACTIVE').map(user => <label key={user.id}>
+    {activeUsers.map(user => <label key={user.id}>
       <input type="checkbox" name={name} value={user.id} defaultChecked={selected.has(user.id)} />
       <span className="selection-check"><Check size={12} weight="bold" /></span>
       <span><strong>{user.displayName}</strong><small>{user.employeeNo} · {user.email}</small></span>
     </label>)}
+    {activeUsers.length === 0 && <div className="dialog-selection-empty"><UsersThree size={24} /><div><strong>暂无可选用户</strong><span>候选用户需要处于启用状态，且没有其他角色或领域归属。</span></div></div>}
   </fieldset>
 }

@@ -247,6 +247,13 @@ func NewHandler(authService *auth.Service, permissions *access.Service, repo *Re
 // separately from the table asset. The connector intentionally treats an empty
 // projection as an empty result, so passing only the table identity would make
 // every database-backed node preview return zero rows without an error.
+// MetadataTableForPreview builds the connector-facing table descriptor used by the
+// governed sampling path; the dataset AI sampler reuses it so screening reads rows
+// exactly the way the asset preview does.
+func MetadataTableForPreview(table Table, columns []Column) datasource.MetadataTable {
+	return metadataTableForPreview(table, columns)
+}
+
 func metadataTableForPreview(table Table, columns []Column) datasource.MetadataTable {
 	metadataColumns := make([]datasource.MetadataColumn, 0, len(columns))
 	for _, column := range columns {

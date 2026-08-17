@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { datasetAIRequestContext } from './dataset-ai-context.ts'
+import { datasetAICanvasMode, datasetAIRequestContext } from './dataset-ai-context.ts'
 
 const plan = (name: string) => ({
   dataset: { name, description: `${name} description` },
@@ -13,6 +13,13 @@ const plan = (name: string) => ({
     input: { kind: 'NODE' as const, id: `${name}-node` },
     outputs: [{ nodeId: `${name}-node`, column: 'id', name: 'ID', code: 'id' }],
   },
+})
+
+test('only a completely empty canvas uses create intake', () => {
+  assert.equal(datasetAICanvasMode({ nodes: 0, joins: 0, groups: 0, transforms: 0, hasEnd: false }), 'CREATE')
+  assert.equal(datasetAICanvasMode({ nodes: 1, joins: 0, groups: 0, transforms: 0, hasEnd: false }), 'MODIFY')
+  assert.equal(datasetAICanvasMode({ nodes: 0, joins: 0, groups: 1, transforms: 0, hasEnd: false }), 'MODIFY')
+  assert.equal(datasetAICanvasMode({ nodes: 0, joins: 0, groups: 0, transforms: 0, hasEnd: true }), 'MODIFY')
 })
 
 test('continues a conversation from the latest staged proposal', () => {

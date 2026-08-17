@@ -111,7 +111,18 @@ func newAPIMux(handlers apiHandlers) *http.ServeMux {
 	handleAll(handlers.metadataAI, "/api/v1/metadata-ai/")
 
 	handleAll(handlers.datasetAI,
+		"POST /api/v1/datasets/ai/table-suggestions",
+		"POST /api/v1/datasets/ai/intake",
 		"POST /api/v1/datasets/ai/proposals", "POST /api/v1/datasets/{id}/ai/proposals",
+		"POST /api/v1/datasets/ai/sessions",
+		"GET /api/v1/datasets/ai/sessions/{sessionId}",
+		"POST /api/v1/datasets/ai/sessions/{sessionId}/intent",
+		"POST /api/v1/datasets/ai/sessions/{sessionId}/scope",
+		"POST /api/v1/datasets/ai/sessions/{sessionId}/blueprint",
+		"POST /api/v1/datasets/ai/sessions/{sessionId}/blueprint/revisions",
+		"POST /api/v1/datasets/ai/sessions/{sessionId}/stages",
+		"POST /api/v1/datasets/ai/sessions/{sessionId}/events",
+		"POST /api/v1/datasets/{id}/ai/session", "GET /api/v1/datasets/{id}/ai/session",
 	)
 	handleAll(handlers.datasetApproval,
 		"POST /api/v1/datasets/{id}/publish",

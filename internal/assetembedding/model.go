@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	DocumentVersion = "asset-search-document-v1"
+	DocumentVersion = "asset-search-document-v2"
 	MaxBatchSize    = 16
 )
 

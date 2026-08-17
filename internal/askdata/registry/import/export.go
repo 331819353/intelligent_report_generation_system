@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	MaxExportAssetTypes      = 12
+	MaxExportAssetTypes      = 13
 	MaxSynchronousExportRows = 5_000
 	MaxSemanticExportRows    = 100_000
 )
@@ -34,7 +34,7 @@ var (
 var governedAssetOrder = []AssetType{
 	AssetModel, AssetMeasure, AssetMetric, AssetMetricDimension, AssetDimension,
 	AssetMember, AssetHierarchy, AssetRelationship, AssetTerm,
-	AssetCertifiedExample, AssetKPIBundle, AssetEvalCase,
+	AssetCertifiedExample, AssetKPIBundle, AssetEvalCase, AssetKnowledge,
 }
 
 type ExportSelection struct {
@@ -97,6 +97,30 @@ func (service *ExportService) Generate(
 		return ExportArtifact{}, err
 	}
 	return renderExportArtifact(selection, dataset)
+}
+
+// GenerateBundle 渲染 semantic-bundle/v1 JSON 导出。Bundle 导出是同步有界的：
+// 超过同步行数上限时要求调用方缩小选择范围，而不是排队渲染一个不可审阅的
+// 巨型文件。
+func (service *ExportService) GenerateBundle(
+	ctx context.Context,
+	selection ExportSelection,
+) (ExportArtifact, error) {
+	if service == nil || service.catalog == nil || validateExportSelection(selection) != nil {
+		return ExportArtifact{}, ErrExportInvalid
+	}
+	rowCount, err := service.catalog.CountExportRows(ctx, selection)
+	if err != nil {
+		return ExportArtifact{}, err
+	}
+	if rowCount > MaxSynchronousExportRows {
+		return ExportArtifact{}, ErrExportTooLarge
+	}
+	dataset, err := service.catalog.LoadExportDataset(ctx, selection)
+	if err != nil {
+		return ExportArtifact{}, err
+	}
+	return RenderBundleArtifact(selection, dataset)
 }
 
 func validateExportSelection(selection ExportSelection) error {

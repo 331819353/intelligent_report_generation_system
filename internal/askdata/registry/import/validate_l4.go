@@ -5,38 +5,101 @@ import (
 	"strings"
 )
 
+// validateL4 的域级一致性按行类型分组执行；BUNDLE 批的每个类型组独立评估。
 func validateL4(rows []parsedImportRow, batch batchIndex, snapshot ValidationSnapshot) {
-	assetType := inferBatchAssetType(rows, batch)
-	validateBatchNameConflicts(rows, assetType, snapshot)
-	if assetType == AssetTerm {
-		validateTermConflicts(rows)
+	groups := map[AssetType][]*parsedImportRow{}
+	for index := range rows {
+		groups[rows[index].Type] = append(groups[rows[index].Type], &rows[index])
 	}
+	for assetType, group := range groups {
+		validateBatchNameConflicts(group, assetType, snapshot)
+	}
+	validateTermConflicts(rowsOfType(rows, AssetTerm))
+	validateKnowledgeAuthorityConflicts(rowsOfType(rows, AssetKnowledge), snapshot)
 	for index := range rows {
 		row := &rows[index]
 		if row.Layer != 3 {
 			continue
 		}
-		if assetType == AssetDimension {
+		if row.Type == AssetDimension {
 			validateSensitivityPolicy(row, snapshot)
 		}
-		if assetType == AssetMember {
+		if row.Type == AssetMember {
 			validateMemberAliases(row, snapshot)
 		}
-		warnCertifiedChange(row, assetType, snapshot)
+		warnCertifiedChange(row, row.Type, snapshot)
+		markIdentityResolution(row, snapshot)
 		if !hasBlockingIssue(row.Issues) {
 			row.Layer = 4
 		}
 	}
 }
 
-func validateBatchNameConflicts(rows []parsedImportRow, assetType AssetType, snapshot ValidationSnapshot) {
+// markIdentityResolution 落下创建/更新裁决：code 已存在时标注 WILL_UPDATE
+// （信息事实），CREATE_ONLY 模式下则阻断该行。
+func markIdentityResolution(row *parsedImportRow, snapshot ValidationSnapshot) {
+	kind := referenceKindForAsset(row.Type)
+	if kind == "" {
+		return
+	}
+	column := primaryCodeColumn(row.Type)
+	code := canonicalLookup(row.Values[column])
+	if code == "" {
+		return
+	}
+	if _, exists := snapshot.References[kind][code]; !exists {
+		return
+	}
+	if row.CreateOnly {
+		addIssue(row, column, ImportCreateOnlyConflict,
+			"CREATE_ONLY 模式下 code 已存在，不允许创建新版本",
+			"改用 UPSERT 模式或更换 code", row.Values[column])
+		return
+	}
+	addIssue(row, column, ImportWillUpdate,
+		"该 code 已存在；提交将为原对象创建新草稿版本",
+		"更新既有对象（非阻断信息）", row.Values[column])
+}
+
+// validateKnowledgeAuthorityConflicts 强制“同一目标至多一个 AUTHORITATIVE
+// DEFINES”：批内冲突逐行阻断，与域内既有权威定义冲突同样阻断。
+func validateKnowledgeAuthorityConflicts(rows []*parsedImportRow, snapshot ValidationSnapshot) {
+	byTarget := map[string][]*parsedImportRow{}
+	for _, row := range rows {
+		if row.Layer != 3 {
+			continue
+		}
+		if row.Values["authority"] != "AUTHORITATIVE" || row.Values["relation"] != "DEFINES" {
+			continue
+		}
+		key := row.Values["targetType"] + "\x00" + canonicalLookup(row.Values["targetCode"])
+		byTarget[key] = append(byTarget[key], row)
+		ownCode := canonicalLookup(row.Values["code"])
+		if holder, conflict := snapshot.AuthoritativeDefinitions[key]; conflict && holder != ownCode {
+			addIssue(row, "authority", ImportKnowledgeDefinitionConflict,
+				"该目标已有权威定义；一个对象只能有一个 AUTHORITATIVE DEFINES",
+				"改为 SUPPLEMENTARY 或更新既有权威词条", row.Values["targetCode"])
+		}
+	}
+	for _, conflicting := range byTarget {
+		if len(conflicting) < 2 {
+			continue
+		}
+		for _, row := range conflicting {
+			addIssue(row, "authority", ImportKnowledgeDefinitionConflict,
+				"本批次内同一目标出现多个 AUTHORITATIVE DEFINES",
+				"每个目标只保留一个权威定义", row.Values["targetCode"])
+		}
+	}
+}
+
+func validateBatchNameConflicts(rows []*parsedImportRow, assetType AssetType, snapshot ValidationSnapshot) {
 	kind := referenceKindForAsset(assetType)
 	if kind == "" {
 		return
 	}
 	byName := map[string][]*parsedImportRow{}
-	for index := range rows {
-		row := &rows[index]
+	for _, row := range rows {
 		if row.Layer != 3 {
 			continue
 		}
@@ -74,10 +137,9 @@ func validateBatchNameConflicts(rows []parsedImportRow, assetType AssetType, sna
 	}
 }
 
-func validateTermConflicts(rows []parsedImportRow) {
+func validateTermConflicts(rows []*parsedImportRow) {
 	priorityTargets := map[string]map[string][]*parsedImportRow{}
-	for index := range rows {
-		row := &rows[index]
+	for _, row := range rows {
 		if row.Layer != 3 {
 			continue
 		}

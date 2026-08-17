@@ -24,6 +24,28 @@ func (w *Worker) TenantIDs(ctx context.Context) ([]string, error) {
 	return w.store.ListTenantIDs(ctx)
 }
 
+// RequeueStaleDocuments makes a document-format rollout self-healing. A deploy
+// may apply its migration while the previous worker image is still draining;
+// startup reconciliation guarantees those assets are rebuilt by the new code.
+func (w *Worker) RequeueStaleDocuments(ctx context.Context) error {
+	requeuer, ok := w.store.(interface {
+		RequeueStaleDocuments(context.Context, string) error
+	})
+	if !ok {
+		return nil
+	}
+	tenantIDs, err := w.store.ListTenantIDs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, tenantID := range tenantIDs {
+		if err := requeuer.RequeueStaleDocuments(ctx, tenantID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ProcessNext claims and embeds one bounded batch. Metadata transactions never wait on this call.
 func (w *Worker) ProcessNext(ctx context.Context, tenantID, workerID string, lease time.Duration) (int, error) {
 	if w == nil || w.store == nil || w.provider == nil || !w.provider.Configured() {

@@ -28,6 +28,7 @@ var requiredImportValues = map[AssetType][]string{
 	AssetCertifiedExample: {"question", "expectedMetricCodes"},
 	AssetKPIBundle:        {"code", "name", "metricCodes", "defaultTimeExpression"},
 	AssetEvalCase:         {"question", "actorRole", "expectedOutcome", "setType", "shardId"},
+	AssetKnowledge:        {"code", "name", "knowledgeKind", "authority", "body"},
 }
 
 var listImportColumns = map[string]struct{}{
@@ -35,7 +36,7 @@ var listImportColumns = map[string]struct{}{
 	"negativeExamples": {}, "aliases": {}, "hierarchyPath": {}, "negativeContexts": {},
 	"expectedMetricCodes": {}, "expectedDimensionCodes": {}, "expectedMemberValues": {},
 	"applicableRoles": {}, "metricCodes": {}, "defaultDimensionCodes": {},
-	"defaultChartTypes": {}, "applicableQuestionTypes": {},
+	"defaultChartTypes": {}, "applicableQuestionTypes": {}, "synonyms": {},
 }
 
 var integerImportColumns = map[string]struct{}{
@@ -50,7 +51,8 @@ var jsonObjectImportColumns = map[string]struct{}{
 
 func parseAndValidateL1(assetType AssetType, input RawImportRow) parsedImportRow {
 	result := parsedImportRow{
-		RowNo: input.RowNo, Raw: append(json.RawMessage(nil), input.Raw...),
+		RowNo: input.RowNo, Type: assetType,
+		Raw:    append(json.RawMessage(nil), input.Raw...),
 		Values: map[string]string{},
 	}
 	definition, err := TemplateDefinitionFor(assetType)
@@ -93,6 +95,26 @@ func parseAndValidateL1(assetType AssetType, input RawImportRow) parsedImportRow
 		} else if !importCodePattern.MatchString(result.Values["targetCode"]) {
 			addIssue(&result, "targetCode", ImportTypeInvalid, "语义 code 格式非法",
 				"字母开头，仅含字母、数字、下划线，最长 128", result.Values["targetCode"])
+		}
+	}
+	if assetType == AssetKnowledge {
+		// 正文与 business_term_versions.definition 同宽（<=4000），提前在 L1
+		// 拦下而不是等到提交事务里由约束拒绝。
+		if len(result.Values["body"]) > 4000 {
+			addIssue(&result, "body", ImportTypeInvalid, "知识正文超过治理长度上限",
+				"不超过 4000 字节的 UTF-8 文本", result.Values["body"][:64]+"…")
+		}
+		if target := result.Values["targetCode"]; target != "" {
+			if result.Values["targetType"] == "MEMBER" {
+				if _, _, err := parseMemberTargetCode(target); err != nil {
+					addIssue(&result, "targetCode", ImportTypeInvalid,
+						"成员目标缺少维度限定或成员值非法",
+						"dimensionCode::canonicalValue", target)
+				}
+			} else if !importCodePattern.MatchString(target) {
+				addIssue(&result, "targetCode", ImportTypeInvalid, "语义 code 格式非法",
+					"字母开头，仅含字母、数字、下划线，最长 128", target)
+			}
 		}
 	}
 	if len(result.Issues) == 0 {

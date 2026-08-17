@@ -201,13 +201,23 @@ func proposalOutputSchema(catalog []CatalogTable) map[string]any {
 		"length":      map[string]any{"type": "integer", "minimum": 0, "maximum": 1000000},
 		"searchValue": shortText(500), "replacementValue": shortText(500), "replaceSourceKey": shortText(256),
 	})
-	transform := strictObject([]string{"id", "name", "family", "componentType", "input", "rules"}, map[string]any{
+	filterCondition := strictObject([]string{"id", "inputKey", "operator", "valueMode", "value"}, map[string]any{
+		"id":        identifier,
+		"inputKey":  fieldKey,
+		"operator":  map[string]any{"type": "string", "enum": []string{"EQUALS", "NOT_EQUALS", "GT", "GTE", "LT", "LTE", "CONTAINS", "NOT_CONTAINS", "IN", "NOT_IN", "IS_NULL", "IS_NOT_NULL"}},
+		"valueMode": map[string]any{"type": "string", "enum": []string{"LITERAL", "FIELD"}},
+		"value":     shortText(500),
+	})
+	// FILTER is the one component whose body is `conditions` instead of `rules`; the
+	// local validator enforces the exclusive shape because strict schemas cannot.
+	transform := strictObject([]string{"id", "name", "family", "componentType", "input", "rules", "conditions"}, map[string]any{
 		"id":            identifier,
 		"name":          map[string]any{"type": "string", "minLength": 1, "maxLength": 200},
 		"family":        map[string]any{"type": "string", "enum": []string{"TEXT", "NUMBER", "DATE", "NULL", "CAST", "CONDITION"}},
-		"componentType": map[string]any{"type": "string", "enum": []string{"TEXT_CASE", "TEXT_TRIM", "TEXT_REPLACE", "TEXT_SUBSTRING", "TEXT_CONCAT", "NUMBER_ABSOLUTE", "NUMBER_ROUNDING", "NUMBER_ARITHMETIC", "DATE_CALCULATION", "DATE_FORMAT", "NULL", "CAST", "CONDITION"}},
+		"componentType": map[string]any{"type": "string", "enum": []string{"TEXT_CASE", "TEXT_TRIM", "TEXT_REPLACE", "TEXT_SUBSTRING", "TEXT_CONCAT", "NUMBER_ABSOLUTE", "NUMBER_ROUNDING", "NUMBER_ARITHMETIC", "DATE_CALCULATION", "DATE_FORMAT", "NULL", "CAST", "CONDITION", "FILTER"}},
 		"input":         input,
-		"rules":         map[string]any{"type": "array", "minItems": 1, "maxItems": 64, "items": transformRule},
+		"rules":         map[string]any{"type": "array", "maxItems": 64, "items": transformRule},
+		"conditions":    map[string]any{"type": "array", "maxItems": 32, "items": filterCondition},
 	})
 	outputProperties := cloneSchemaMap(bindingProperties)
 	outputProperties["name"] = map[string]any{"type": "string", "minLength": 1, "maxLength": 200}

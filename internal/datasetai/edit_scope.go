@@ -190,7 +190,7 @@ var componentFields = map[string][]string{
 	"NODE":      {"tableId", "alias", "selectedColumns"},
 	"JOIN":      {"name", "left", "right", "joinType", "conditions"},
 	"GROUP":     {"name", "input", "dimensions", "metrics"},
-	"TRANSFORM": {"name", "input", "family", "componentType", "rules"},
+	"TRANSFORM": {"name", "input", "family", "componentType", "rules", "conditions"},
 	"END":       {"name", "input", "outputs"},
 }
 
@@ -2440,6 +2440,8 @@ func componentFieldEqual(before, after componentSnapshot, field string) bool {
 			return left.ComponentType == right.ComponentType
 		case "rules":
 			return reflect.DeepEqual(left.Rules, right.Rules)
+		case "conditions":
+			return reflect.DeepEqual(left.Conditions, right.Conditions)
 		}
 	case "END":
 		left, right := before.Value.(PlanEnd), after.Value.(PlanEnd)
@@ -3063,6 +3065,9 @@ func cloneGraphPlan(value GraphPlan) GraphPlan {
 			rule := &result.Transforms[index].Rules[ruleIndex]
 			rule.InputKeys = append([]string(nil), value.Transforms[index].Rules[ruleIndex].InputKeys...)
 			rule.ConditionValues = append([]PlanConditionValue(nil), value.Transforms[index].Rules[ruleIndex].ConditionValues...)
+		}
+		if value.Transforms[index].Conditions != nil {
+			result.Transforms[index].Conditions = append([]PlanFilterCondition(nil), value.Transforms[index].Conditions...)
 		}
 	}
 	result.End.Outputs = append([]PlanOutput(nil), value.End.Outputs...)

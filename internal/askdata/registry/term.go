@@ -183,6 +183,7 @@ func validateBusinessTermReferencesTx(ctx context.Context, tx pgx.Tx, term Busin
 		)
 		WHEN 'OPERATOR' THEN true
 		WHEN 'LEGACY' THEN true
+		WHEN 'CONCEPT' THEN true
 		ELSE false END`, term.TargetObjectType, term.TargetVersionID,
 		term.DomainID, term.TenantID).Scan(&targetValid); err != nil {
 		return err

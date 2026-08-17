@@ -194,6 +194,11 @@ var templateColumnNames = map[AssetType][]string{
 		"expectedDimensionCodes", "expectedMemberValues", "expectedTimeExpression",
 		"expectedResultHint", "setType", "shardId",
 	},
+	AssetKnowledge: {
+		"code", "name", "knowledgeKind", "authority", "body", "synonyms",
+		"targetType", "targetCode", "relation", "matchMode", "priority",
+		"negativeContexts", "validFrom", "validTo",
+	},
 }
 
 var templateEnumValues = map[string][]string{
@@ -221,6 +226,10 @@ var templateEnumValues = map[string][]string{
 	"expectedOutcome":                {"DIRECT", "CLARIFY", "REFUSE"},
 	"setType":                        {"TRAIN", "VALIDATION", "SEALED", "PRODUCTION_REGRESSION"},
 	"shardId":                        {"1", "2", "3", "4"},
+	"knowledgeKind":                  {"TERM", "DEFINITION", "CONVENTION", "POLICY", "FAQ", "DOMAIN_NOTE"},
+	"authority":                      {"AUTHORITATIVE", "SUPPLEMENTARY"},
+	"relation":                       {"DEFINES", "CONSTRAINS", "EXPLAINS", "EXEMPLIFIES", "DEPRECATES"},
+	"targetType":                     {"METRIC", "DIMENSION", "MEMBER", "TIME"},
 }
 
 func templateColumnDescription(name string, enum bool) string {
@@ -236,8 +245,12 @@ func templateColumnDescription(name string, enum bool) string {
 	case "aliases", "grainKeyFields", "nonAdditiveDimensionCodes", "positiveExamples",
 		"negativeExamples", "expectedMetricCodes", "expectedDimensionCodes",
 		"expectedMemberValues", "applicableRoles", "metricCodes", "defaultDimensionCodes",
-		"defaultChartTypes", "applicableQuestionTypes", "negativeContexts":
+		"defaultChartTypes", "applicableQuestionTypes", "negativeContexts", "synonyms":
 		return "多个值使用 | 分隔；值内不得包含换行"
+	case "body":
+		return "知识正文（业务定义、口径约定、政策或 FAQ 答案）；仅作检索与 LLM 上下文证据，不参与绑定"
+	case "targetType":
+		return "词条指向的注册对象类型；留空表示纯概念（CONCEPT），不关联具体对象"
 	case "displayPrecision", "priority", "levelOrder":
 		return "十进制整数"
 	case "datasetVersionId":

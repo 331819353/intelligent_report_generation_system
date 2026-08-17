@@ -21,11 +21,17 @@ import (
 	askdatafeedback "intelligent-report-generation-system/internal/askdata/feedback"
 	askdatahttp "intelligent-report-generation-system/internal/askdata/http"
 	"intelligent-report-generation-system/internal/askdata/ircontract"
+	"intelligent-report-generation-system/internal/askdata/lineage"
 	askdataorchestrator "intelligent-report-generation-system/internal/askdata/orchestrator"
 	"intelligent-report-generation-system/internal/askdata/registry"
 	registryimport "intelligent-report-generation-system/internal/askdata/registry/import"
 	askdatareportasset "intelligent-report-generation-system/internal/askdata/reportasset"
+	"intelligent-report-generation-system/internal/askdata/retrieval"
 	"intelligent-report-generation-system/internal/askdata/savedquestion"
+	askdatasearch "intelligent-report-generation-system/internal/askdata/search"
+	askdatatools "intelligent-report-generation-system/internal/askdata/tools"
+	askdataunderstanding "intelligent-report-generation-system/internal/askdata/understanding"
+	dictionarypostgres "intelligent-report-generation-system/internal/askdata/understanding/dictionarypostgres"
 	askdatavalidator "intelligent-report-generation-system/internal/askdata/validator"
 	"intelligent-report-generation-system/internal/asset"
 	"intelligent-report-generation-system/internal/assetembedding"
@@ -35,6 +41,8 @@ import (
 	"intelligent-report-generation-system/internal/datarequest"
 	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/datasetai"
+	datasetaiknowledge "intelligent-report-generation-system/internal/datasetai/knowledge"
+	datasetaisampling "intelligent-report-generation-system/internal/datasetai/sampling"
 	"intelligent-report-generation-system/internal/datasetsemanticnaming"
 	"intelligent-report-generation-system/internal/datasource"
 	"intelligent-report-generation-system/internal/datasourceai"
@@ -302,6 +310,38 @@ func main() {
 		cfg.AIEmbeddingBaseURL, cfg.AIEmbeddingAPIKey, cfg.AIEmbeddingModel,
 		cfg.AIEmbeddingDimensions, &http.Client{Timeout: cfg.AIEmbeddingTimeout},
 	)
+	// Business knowledge for the modeling blueprint reuses the AskData question
+	// stack: certified dictionary exact hits, the hybrid semantic-object retriever
+	// and release-pinned contracts. Failures here only degrade the blueprint.
+	askDataKnowledgeRetriever, err := askdatasearch.NewRetriever(
+		askdatasearch.NewPostgresRetrievalStore(pool), askdatasearch.DefaultRankConfig(),
+	)
+	if err != nil {
+		logger.Error("initialize AskData retriever for dataset AI knowledge", "error", err)
+		os.Exit(1)
+	}
+	askDataKnowledgeDictionary, err := askdataunderstanding.NewDictionaryMatcher(
+		dictionarypostgres.NewLoader(pool), askdataunderstanding.NewDictionaryCache(),
+	)
+	if err != nil {
+		logger.Error("initialize AskData dictionary for dataset AI knowledge", "error", err)
+		os.Exit(1)
+	}
+	datasetAIKnowledge, err := datasetaiknowledge.NewProvider(
+		pool, registry.NewQueryReader(pool), askDataKnowledgeRetriever, askDataKnowledgeDictionary,
+		askdatatools.BatchEmbedder{Provider: embeddingProvider},
+	)
+	if err != nil {
+		logger.Error("initialize dataset AI knowledge provider", "error", err)
+		os.Exit(1)
+	}
+	// Sample rows for source screening and blueprint grounding go through the same
+	// governed sampling path as the asset preview (masked, ≤5 rows, no client SQL).
+	datasetAISampler, err := datasetaisampling.New(assetRepository, dataSourceService)
+	if err != nil {
+		logger.Error("initialize dataset AI sampler", "error", err)
+		os.Exit(1)
+	}
 	datasetAIService := datasetai.NewService(
 		datasetai.NewVersionAwareAssetCatalog(pool, assetRepository),
 		aiService,
@@ -311,6 +351,9 @@ func main() {
 				assetembedding.NewPostgresStore(pool), embeddingProvider,
 			),
 			RetrievalMode: cfg.DatasetAIRetrievalMode,
+			Sessions:      datasetai.NewPostgresSessionStore(pool),
+			Knowledge:     datasetAIKnowledge,
+			Sampler:       datasetAISampler,
 		},
 	)
 	questionService := askdatahttp.NewPostgresServiceWithClarificationTimeout(
@@ -362,6 +405,17 @@ func main() {
 		logger.Error("initialize semantic release review service", "error", err)
 		os.Exit(1)
 	}
+	// 四分区发现检索：确定性目录巷道必备；向量巷道与血缘扩展按可用性组装，
+	// 缺席时门面自动降级为确定性结果。
+	semanticDiscoveryFacade, err := retrieval.NewFacade(
+		retrieval.NewPostgresCatalogSearcher(pool),
+		retrieval.NewPostgresVectorSearcher(pool, embeddingProvider),
+		retrieval.NewLineageGraphExpander(lineage.NewPostgresStore(pool)),
+	)
+	if err != nil {
+		logger.Error("initialize semantic discovery facade", "error", err)
+		os.Exit(1)
+	}
 	semanticAdminHandler := askdatahttp.NewAdminHandlerWithImportServices(
 		authService,
 		semanticRegistryStore,
@@ -381,6 +435,11 @@ func main() {
 			ExportJobs:      registryimport.NewPostgresExportJobStore(pool),
 			ExportArtifacts: objectStorage,
 			ReleaseReview:   releaseReviewService,
+			JSONReport: registryimport.NewJSONReportService(
+				semanticImportStore, registryimport.NewPostgresIndexReadinessStore(pool),
+			),
+			Lineage:   lineage.NewPostgresStore(pool),
+			Discovery: semanticDiscoveryFacade,
 		},
 	)
 

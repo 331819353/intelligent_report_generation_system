@@ -79,9 +79,271 @@ func NewHandler(authService *auth.Service, permissions *access.Service, planner 
 			writePlanJSON(w, http.StatusOK, result)
 		}
 	}
+	sessionManager, hasSessions := planner.(SessionManager)
+	requireSessions := func(next func(w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !hasSessions {
+				writePlanError(w, ErrSessionStoreUnavailable)
+				return
+			}
+			next(w, r)
+		}
+	}
+	openSession := requireSessions(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		var input SessionOpenRequest
+		if !decodeOptionalRequest(w, r, &input) {
+			return
+		}
+		session, err := sessionManager.OpenSession(r.Context(), claims.TenantID, claims.Subject, r.PathValue("id"), input)
+		if err != nil {
+			writePlanError(w, err)
+			return
+		}
+		writePlanJSON(w, http.StatusOK, session)
+	})
+	getSession := requireSessions(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		session, err := sessionManager.GetSession(r.Context(), claims.TenantID, claims.Subject, r.PathValue("sessionId"))
+		if err != nil {
+			writePlanError(w, err)
+			return
+		}
+		writePlanJSON(w, http.StatusOK, session)
+	})
+	findDatasetSession := requireSessions(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		session, found, err := sessionManager.FindDatasetSession(r.Context(), claims.TenantID, claims.Subject, r.PathValue("id"))
+		if err != nil {
+			writePlanError(w, err)
+			return
+		}
+		if !found {
+			writePlanJSON(w, http.StatusNotFound, map[string]string{"code": "DATASET_AI_SESSION_NOT_FOUND", "message": "该数据集当前没有进行中的 AI 建模会话"})
+			return
+		}
+		writePlanJSON(w, http.StatusOK, session)
+	})
+	confirmScope := requireSessions(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		var input SessionScopeRequest
+		if !decodePlanRequest(w, r, &input) {
+			return
+		}
+		session, err := sessionManager.ConfirmSessionScope(r.Context(), claims.TenantID, claims.Subject, r.PathValue("sessionId"), input)
+		if err != nil {
+			writePlanError(w, err)
+			return
+		}
+		writePlanJSON(w, http.StatusOK, session)
+	})
+	prepareIntent := requireSessions(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		var input SessionIntentRequest
+		if !decodePlanRequest(w, r, &input) {
+			return
+		}
+		session, err := sessionManager.PrepareSessionIntent(r.Context(), claims.TenantID, claims.Subject, r.PathValue("sessionId"), input)
+		if err != nil {
+			writePlanError(w, err)
+			return
+		}
+		writePlanJSON(w, http.StatusOK, session)
+	})
+	blueprintTurn := func(run func(ctx context.Context, tenantID, actorID, sessionID string, input BlueprintRevisionRequest) (ModelingSession, error), decodeBody bool) http.HandlerFunc {
+		return requireSessions(func(w http.ResponseWriter, r *http.Request) {
+			claims, _ := auth.ClaimsFromContext(r.Context())
+			var input BlueprintRevisionRequest
+			if decodeBody && !decodePlanRequest(w, r, &input) {
+				return
+			}
+			streaming := strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/x-ndjson")
+			if streaming {
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					writePlanJSON(w, http.StatusInternalServerError, map[string]string{"code": "AI_STREAM_UNAVAILABLE", "message": "当前服务不支持生成进度流"})
+					return
+				}
+				w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+				w.Header().Set("Cache-Control", "no-store")
+				w.Header().Set("X-Content-Type-Options", "nosniff")
+				w.WriteHeader(http.StatusOK)
+				encoder := json.NewEncoder(w)
+				writeFrame := func(value any) {
+					if err := encoder.Encode(value); err == nil {
+						flusher.Flush()
+					}
+				}
+				ctx := withPlanProgressReporter(r.Context(), func(event PlanProgressEvent) {
+					writeFrame(planStreamProgressFrame{Type: "progress", Progress: event})
+				})
+				session, err := run(ctx, claims.TenantID, claims.Subject, r.PathValue("sessionId"), input)
+				if err != nil {
+					status, body := capturePlanError(err)
+					writeFrame(planStreamErrorFrame{Type: "error", Status: status, Error: body})
+					return
+				}
+				writeFrame(sessionStreamResultFrame{Type: "result", Session: session})
+				return
+			}
+			session, err := run(r.Context(), claims.TenantID, claims.Subject, r.PathValue("sessionId"), input)
+			if err != nil {
+				writePlanError(w, err)
+				return
+			}
+			writePlanJSON(w, http.StatusOK, session)
+		})
+	}
+	screenSources := requireSessions(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		var input SourceScreeningRequest
+		if !decodePlanRequest(w, r, &input) {
+			return
+		}
+		input.SessionID = r.PathValue("sessionId")
+		streaming := strings.Contains(strings.ToLower(r.Header.Get("Accept")), "application/x-ndjson")
+		if streaming {
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				writePlanJSON(w, http.StatusInternalServerError, map[string]string{"code": "AI_STREAM_UNAVAILABLE", "message": "当前服务不支持生成进度流"})
+				return
+			}
+			w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.WriteHeader(http.StatusOK)
+			encoder := json.NewEncoder(w)
+			writeFrame := func(value any) {
+				if err := encoder.Encode(value); err == nil {
+					flusher.Flush()
+				}
+			}
+			ctx := withPlanProgressReporter(r.Context(), func(event PlanProgressEvent) {
+				writeFrame(planStreamProgressFrame{Type: "progress", Progress: event})
+			})
+			session, err := sessionManager.ScreenSources(ctx, claims.TenantID, claims.Subject, input)
+			if err != nil {
+				status, body := capturePlanError(err)
+				writeFrame(planStreamErrorFrame{Type: "error", Status: status, Error: body})
+				return
+			}
+			writeFrame(sessionStreamResultFrame{Type: "result", Session: session})
+			return
+		}
+		session, err := sessionManager.ScreenSources(r.Context(), claims.TenantID, claims.Subject, input)
+		if err != nil {
+			writePlanError(w, err)
+			return
+		}
+		writePlanJSON(w, http.StatusOK, session)
+	})
+	generateBlueprint := blueprintTurn(func(ctx context.Context, tenantID, actorID, sessionID string, _ BlueprintRevisionRequest) (ModelingSession, error) {
+		return sessionManager.GenerateBlueprint(ctx, tenantID, actorID, sessionID)
+	}, false)
+	reviseBlueprint := blueprintTurn(func(ctx context.Context, tenantID, actorID, sessionID string, input BlueprintRevisionRequest) (ModelingSession, error) {
+		return sessionManager.ReviseBlueprint(ctx, tenantID, actorID, sessionID, input.Instruction)
+	}, true)
+	resolveStage := requireSessions(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		var input StageResolution
+		if !decodePlanRequest(w, r, &input) {
+			return
+		}
+		session, err := sessionManager.ResolveBlueprintStage(r.Context(), claims.TenantID, claims.Subject, r.PathValue("sessionId"), input)
+		if err != nil {
+			writePlanError(w, err)
+			return
+		}
+		writePlanJSON(w, http.StatusOK, session)
+	})
+	recordSessionEvent := requireSessions(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		var input SessionEventRequest
+		if !decodePlanRequest(w, r, &input) {
+			return
+		}
+		session, err := sessionManager.ResolveSessionProposal(r.Context(), claims.TenantID, claims.Subject, r.PathValue("sessionId"), input)
+		if err != nil {
+			writePlanError(w, err)
+			return
+		}
+		writePlanJSON(w, http.StatusOK, session)
+	})
+	classifyIntake := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		classifier, ok := planner.(IntakeClassifier)
+		if !ok {
+			writePlanJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "AI_PROVIDER_UNAVAILABLE", "message": "AI 配置服务暂时不可用，请联系管理员检查模型配置"})
+			return
+		}
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		var input IntakeRequest
+		if !decodePlanRequest(w, r, &input) {
+			return
+		}
+		classification, err := classifier.ClassifyIntake(r.Context(), claims.TenantID, claims.Subject, input)
+		if err != nil {
+			writePlanError(w, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writePlanJSON(w, http.StatusOK, classification)
+	})
+	suggestTables := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		suggester, ok := planner.(TableSuggester)
+		if !ok {
+			writePlanJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "AI_RETRIEVAL_UNAVAILABLE", "message": "候选表检索服务暂时不可用"})
+			return
+		}
+		claims, _ := auth.ClaimsFromContext(r.Context())
+		var input TableSuggestionRequest
+		if !decodePlanRequest(w, r, &input) {
+			return
+		}
+		result, err := suggester.SuggestTables(r.Context(), claims.TenantID, claims.Subject, input)
+		if err != nil {
+			writePlanError(w, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		writePlanJSON(w, http.StatusOK, result)
+	})
+	datasetObjectID := func(r *http.Request) string { return r.PathValue("id") }
+	mux.Handle("POST /api/v1/datasets/ai/table-suggestions", protect(nil, suggestTables))
+	mux.Handle("POST /api/v1/datasets/ai/intake", protect(nil, classifyIntake))
 	mux.Handle("POST /api/v1/datasets/ai/proposals", protect(nil, plan(false)))
-	mux.Handle("POST /api/v1/datasets/{id}/ai/proposals", protect(func(r *http.Request) string { return r.PathValue("id") }, plan(true)))
+	mux.Handle("POST /api/v1/datasets/{id}/ai/proposals", protect(datasetObjectID, plan(true)))
+	mux.Handle("POST /api/v1/datasets/ai/sessions", protect(nil, openSession))
+	mux.Handle("GET /api/v1/datasets/ai/sessions/{sessionId}", protect(nil, getSession))
+	mux.Handle("POST /api/v1/datasets/ai/sessions/{sessionId}/intent", protect(nil, prepareIntent))
+	mux.Handle("POST /api/v1/datasets/ai/sessions/{sessionId}/scope", protect(nil, confirmScope))
+	mux.Handle("POST /api/v1/datasets/ai/sessions/{sessionId}/sources/screen", protect(nil, screenSources))
+	mux.Handle("POST /api/v1/datasets/ai/sessions/{sessionId}/blueprint", protect(nil, generateBlueprint))
+	mux.Handle("POST /api/v1/datasets/ai/sessions/{sessionId}/blueprint/revisions", protect(nil, reviseBlueprint))
+	mux.Handle("POST /api/v1/datasets/ai/sessions/{sessionId}/stages", protect(nil, resolveStage))
+	mux.Handle("POST /api/v1/datasets/ai/sessions/{sessionId}/events", protect(nil, recordSessionEvent))
+	mux.Handle("POST /api/v1/datasets/{id}/ai/session", protect(datasetObjectID, openSession))
+	mux.Handle("GET /api/v1/datasets/{id}/ai/session", protect(datasetObjectID, findDatasetSession))
 	return mux
+}
+
+// SessionManager is the session surface the HTTP layer needs. The concrete
+// *Service implements it; deployments without a session store simply do not.
+type SessionManager interface {
+	OpenSession(ctx context.Context, tenantID, actorID, datasetID string, input SessionOpenRequest) (ModelingSession, error)
+	GetSession(ctx context.Context, tenantID, actorID, sessionID string) (ModelingSession, error)
+	FindDatasetSession(ctx context.Context, tenantID, actorID, datasetID string) (ModelingSession, bool, error)
+	ConfirmSessionScope(ctx context.Context, tenantID, actorID, sessionID string, input SessionScopeRequest) (ModelingSession, error)
+	PrepareSessionIntent(ctx context.Context, tenantID, actorID, sessionID string, input SessionIntentRequest) (ModelingSession, error)
+	ResolveSessionProposal(ctx context.Context, tenantID, actorID, sessionID string, input SessionEventRequest) (ModelingSession, error)
+	ScreenSources(ctx context.Context, tenantID, actorID string, input SourceScreeningRequest) (ModelingSession, error)
+	GenerateBlueprint(ctx context.Context, tenantID, actorID, sessionID string) (ModelingSession, error)
+	ReviseBlueprint(ctx context.Context, tenantID, actorID, sessionID, instruction string) (ModelingSession, error)
+	ResolveBlueprintStage(ctx context.Context, tenantID, actorID, sessionID string, input StageResolution) (ModelingSession, error)
+}
+
+// IntakeClassifier is the model-kind classification surface for the CREATE intake.
+type IntakeClassifier interface {
+	ClassifyIntake(ctx context.Context, tenantID, actorID string, input IntakeRequest) (IntakeClassification, error)
 }
 
 type planStreamProgressFrame struct {
@@ -92,6 +354,16 @@ type planStreamProgressFrame struct {
 type planStreamResultFrame struct {
 	Type   string     `json:"type"`
 	Result PlanResult `json:"result"`
+}
+
+// BlueprintRevisionRequest is the natural-language change request on a blueprint.
+type BlueprintRevisionRequest struct {
+	Instruction string `json:"instruction"`
+}
+
+type sessionStreamResultFrame struct {
+	Type    string          `json:"type"`
+	Session ModelingSession `json:"session"`
 }
 
 type planStreamErrorFrame struct {
@@ -151,14 +423,58 @@ func decodePlanRequest(w http.ResponseWriter, r *http.Request, target any) bool 
 	return true
 }
 
+// decodeOptionalRequest accepts an empty body (older clients send none or "{}")
+// and otherwise applies the strict single-document rule.
+func decodeOptionalRequest(w http.ResponseWriter, r *http.Request, target any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
+	payload, err := io.ReadAll(r.Body)
+	if err != nil {
+		writePlanJSON(w, http.StatusBadRequest, map[string]string{"code": "DATASET_AI_REQUEST_INVALID", "message": "请求体无法读取"})
+		return false
+	}
+	if len(bytes.TrimSpace(payload)) == 0 {
+		return true
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		writePlanJSON(w, http.StatusBadRequest, map[string]string{"code": "DATASET_AI_REQUEST_INVALID", "message": "请求体格式无效"})
+		return false
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		writePlanJSON(w, http.StatusBadRequest, map[string]string{"code": "DATASET_AI_REQUEST_INVALID", "message": "请求体只能包含一个 JSON 文档"})
+		return false
+	}
+	return true
+}
+
 func writePlanError(w http.ResponseWriter, err error) {
 	var providerErr *aiplatform.ProviderError
 	var clarificationErr *ClarificationRequiredError
 	switch {
 	case errors.As(err, &clarificationErr):
-		writePlanJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_AI_CLARIFICATION_REQUIRED", "message": clarificationErr.Question})
+		candidates := clarificationErr.Candidates
+		if candidates == nil {
+			candidates = []ClarificationCandidate{}
+		}
+		writePlanJSON(w, http.StatusConflict, planClarificationResponse{
+			Code:       "DATASET_AI_CLARIFICATION_REQUIRED",
+			Message:    clarificationErr.Question,
+			Candidates: candidates,
+		})
 	case errors.Is(err, ErrCurrentRequired):
 		writePlanJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_AI_CURRENT_REQUIRED", "message": "当前画布基线缺失，请重新打开数据集后再让 AI 修改"})
+	case errors.Is(err, ErrSessionNotFound):
+		writePlanJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_AI_SESSION_STALE", "message": "AI 建模会话已失效，系统将开始新的会话"})
+	case errors.Is(err, ErrSessionConflict):
+		writePlanJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_AI_SESSION_CONFLICT", "message": "AI 建模会话正被其他窗口更新，请稍后重试"})
+	case errors.Is(err, ErrScopeRequired):
+		writePlanJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_AI_SCOPE_REQUIRED", "message": "请先确认业务目标、模型类型与数据表范围，再生成建模蓝图"})
+	case errors.Is(err, ErrBlueprintRequired):
+		writePlanJSON(w, http.StatusConflict, map[string]string{"code": "DATASET_AI_BLUEPRINT_PENDING", "message": "建模蓝图还有待确认的阶段，请先在蓝图卡片中确认或调整后再生成 DAG"})
+	case errors.Is(err, ErrSessionStoreUnavailable):
+		writePlanJSON(w, http.StatusServiceUnavailable, map[string]string{"code": "DATASET_AI_SESSION_UNAVAILABLE", "message": "AI 建模会话存储暂不可用，本次将以无会话模式继续"})
 	case errors.Is(err, ErrInvalidRequest):
 		writePlanJSON(w, http.StatusBadRequest, map[string]string{"code": "DATASET_AI_REQUEST_INVALID", "message": "请用 1 至 4000 个字符说明希望生成或修改的数据流程"})
 	case errors.Is(err, ErrNoAssets):
@@ -189,6 +505,14 @@ func writePlanError(w http.ResponseWriter, err error) {
 	default:
 		writePlanJSON(w, http.StatusBadGateway, map[string]string{"code": "AI_COMPLETION_FAILED", "message": "AI 方案生成失败，原画布未发生变化，请稍后重试"})
 	}
+}
+
+// planClarificationResponse keeps message as the question for existing clients while
+// exposing the structured candidate components for the clarification card.
+type planClarificationResponse struct {
+	Code       string                   `json:"code"`
+	Message    string                   `json:"message"`
+	Candidates []ClarificationCandidate `json:"candidates"`
 }
 
 type planInvalidOutputResponse struct {
@@ -240,6 +564,10 @@ func publicInvalidOutputDiagnostic(metadata InvalidOutputError) invalidOutputDia
 		return invalidOutputDiagnostic{"GROUP_CONFIGURATION_INVALID", "AI 方案的分组维度或聚合指标不完整。", "请分别写明分组维度、指标字段和 SUM/COUNT 等聚合方式；日期粒度请使用独立日期转换组件。"}
 	case metadata.ReasonCode == InvalidOutputReasonFieldReference || metadata.ReasonCode == InvalidOutputReasonFieldCaseMismatch:
 		return invalidOutputDiagnostic{"FIELD_REFERENCE_INVALID", "AI 方案引用了当前映射表中不可用的字段。", "请在要求中选用画布上已有的字段名，或先在数据节点中勾选该字段。"}
+	case metadata.ReasonCode == InvalidOutputReasonBlueprint && metadata.Stage == InvalidOutputStagePlanValidation:
+		return invalidOutputDiagnostic{"BLUEPRINT_NOT_REALIZED", "AI 方案没有完整落实已确认的建模蓝图（关联、指标口径、过滤或输出），原画布已保留。", "请按原要求重试；若持续出现，可在蓝图卡片中重新打开对应阶段调整后再生成。"}
+	case metadata.ReasonCode == InvalidOutputReasonBlueprint:
+		return invalidOutputDiagnostic{"BLUEPRINT_INVALID", "AI 生成的建模蓝图引用了范围外的表或字段，或缺少该类型必需的阶段。", "请重试生成蓝图；若持续出现，可调整候选表范围或补充业务目标描述。"}
 	case metadata.ReasonCode == InvalidOutputReasonOutput:
 		return invalidOutputDiagnostic{"FINAL_OUTPUT_INVALID", "AI 方案的最终输出中包含上游未产生的字段。", "请明确最终保留哪些字段，并确保它们已由上游数据、分组或字段处理组件产生。"}
 	}
@@ -260,7 +588,8 @@ func safeInvalidOutputReason(value string) string {
 		InvalidOutputReasonGroup,
 		InvalidOutputReasonTransform,
 		InvalidOutputReasonOutput,
-		InvalidOutputReasonChangeScope:
+		InvalidOutputReasonChangeScope,
+		InvalidOutputReasonBlueprint:
 		return value
 	default:
 		return InvalidOutputReasonUnknown
@@ -273,7 +602,8 @@ func safeInvalidOutputStage(value string) string {
 		InvalidOutputStageIntentValidation,
 		InvalidOutputStagePlannerResponse,
 		InvalidOutputStagePlanValidation,
-		InvalidOutputStageChangeSetValidation:
+		InvalidOutputStageChangeSetValidation,
+		InvalidOutputStageBlueprintValidation:
 		return value
 	default:
 		return InvalidOutputStagePlanValidation

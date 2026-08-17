@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://askdata/schemas/semantic-bundle-v1.schema.json",
+  "title": "semantic-bundle/v1",
+  "description": "统一语义资产导入合同：一个文件同时携带 MODEL / METRIC / DIMENSION / KNOWLEDGE 四个分区的资产。引用一律使用稳定 code（datasetVersionId 是唯一的环境相关例外）。上传后按确定性顺序展开为受治理的导入行，经四层校验后以 DRAFT 提交。",
+  "type": "object",
+  "required": ["contract", "assets"],
+  "additionalProperties": false,
+  "properties": {
+    "contract": { "const": "semantic-bundle/v1" },
+    "source": {
+      "type": "object",
+      "description": "可选出处（生成系统、运行 ID 等），仅作审计参考。"
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": ["UPSERT", "CREATE_ONLY"],
+          "default": "UPSERT",
+          "description": "UPSERT 允许更新既有 code；CREATE_ONLY 在 code 已存在时判该行失败。"
+        }
+      }
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20000,
+      "items": { "$ref": "#/$defs/asset" }
+    }
+  },
+  "$defs": {
+    "code": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_]{0,127}$"
+    },
+    "asset": {
+      "type": "object",
+      "required": ["section", "kind", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "section": { "enum": ["MODEL", "METRIC", "DIMENSION", "KNOWLEDGE"] },
+        "kind": {
+          "description": "分区内子类型。MODEL: MODEL|RELATIONSHIP；METRIC: BASE|DERIVED|MEASURE|VIEW|COMPATIBILITY；DIMENSION: CATEGORICAL|TIME|ENTITY|HIERARCHY|MEMBER；KNOWLEDGE: TERM|DEFINITION|CONVENTION|POLICY|FAQ|DOMAIN_NOTE|ALIAS。",
+          "type": "string"
+        },
+        "code": { "$ref": "#/$defs/code" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "description": { "type": "string", "maxLength": 4000 },
+        "aliases": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "maxItems": 64,
+          "description": "信封别名：METRIC/DIMENSION 资产的别名会展开为问数别名词条；KNOWLEDGE 资产的别名并入 synonyms。"
+        },
+        "owner": {
+          "type": "string",
+          "description": "本租户 ACTIVE 用户邮箱；缺省为导入者。"
+        },
+        "spec": {
+          "type": "object",
+          "description": "分区专属结构化事实。展开时映射到确定性执行所需的治理列；语义正误由服务端四层校验按行裁决。"
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "contract": "semantic-bundle/v1",
+      "options": { "mode": "UPSERT" },
+      "assets": [
+        {
+          "section": "MODEL",
+          "kind": "MODEL",
+          "code": "fct_order",
+          "name": "订单事实",
+          "owner": "modeler@example.com",
+          "spec": {
+            "datasetVersionId": "00000000-0000-0000-0000-000000000000",
+            "entity": "order",
+            "grain": { "description": "一行一订单", "keyFields": ["order_id"] },
+            "timeContract": "std_day"
+          }
+        },
+        {
+          "section": "DIMENSION",
+          "kind": "CATEGORICAL",
+          "code": "region",
+          "name": "地区",
+          "aliases": ["区域"],
+          "owner": "modeler@example.com",
+          "spec": {
+            "model": "fct_order",
+            "field": "region_code",
+            "memberIndexPolicy": "FULL",
+            "members": [
+              { "key": "EAST", "label": "华东", "aliases": ["东部"] }
+            ]
+          }
+        },
+        {
+          "section": "METRIC",
+          "kind": "BASE",
+          "code": "gmv",
+          "name": "GMV",
+          "aliases": ["成交总额"],
+          "owner": "modeler@example.com",
+          "spec": {
+            "model": "fct_order",
+            "aggregation": "SUM",
+            "sourceField": "order_amount",
+            "additivity": "FULLY_ADDITIVE",
+            "unit": "CNY",
+            "timeGrain": "DAY",
+            "format": { "precision": 2 },
+            "applicableDimensions": [
+              { "dimension": "region", "compatible": true, "role": "GROUP_BY" }
+            ],
+            "businessDefinition": "已支付订单金额合计，不含退款与取消订单。",
+            "positiveQuestions": ["上个月 GMV 是多少"]
+          }
+        },
+        {
+          "section": "KNOWLEDGE",
+          "kind": "DEFINITION",
+          "code": "active_customer",
+          "name": "活跃客户",
+          "spec": {
+            "authority": "AUTHORITATIVE",
+            "relation": "DEFINES",
+            "targetType": "METRIC",
+            "targetCode": "gmv",
+            "body": "近 30 天内至少完成一次支付的客户。",
+            "synonyms": ["活跃用户"]
+          }
+        }
+      ]
+    }
+  ]
+}

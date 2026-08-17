@@ -36,6 +36,30 @@ func (s *PostgresStore) ListTenantIDs(ctx context.Context) ([]string, error) {
 	return result, rows.Err()
 }
 
+// RequeueStaleDocuments schedules every stored document produced by an older
+// document contract. It is intentionally tenant-scoped so the normal worker RLS
+// boundary remains in force.
+func (s *PostgresStore) RequeueStaleDocuments(ctx context.Context, tenantID string) error {
+	if strings.TrimSpace(tenantID) == "" {
+		return ErrInvalidRequest
+	}
+	return database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO platform.asset_embedding_outbox(
+			tenant_id,asset_type,asset_id,table_id
+		)
+		SELECT embedding.tenant_id,embedding.asset_type,embedding.asset_id,embedding.table_id
+		FROM platform.asset_embeddings AS embedding
+		WHERE embedding.tenant_id=$1::uuid
+		  AND embedding.document_version<>$2
+		ON CONFLICT(tenant_id,asset_type,asset_id) DO UPDATE SET
+			table_id=EXCLUDED.table_id,status='PENDING',
+			event_version=platform.asset_embedding_outbox.event_version+1,
+			attempt=0,error_code='',next_attempt_at=now(),lease_owner='',lease_expires_at=NULL,
+			completed_at=NULL,updated_at=now()`, tenantID, DocumentVersion)
+		return err
+	})
+}
+
 func (s *PostgresStore) ClaimBatch(ctx context.Context, tenantID, workerID string, lease time.Duration, limit int) (claims []Claim, err error) {
 	if tenantID == "" || workerID == "" || lease < time.Second || limit < 1 || limit > 32 {
 		return nil, ErrInvalidRequest
@@ -86,7 +110,7 @@ func (s *PostgresStore) Prepare(ctx context.Context, claim Claim, model string) 
 	err = database.WithTenantTx(ctx, s.pool, claim.TenantID, func(tx pgx.Tx) error {
 		var facts tableFacts
 		var tableStatus, managementStatus, tableStructureHash, enrichedTableHash, structureHash, enrichedStructureHash, sourceStatus string
-		err := tx.QueryRow(ctx, `SELECT source.source_type::text,table_asset.catalog_name,table_asset.schema_name,
+		err := tx.QueryRow(ctx, `SELECT source.id::text,source.name,source.source_type::text,table_asset.catalog_name,table_asset.schema_name,
 			table_asset.table_name,table_asset.business_name,table_asset.business_description,table_asset.tags,
 			table_asset.asset_status::text,table_asset.management_status,table_asset.table_structure_hash,
 			table_asset.last_enriched_table_structure_hash,table_asset.structure_hash,
@@ -95,7 +119,7 @@ func (s *PostgresStore) Prepare(ctx context.Context, claim Claim, model string) 
 		JOIN platform.data_sources AS source
 		  ON source.tenant_id=table_asset.tenant_id AND source.id=table_asset.data_source_id
 		WHERE table_asset.id=$1 AND source.deleted_at IS NULL`, claim.TableID).Scan(
-			&facts.SourceType, &facts.CatalogName, &facts.SchemaName, &facts.TableName,
+			&facts.SourceID, &facts.SourceName, &facts.SourceType, &facts.CatalogName, &facts.SchemaName, &facts.TableName,
 			&facts.BusinessName, &facts.BusinessDescription, &facts.Tags, &tableStatus, &managementStatus,
 			&tableStructureHash, &enrichedTableHash, &structureHash, &enrichedStructureHash, &sourceStatus,
 		)

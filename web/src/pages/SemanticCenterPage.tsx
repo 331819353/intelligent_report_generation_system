@@ -28,6 +28,7 @@ import {
   Sparkle,
   Stack,
   Stop,
+  TreeStructure,
   UploadSimple,
   WarningCircle,
   X,
@@ -44,6 +45,10 @@ import { AppButton } from "../components/AppButton";
 import { AppShell } from "../components/AppShell";
 import "../styles/semantic-center.css";
 import { SemanticOperationsPanel } from "../components/semantic/SemanticOperationsPanel";
+import { SemanticBundleImportPanel } from "../components/semantic/SemanticBundleImportPanel";
+import { SemanticLineagePanel } from "../components/semantic/SemanticLineagePanel";
+import { SemanticDiscoveryResults } from "../components/semantic/SemanticDiscoveryResults";
+import type { DiscoverySection, LineageNode } from "../lib/semantic-bundle";
 import { AdditivityBacklogPanel } from "../components/semantic/AdditivityBacklogPanel";
 import { QualityRulesPanel } from "../components/semantic/QualityRulesPanel";
 import { RowAccessPoliciesPanel } from "../components/semantic/RowAccessPoliciesPanel";
@@ -187,6 +192,52 @@ const semanticTabRoutes: Record<SemanticTab, string> = {
   operations: "/semantic/operations",
 };
 
+// discoverySectionForTab / discoveryTabForSection 把目录页签与四分区检索的
+// 分区名互相映射，跨分区命中可以一键切换页签。
+function discoverySectionForTab(tab: SemanticTab): DiscoverySection {
+  switch (tab) {
+    case "models":
+      return "MODEL";
+    case "metrics":
+      return "METRIC";
+    case "dimensions":
+      return "DIMENSION";
+    default:
+      return "KNOWLEDGE";
+  }
+}
+
+function discoveryTabForSection(section: DiscoverySection): SemanticCatalogTab {
+  switch (section) {
+    case "MODEL":
+      return "models";
+    case "METRIC":
+      return "metrics";
+    case "DIMENSION":
+      return "dimensions";
+    default:
+      return "knowledge";
+  }
+}
+
+// lineageNodeTypeForTab 把目录页签映射到血缘节点类型。知识页签同时承载词条
+// 与 KPI Bundle 等对象，统一按 KNOWLEDGE 节点查询。
+function lineageNodeTypeForTab(
+  tab: SemanticTab,
+  item: SemanticObject,
+): LineageNode["type"] {
+  switch (tab) {
+    case "models":
+      return "MODEL";
+    case "metrics":
+      return "METRIC";
+    case "dimensions":
+      return item.kind === "HIERARCHY" ? "HIERARCHY" : "DIMENSION";
+    default:
+      return "KNOWLEDGE";
+  }
+}
+
 function semanticTabFromPath(pathname: string): SemanticTab | undefined {
   return (Object.entries(semanticTabRoutes) as Array<[SemanticTab, string]>).find(([, route]) => route === pathname)?.[0];
 }
@@ -202,6 +253,7 @@ const snapshotModels: SemanticObject[] = [
     status: "CERTIFIED",
     layer: "DWD",
     datasetId: "snapshot-sales-detail",
+    datasetVersionId: "snapshot-sales-detail-v4",
     updatedAt: "2026-08-11T09:48:00+08:00",
     ownerId: "张晨",
   },
@@ -977,6 +1029,13 @@ export function SemanticCenterPage() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [keyword, setKeyword] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
+  // 四分区 Bundle 导入向导与血缘面板；reloadNonce 让提交后的目录重新加载。
+  const [bundleImportOpen, setBundleImportOpen] = useState(false);
+  const [lineageTarget, setLineageTarget] = useState<{
+    node: LineageNode;
+    title: string;
+  } | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const [builderOpen, setBuilderOpen] = useState(false);
   const [builderStep, setBuilderStep] = useState(1);
   const [draft, setDraft] = useState<BuilderDraft>(initialDraft);
@@ -1140,7 +1199,7 @@ export function SemanticCenterPage() {
     return () => {
       cancelled = true;
     };
-  }, [designSnapshot]);
+  }, [designSnapshot, reloadNonce]);
 
   useEffect(() => {
     if (
@@ -1309,6 +1368,31 @@ export function SemanticCenterPage() {
     (item) => item.status === "DRAFT",
   ).length;
   const activeRelease = releases.find((item) => item.status === "ACTIVE");
+  const metricCertifiedCount = objects.metrics.filter(
+    (item) => item.status === "CERTIFIED" || item.status === "ACTIVE",
+  ).length;
+  const metricDraftCount = objects.metrics.filter(
+    (item) => item.status === "DRAFT",
+  ).length;
+  const dimensionCertifiedCount = objects.dimensions.filter(
+    (item) => item.status === "CERTIFIED" || item.status === "ACTIVE",
+  ).length;
+  const dimensionDraftCount = objects.dimensions.filter(
+    (item) => item.status === "DRAFT",
+  ).length;
+  const dimensionIndexReadyCount = objects.dimensions.filter(
+    (item) => item.memberIndexPolicy && item.memberIndexPolicy !== "待选择",
+  ).length;
+  const knowledgeCertifiedCount = objects.knowledge.filter(
+    (item) => item.status === "CERTIFIED" || item.status === "ACTIVE",
+  ).length;
+  const knowledgeDraftCount = objects.knowledge.filter(
+    (item) => item.status === "DRAFT",
+  ).length;
+  const knowledgeAliasCount = objects.knowledge.reduce(
+    (count, item) => count + (item.aliases?.length ?? 0),
+    0,
+  );
   const currentItems = useMemo(
     () =>
       activeTab === "releases" || activeTab === "operations"
@@ -3495,14 +3579,39 @@ export function SemanticCenterPage() {
         onClick={() => void generateCoreSemanticAssets()}
       >
         <Sparkle size={17} />
-        {busy === "bootstrap-assets" ? "正在生成…" : "生成核心语义资产"}
+        {busy === "bootstrap-assets"
+          ? "正在生成…"
+          : activeTab === "metrics" ||
+              activeTab === "dimensions" ||
+              activeTab === "knowledge"
+            ? "从认证模型生成"
+            : "生成核心语义资产"}
       </AppButton>
     );
 
+  const isMetricCenter = activeTab === "metrics";
+  const isDimensionCenter = activeTab === "dimensions";
+  const isKnowledgeCenter = activeTab === "knowledge";
+  const isStandaloneCatalog =
+    isMetricCenter || isDimensionCenter || isKnowledgeCenter;
+  const standaloneTitle = isMetricCenter
+    ? "指标中心"
+    : isDimensionCenter
+      ? "维度中心"
+      : "业务知识";
+  const standaloneSubtitle = isMetricCenter
+    ? "统一维护业务指标口径、公式与可加性"
+    : isDimensionCenter
+      ? "统一管理维度成员、层级与索引策略"
+      : "统一沉淀业务词典、认证问法与 KPI 口径";
+
   return (
     <AppShell
-      className="semantic-center-shell"
-      title="语义资产"
+      className={`semantic-center-shell${isStandaloneCatalog ? " is-standalone-catalog" : ""}${isMetricCenter ? " is-metric-center" : ""}${isDimensionCenter ? " is-dimension-center" : ""}${isKnowledgeCenter ? " is-knowledge-center" : ""}`}
+      title={isStandaloneCatalog ? standaloneTitle : "语义资产"}
+      titleMeta={isStandaloneCatalog ? (
+        <span className="semantic-title-meta">{standaloneSubtitle}</span>
+      ) : undefined}
       actions={primaryAction}
     >
       {notice && (
@@ -3522,8 +3631,11 @@ export function SemanticCenterPage() {
           </button>
         </div>
       )}
-      <section className="semantic-stage" aria-label="语义资产建设中心">
-        <header className="semantic-intro">
+      <section
+        className={`semantic-stage${isStandaloneCatalog ? " is-standalone-catalog" : ""}${isMetricCenter ? " is-metric-center" : ""}${isDimensionCenter ? " is-dimension-center" : ""}${isKnowledgeCenter ? " is-knowledge-center" : ""}`}
+        aria-label={isStandaloneCatalog ? standaloneTitle : "语义资产建设中心"}
+      >
+        {!isStandaloneCatalog && <header className="semantic-intro">
           <div>
             <span>数据资产化 · 第 3 段</span>
             <h2>业务语义建设与发布</h2>
@@ -3542,9 +3654,9 @@ export function SemanticCenterPage() {
               </AppButton>
             )}
           </div>
-        </header>
+        </header>}
 
-        <ol className="semantic-flow" aria-label="语义资产主流程">
+        {!isStandaloneCatalog && <ol className="semantic-flow" aria-label="语义资产主流程">
           <li className="is-complete">
             <span>
               <Check size={16} weight="bold" />
@@ -3581,16 +3693,43 @@ export function SemanticCenterPage() {
               <small>投影、评测、审批与灰度</small>
             </div>
           </li>
-        </ol>
+        </ol>}
 
-        <section className="semantic-summary" aria-label="语义资产概览">
+        <section
+          className="semantic-summary"
+          aria-label={isStandaloneCatalog ? `${standaloneTitle}概览` : "语义资产概览"}
+        >
           <article>
             <span className="is-blue">
-              <Stack size={20} />
+              {isMetricCenter ? (
+                <Gauge size={20} />
+              ) : isDimensionCenter ? (
+                <CirclesThreePlus size={20} />
+              ) : isKnowledgeCenter ? (
+                <Books size={20} />
+              ) : (
+                <Stack size={20} />
+              )}
             </span>
             <div>
-              <small>语义对象</small>
-              <strong>{allObjects.length}</strong>
+              <small>
+                {isMetricCenter
+                  ? "全部指标"
+                  : isDimensionCenter
+                    ? "全部维度"
+                    : isKnowledgeCenter
+                      ? "全部知识"
+                    : "语义对象"}
+              </small>
+              <strong>
+                {isMetricCenter
+                  ? objects.metrics.length
+                  : isDimensionCenter
+                    ? objects.dimensions.length
+                    : isKnowledgeCenter
+                      ? objects.knowledge.length
+                    : allObjects.length}
+              </strong>
             </div>
             <em>当前领域</em>
           </article>
@@ -3600,9 +3739,25 @@ export function SemanticCenterPage() {
             </span>
             <div>
               <small>已认证</small>
-              <strong>{certifiedCount}</strong>
+              <strong>
+                {isMetricCenter
+                  ? metricCertifiedCount
+                  : isDimensionCenter
+                    ? dimensionCertifiedCount
+                    : isKnowledgeCenter
+                      ? knowledgeCertifiedCount
+                    : certifiedCount}
+              </strong>
             </div>
-            <em>可进入 Release</em>
+            <em>
+              {isMetricCenter
+                ? "口径已确认"
+                : isDimensionCenter
+                  ? "成员合同已确认"
+                  : isKnowledgeCenter
+                    ? "已纳入知识治理"
+                  : "可进入 Release"}
+            </em>
           </article>
           <article>
             <span className="is-orange">
@@ -3610,24 +3765,72 @@ export function SemanticCenterPage() {
             </span>
             <div>
               <small>待确认</small>
-              <strong>{draftCount}</strong>
+              <strong>
+                {isMetricCenter
+                  ? metricDraftCount
+                  : isDimensionCenter
+                    ? dimensionDraftCount
+                    : isKnowledgeCenter
+                      ? knowledgeDraftCount
+                    : draftCount}
+              </strong>
             </div>
-            <em>草稿或口径待办</em>
+            <em>
+              {isMetricCenter
+                ? "草稿或可加性待办"
+                : isDimensionCenter
+                  ? "草稿或索引待办"
+                  : isKnowledgeCenter
+                    ? "草稿或问法待确认"
+                  : "草稿或口径待办"}
+            </em>
           </article>
           <article>
             <span className="is-cyan">
-              <RocketLaunch size={20} />
+              {isDimensionCenter ? (
+                <Stack size={20} />
+              ) : isKnowledgeCenter ? (
+                <Hash size={20} />
+              ) : (
+                <RocketLaunch size={20} />
+              )}
             </span>
             <div>
-              <small>ACTIVE</small>
-              <strong>{activeRelease ? "1" : "0"}</strong>
+              <small>
+                {isMetricCenter
+                  ? "口径准备度"
+                  : isDimensionCenter
+                    ? "索引就绪"
+                    : isKnowledgeCenter
+                      ? "知识别名"
+                    : "ACTIVE"}
+              </small>
+              <strong>
+                {isMetricCenter
+                  ? `${readinessPercent}%`
+                  : isDimensionCenter
+                    ? dimensionIndexReadyCount
+                    : isKnowledgeCenter
+                      ? knowledgeAliasCount
+                    : activeRelease
+                      ? "1"
+                      : "0"}
+              </strong>
             </div>
-            <em>{activeRelease?.semanticVersion ?? "尚未激活"}</em>
+            <em>
+              {isMetricCenter
+                ? "可加性确认进度"
+                : isDimensionCenter
+                  ? "成员索引策略已配置"
+                  : isKnowledgeCenter
+                    ? "统一检索与问数表达"
+                  : activeRelease?.semanticVersion ?? "尚未激活"}
+            </em>
           </article>
         </section>
 
-        <section className="semantic-workbench">
-          <nav className="semantic-tabs" aria-label="语义中心分类">
+        <section className={`semantic-workbench${isStandaloneCatalog ? " is-single" : ""}`}>
+          {!isStandaloneCatalog && <nav className="semantic-tabs" aria-label="语义中心分类">
             {(Object.keys(tabMeta) as SemanticTab[]).map((key) => {
               const meta = tabMeta[key];
               const Icon = meta.icon;
@@ -3656,32 +3859,62 @@ export function SemanticCenterPage() {
                 </button>
               );
             })}
-          </nav>
+          </nav>}
 
           <div className="semantic-content">
             <header>
-              <div>
-                <span>
+              <div className={isStandaloneCatalog ? "semantic-catalog-heading" : undefined}>
+                {isStandaloneCatalog && (
+                  <i aria-hidden="true">
+                    {isMetricCenter ? (
+                      <Gauge size={19} weight="duotone" />
+                    ) : isDimensionCenter ? (
+                      <CirclesThreePlus size={19} weight="duotone" />
+                    ) : (
+                      <Books size={19} weight="duotone" />
+                    )}
+                  </i>
+                )}
+                <div>
+                {!isStandaloneCatalog && <span>
                   {activeTab === "releases"
                     ? "生产门禁"
                     : activeTab === "operations"
                       ? "持续改进"
                       : "语义目录"}
-                </span>
+                </span>}
                 <h3>
                   {activeTab === "releases"
                     ? "Release 发布中心"
-                    : tabMeta[activeTab].label}
+                    : isMetricCenter
+                      ? "指标清单"
+                      : isDimensionCenter
+                        ? "维度清单"
+                        : isKnowledgeCenter
+                          ? "业务知识清单"
+                        : tabMeta[activeTab].label}
                 </h3>
                 <p>
                   {activeTab === "releases"
                     ? "内容 Hash、四项投影、评测门禁、双人审批与分阶段灰度全部通过后才允许激活。"
                     : activeTab === "operations"
                       ? "承接问数纠错、语义缺口和高频需求，形成可审计的修复、发布与回归闭环。"
-                      : tabMeta[activeTab].description +
+                      : isMetricCenter
+                        ? "集中维护指标定义、统计口径、可加性合同与版本状态。"
+                        : isDimensionCenter
+                          ? "集中维护维度定义、成员索引、敏感级与版本状态。"
+                          : isKnowledgeCenter
+                            ? "集中维护业务词典、认证问法、KPI 口径与版本状态。"
+                        : tabMeta[activeTab].description +
                         "均绑定稳定 ID 与不可变版本。"}
                 </p>
+                </div>
               </div>
+              {isStandaloneCatalog && (
+                <span className="semantic-catalog-count">
+                  共 {currentItems.length} 条{isMetricCenter ? "指标" : isDimensionCenter ? "维度" : "知识"}
+                </span>
+              )}
               {activeTab === "models" && (
                 <AppButton variant="primary" onClick={openBuilder}>
                   <Plus size={16} />
@@ -3689,6 +3922,7 @@ export function SemanticCenterPage() {
                 </AppButton>
               )}
               {activeTab !== "models" &&
+                !isStandaloneCatalog &&
                 activeTab !== "releases" &&
                 activeTab !== "operations" && (
                   <AppButton
@@ -3721,15 +3955,50 @@ export function SemanticCenterPage() {
                 onConfirmed={reloadAdditivityState}
               />
             )}
+            {isMetricCenter && designSnapshot && (
+              <section className="semantic-additivity-backlog is-preview">
+                <header>
+                  <div>
+                    <span>口径治理</span>
+                    <h3>可加性确认</h3>
+                    <p>进入发布前由 Owner 确认指标在时间与业务维度上的聚合规则。</p>
+                  </div>
+                  <div className="semantic-additivity-actions">
+                    <strong>{readiness.confirmedCount}/{readiness.metricCount} 已确认 · {readinessPercent}%</strong>
+                    <AppButton onClick={() => setNotice({ tone: "success", message: "已生成最新可加性建议。" })}>
+                      <ArrowCounterClockwise size={15} />
+                      生成可加性建议
+                    </AppButton>
+                  </div>
+                </header>
+                <div className="semantic-metric-confirmation">
+                  <CheckCircle size={18} weight="fill" />
+                  <span>
+                    <strong>核心指标口径已可用</strong>
+                    <small>仍有 {readiness.unconfirmedCount} 项草稿指标等待 Owner 确认</small>
+                  </span>
+                  <em>{readiness.unconfirmedCount} 项待确认</em>
+                </div>
+              </section>
+            )}
             {activeTab !== "releases" && activeTab !== "operations" && (
               <div className="semantic-toolbar">
                 <label>
                   <MagnifyingGlass size={17} />
                   <input
                     type="search"
+                    aria-label={`搜索${isStandaloneCatalog ? standaloneTitle : "语义对象"}`}
                     value={keyword}
                     onChange={(event) => setKeyword(event.target.value)}
-                    placeholder="搜索名称、编码或业务定义"
+                    placeholder={
+                      isKnowledgeCenter
+                        ? "搜索业务词汇、认证问法或 KPI 口径"
+                        : isDimensionCenter
+                          ? "搜索维度名称、编码或成员定义"
+                          : isMetricCenter
+                            ? "搜索指标名称、编码或业务口径"
+                            : "搜索名称、编码或业务定义"
+                    }
                   />
                 </label>
                 <div>
@@ -3749,7 +4018,28 @@ export function SemanticCenterPage() {
                 <span>
                   显示 {filtered.length} / {currentItems.length}
                 </span>
+                {!isStandaloneCatalog && (
+                  <AppButton
+                    className="semantic-bundle-open"
+                    onClick={() => setBundleImportOpen(true)}
+                  >
+                    <UploadSimple size={15} /> Bundle 导入
+                  </AppButton>
+                )}
               </div>
+            )}
+            {activeTab !== "releases" &&
+              activeTab !== "operations" &&
+              !isStandaloneCatalog &&
+              !designSnapshot && (
+              <SemanticDiscoveryResults
+                query={keyword}
+                activeSection={discoverySectionForTab(activeTab)}
+                onNavigate={(section, candidate) => {
+                  setActiveTab(discoveryTabForSection(section));
+                  setKeyword(candidate.code || candidate.name);
+                }}
+              />
             )}
 
             {activeTab !== "operations" && loading && (
@@ -3770,10 +4060,26 @@ export function SemanticCenterPage() {
               !error &&
               activeTab !== "releases" &&
               activeTab !== "operations" && (
-                <div className="semantic-object-table" role="table">
+                <div className={`semantic-object-table${isStandaloneCatalog ? " is-catalog-table" : ""}`} role="table">
                   <div className="semantic-object-head" role="row">
-                    <span>语义对象</span>
-                    <span>业务合同</span>
+                    <span>
+                      {isMetricCenter
+                        ? "指标"
+                        : isDimensionCenter
+                          ? "维度"
+                          : isKnowledgeCenter
+                            ? "业务知识"
+                            : "语义对象"}
+                    </span>
+                    <span>
+                      {isMetricCenter
+                        ? "可加性 / 粒度"
+                        : isDimensionCenter
+                          ? "类型 / 索引"
+                          : isKnowledgeCenter
+                            ? "类型 / 别名"
+                          : "业务合同"}
+                    </span>
                     <span>状态 / 版本</span>
                     <span>Owner / 更新</span>
                     <span>操作</span>
@@ -3782,7 +4088,15 @@ export function SemanticCenterPage() {
                     <article role="row" key={item.id}>
                       <span className="semantic-object-name" role="cell">
                         <i>
-                          <Hash size={18} />
+                          {isKnowledgeCenter ? (
+                            <Books size={18} />
+                          ) : isDimensionCenter ? (
+                            <CirclesThreePlus size={18} />
+                          ) : isMetricCenter ? (
+                            <Gauge size={18} />
+                          ) : (
+                            <Hash size={18} />
+                          )}
                         </i>
                         <span>
                           <strong>{objectTitle(item)}</strong>
@@ -3870,6 +4184,22 @@ export function SemanticCenterPage() {
                           <Eye size={15} />
                           查看
                         </AppButton>
+                        <AppButton
+                          className="semantic-row-button"
+                          onClick={() =>
+                            setLineageTarget({
+                              node: {
+                                type: lineageNodeTypeForTab(activeTab, item),
+                                id: String(item.objectId ?? item.id),
+                                code: item.code ?? item.term ?? undefined,
+                              },
+                              title: objectTitle(item),
+                            })
+                          }
+                        >
+                          <TreeStructure size={15} />
+                          血缘
+                        </AppButton>
                         {item.status === "DRAFT" && (
                           <AppButton
                             className="semantic-row-button is-primary"
@@ -3879,7 +4209,7 @@ export function SemanticCenterPage() {
                                 : openDetailObject(item)
                             }
                           >
-                            继续完善
+                            {isStandaloneCatalog ? "完善" : "继续完善"}
                           </AppButton>
                         )}
                       </span>
@@ -4177,6 +4507,21 @@ export function SemanticCenterPage() {
           </div>
         </section>
       </section>
+
+      {bundleImportOpen && (
+        <SemanticBundleImportPanel
+          domainId={currentDomainID()}
+          onClose={() => setBundleImportOpen(false)}
+          onCommitted={() => setReloadNonce((nonce) => nonce + 1)}
+        />
+      )}
+      {lineageTarget && (
+        <SemanticLineagePanel
+          node={lineageTarget.node}
+          title={lineageTarget.title}
+          onClose={() => setLineageTarget(null)}
+        />
+      )}
 
       {builderOpen && (
         <div className="semantic-dialog-backdrop" role="presentation">

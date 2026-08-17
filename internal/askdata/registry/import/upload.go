@@ -70,7 +70,7 @@ func (service *UploadService) Upload(
 	if input.Size > MaxImportUploadBytes {
 		return UploadResult{}, ErrImportUploadTooLarge
 	}
-	extension, contentType, ok := importFileContract(input.Filename)
+	extension, contentType, ok := importFileContract(input.AssetType, input.Filename)
 	if !ok {
 		return UploadResult{}, ErrImportUploadInvalid
 	}
@@ -117,8 +117,17 @@ func validImportFilename(value string) bool {
 		path.Base(value) == value && value != "." && value != ".."
 }
 
-func importFileContract(filename string) (string, string, bool) {
+// importFileContract 把文件后缀绑定到批级类型：semantic-bundle/v1 只接受
+// JSON，其余单类型模板只接受表格文件。二者不可交叉，避免同一批混入两种
+// 解析器语义。
+func importFileContract(assetType AssetType, filename string) (string, string, bool) {
 	extension := strings.TrimPrefix(strings.ToLower(path.Ext(filename)), ".")
+	if assetType == AssetBundle {
+		if extension == "json" {
+			return extension, "application/json", true
+		}
+		return "", "", false
+	}
 	switch extension {
 	case "csv":
 		return extension, "text/csv", true

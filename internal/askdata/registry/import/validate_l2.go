@@ -19,7 +19,7 @@ func validateL2(rows []parsedImportRow, batch batchIndex, snapshot ValidationSna
 }
 
 func validateRowReferences(row *parsedImportRow, batch batchIndex, snapshot ValidationSnapshot) {
-	switch rowType(row, batch) {
+	switch row.Type {
 	case AssetModel:
 		validateDatasetReference(row, snapshot)
 		validateRef(row, batch, snapshot, "entityCode", "ENTITY")
@@ -69,56 +69,16 @@ func validateRowReferences(row *parsedImportRow, batch batchIndex, snapshot Vali
 		validateRefList(row, batch, snapshot, "expectedMetricCodes", "METRIC")
 		validateRefList(row, batch, snapshot, "expectedDimensionCodes", "DIMENSION")
 		validateRole(row, snapshot, "actorRole")
+	case AssetKnowledge:
+		if kind := mapKnowledgeTargetKind(row.Values["targetType"]); kind != "" && row.Values["targetCode"] != "" {
+			validateRef(row, batch, snapshot, "targetCode", kind)
+		}
 	}
 	if email := row.Values["ownerEmail"]; email != "" {
 		if _, exists := snapshot.Owners[canonicalLookup(email)]; !exists {
 			addIssue(row, "ownerEmail", ImportOwnerUnknown, "Owner 邮箱未解析到本租户 ACTIVE 用户", "本租户 ACTIVE 用户邮箱", email)
 		}
 	}
-}
-
-func rowType(row *parsedImportRow, batch batchIndex) AssetType {
-	// All rows in a semantic_import share one asset type. The type is recovered
-	// from the only batch code namespace; relation-only types are recognized by
-	// their exact template columns.
-	for kind := range batch.Codes {
-		switch kind {
-		case "MODEL":
-			return AssetModel
-		case "MEASURE":
-			return AssetMeasure
-		case "METRIC":
-			return AssetMetric
-		case "DIMENSION":
-			return AssetDimension
-		case "MEMBER":
-			return AssetMember
-		case "HIERARCHY":
-			return AssetHierarchy
-		case "TERM":
-			return AssetTerm
-		case "KPI_BUNDLE":
-			return AssetKPIBundle
-		case "EVAL_CASE":
-			return AssetEvalCase
-		case "CERTIFIED_EXAMPLE":
-			return AssetCertifiedExample
-		}
-	}
-	values := row.Values
-	switch {
-	case hasColumn(values, "metricCode") && hasColumn(values, "dimensionCode"):
-		return AssetMetricDimension
-	case hasColumn(values, "leftModelCode"):
-		return AssetRelationship
-	default:
-		return ""
-	}
-}
-
-func hasColumn(values map[string]string, column string) bool {
-	_, exists := values[column]
-	return exists
 }
 
 func validateRef(row *parsedImportRow, batch batchIndex, snapshot ValidationSnapshot, column, kind string) {
@@ -222,6 +182,10 @@ func mapTermTargetKind(termType string) string {
 		return ""
 	}
 }
+
+// mapKnowledgeTargetKind 与词条目标同一映射；空 targetType 表示纯概念
+// （CONCEPT），不需要注册对象引用。
+func mapKnowledgeTargetKind(targetType string) string { return mapTermTargetKind(targetType) }
 
 func parseMemberTargetCode(value string) (string, string, error) {
 	parts := strings.SplitN(value, "::", 2)

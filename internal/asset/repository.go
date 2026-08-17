@@ -38,7 +38,7 @@ const liveRefreshSelect = `COALESCE((SELECT ARRAY[i.status,i.stage,COALESCE(NULL
 	WHERE i.table_id=t.id AND j.status IN ('QUEUED','RUNNING')
 	ORDER BY j.created_at DESC,i.id LIMIT 1),ARRAY['','','']::text[])`
 
-const tableSelect = `t.id::text,t.data_source_id::text,d.name,d.source_type::text,COALESCE((SELECT fv.id::text FROM platform.file_assets fa JOIN platform.file_asset_versions fv ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version WHERE fa.id=d.file_asset_id),''),t.catalog_name,t.schema_name,t.table_name,t.table_type,t.source_comment,t.business_name,t.business_description,t.tags,t.sensitivity_level::text,t.visibility::text,false,t.asset_status::text,t.management_status,CASE WHEN t.last_enriched_structure_hash<>'' AND t.last_enriched_structure_hash=t.structure_hash THEN 'SUCCEEDED' ELSE COALESCE((SELECT j.status FROM platform.ai_metadata_jobs j WHERE j.table_id=t.id AND j.metadata_structure_hash=t.structure_hash ORDER BY j.created_at DESC LIMIT 1),'PENDING') END,t.structure_hash,t.metadata_version,t.business_version,(SELECT count(*) FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE'),(SELECT count(*) FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE' AND c.manual_locked),t.last_sync_at::text,` + liveRefreshSelect
+const tableSelect = `t.id::text,t.data_source_id::text,d.name,d.source_type::text,COALESCE((SELECT fv.id::text FROM platform.file_assets fa JOIN platform.file_asset_versions fv ON fv.file_asset_id=fa.id AND fv.tenant_id=fa.tenant_id AND fv.version=fa.current_version WHERE fa.id=d.file_asset_id),''),t.catalog_name,t.schema_name,t.table_name,t.table_type,t.source_comment,t.business_name,t.business_description,t.tags,t.sensitivity_level::text,t.visibility::text,false,t.asset_status::text,t.management_status,CASE WHEN t.last_enriched_structure_hash<>'' AND t.last_enriched_structure_hash=t.structure_hash THEN 'SUCCEEDED' ELSE COALESCE((SELECT j.status FROM platform.ai_metadata_jobs j WHERE j.table_id=t.id AND j.metadata_structure_hash=t.structure_hash ORDER BY j.created_at DESC LIMIT 1),'PENDING') END,t.structure_hash,t.metadata_version,t.business_version,(SELECT count(*) FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE'),(SELECT count(*) FROM platform.metadata_columns c WHERE c.table_id=t.id AND c.asset_status='ACTIVE' AND c.manual_locked),t.last_sync_at::text,t.primary_key_columns,t.constraints_json,` + liveRefreshSelect
 
 // SearchTables 按租户、关键词和分类条件分页检索表资产。
 func (r *Repository) SearchTables(ctx context.Context, tenantID string, search Search) (items []Table, total int, err error) {
@@ -82,13 +82,55 @@ func (r *Repository) GetTable(ctx context.Context, tenantID, id string) (item Ta
 // scanTable 统一数据库列到表资产模型的映射顺序。
 func scanTable(row interface{ Scan(...any) error }, item *Table) error {
 	live := make([]string, 0, 3)
-	if err := row.Scan(&item.ID, &item.DataSourceID, &item.DataSourceName, &item.DataSourceType, &item.FileVersionID, &item.CatalogName, &item.SchemaName, &item.TableName, &item.TableType, &item.SourceComment, &item.BusinessName, &item.BusinessDescription, &item.Tags, &item.SensitivityLevel, &item.Visibility, &item.ManualLocked, &item.AssetStatus, &item.ManagementStatus, &item.EnrichmentStatus, &item.StructureHash, &item.MetadataVersion, &item.BusinessVersion, &item.ColumnCount, &item.LockedColumnCount, &item.LastSyncAt, &live); err != nil {
+	var primaryKeyColumns, constraints []byte
+	if err := row.Scan(&item.ID, &item.DataSourceID, &item.DataSourceName, &item.DataSourceType, &item.FileVersionID, &item.CatalogName, &item.SchemaName, &item.TableName, &item.TableType, &item.SourceComment, &item.BusinessName, &item.BusinessDescription, &item.Tags, &item.SensitivityLevel, &item.Visibility, &item.ManualLocked, &item.AssetStatus, &item.ManagementStatus, &item.EnrichmentStatus, &item.StructureHash, &item.MetadataVersion, &item.BusinessVersion, &item.ColumnCount, &item.LockedColumnCount, &item.LastSyncAt, &primaryKeyColumns, &constraints, &live); err != nil {
 		return err
 	}
 	if len(live) == 3 {
 		item.RefreshState, item.RefreshStage, item.RefreshNote = live[0], live[1], live[2]
 	}
+	item.PrimaryKeyColumns, item.ForeignKeys = parseDeclaredKeys(primaryKeyColumns, constraints)
 	return nil
+}
+
+// parseDeclaredKeys reads the sync-time key constraints. Malformed JSON degrades
+// to "no declared keys" rather than failing the asset read.
+func parseDeclaredKeys(primaryKeyColumns, constraints []byte) ([]string, []ForeignKey) {
+	keys := []string{}
+	if len(primaryKeyColumns) > 0 {
+		_ = json.Unmarshal(primaryKeyColumns, &keys)
+	}
+	var declared []struct {
+		Name              string   `json:"name"`
+		Type              string   `json:"type"`
+		Columns           []string `json:"columns"`
+		ReferencedTable   *string  `json:"referencedTable"`
+		ReferencedColumns []string `json:"referencedColumns"`
+	}
+	if len(constraints) > 0 {
+		_ = json.Unmarshal(constraints, &declared)
+	}
+	foreignKeys := []ForeignKey{}
+	for _, constraint := range declared {
+		if !strings.EqualFold(strings.ReplaceAll(constraint.Type, "_", " "), "FOREIGN KEY") || len(constraint.Columns) == 0 {
+			continue
+		}
+		referenced := ""
+		if constraint.ReferencedTable != nil {
+			referenced = strings.TrimSpace(*constraint.ReferencedTable)
+		}
+		foreignKeys = append(foreignKeys, ForeignKey{
+			Name: constraint.Name, Columns: append([]string(nil), constraint.Columns...),
+			ReferencedTable: referenced, ReferencedColumns: append([]string(nil), constraint.ReferencedColumns...),
+		})
+	}
+	if len(keys) == 0 {
+		keys = nil
+	}
+	if len(foreignKeys) == 0 {
+		foreignKeys = nil
+	}
+	return keys, foreignKeys
 }
 
 // ListColumns 返回表下按序排列的当前活动字段资产。已从源库移除的字段仍保留在
@@ -96,14 +138,14 @@ func scanTable(row interface{ Scan(...any) error }, item *Table) error {
 func (r *Repository) ListColumns(ctx context.Context, tenantID, tableID string) (items []Column, err error) {
 	items = []Column{}
 	err = database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id::text,table_id::text,column_name,ordinal_position,source_comment,native_type,canonical_type,nullable,business_name,business_description,tags,sensitivity_level::text,semantic_type,manual_locked,asset_status::text,business_version FROM platform.metadata_columns WHERE table_id=$1 AND asset_status='ACTIVE' ORDER BY ordinal_position`, tableID)
+		rows, err := tx.Query(ctx, `SELECT id::text,table_id::text,column_name,ordinal_position,source_comment,native_type,canonical_type,nullable,business_name,business_description,tags,sensitivity_level::text,semantic_type,manual_locked,asset_status::text,business_version,is_primary_key,is_foreign_key,is_unique FROM platform.metadata_columns WHERE table_id=$1 AND asset_status='ACTIVE' ORDER BY ordinal_position`, tableID)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var i Column
-			if err := rows.Scan(&i.ID, &i.TableID, &i.ColumnName, &i.OrdinalPosition, &i.SourceComment, &i.NativeType, &i.CanonicalType, &i.Nullable, &i.BusinessName, &i.BusinessDescription, &i.Tags, &i.SensitivityLevel, &i.SemanticType, &i.ManualLocked, &i.AssetStatus, &i.BusinessVersion); err != nil {
+			if err := rows.Scan(&i.ID, &i.TableID, &i.ColumnName, &i.OrdinalPosition, &i.SourceComment, &i.NativeType, &i.CanonicalType, &i.Nullable, &i.BusinessName, &i.BusinessDescription, &i.Tags, &i.SensitivityLevel, &i.SemanticType, &i.ManualLocked, &i.AssetStatus, &i.BusinessVersion, &i.PrimaryKey, &i.ForeignKey, &i.Unique); err != nil {
 				return err
 			}
 			items = append(items, i)

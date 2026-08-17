@@ -457,6 +457,7 @@ func validateTermCertification(ctx context.Context, tx pgx.Tx, versionID string)
 		WHEN 'TIME_CONTRACT' THEN EXISTS(SELECT 1 FROM askdata.time_contract_versions WHERE id=version.target_version_id AND domain_id=version.domain_id AND status='CERTIFIED')
 		WHEN 'OPERATOR' THEN true
 		WHEN 'LEGACY' THEN true
+		WHEN 'CONCEPT' THEN true
 		ELSE false END
 		FROM askdata.business_term_versions AS version WHERE version.id=$1`, versionID).Scan(&targetValid); err != nil || !targetValid {
 		return errors.New("TERM_TARGET_INVALID: target must be certified in the same domain")

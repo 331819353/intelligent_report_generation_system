@@ -8,6 +8,8 @@ export type APIError = {
   diagnosticCode?: string
   suggestion?: string
   details?: Array<{ path: string; code?: string; reason?: string; message?: string }>
+  /** 数据集 AI 澄清返回当前画布中可选择的候选组件。 */
+  candidates?: Array<{ componentKind: string; componentId: string; componentName: string }>
   /** 语义管理接口沿用注册表的 issues 字段；与 details 统一展示。 */
   issues?: Array<{ path: string; code?: string; reason?: string; message?: string }>
   /** AI 建议冲突返回确切原因；overridable 表示用户确认后可强制覆盖。 */

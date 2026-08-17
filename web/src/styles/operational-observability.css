@@ -116,3 +116,67 @@
 @media (max-width: 850px) {
   .operational-quota, .operational-latency-card article { border-top-color: #f0f3f7; }
 }
+
+/* Platform-management baseline: one white workspace, compact summaries and table-like cards. */
+.operational-center {
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  overflow: auto;
+  padding-bottom: 14px;
+  scrollbar-width: thin;
+}
+.operational-heading {
+  min-height: 66px;
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: center;
+  border-bottom: 1px solid #e5ebf2;
+  padding: 10px 16px;
+  background: #fff;
+}
+.operational-heading h3 { margin: 0; color: #26384f; font-size: 16px; font-weight: 700; }
+.operational-heading p { margin: 3px 0 0; color: #7b899c; font-size: 12px; }
+.operational-heading-actions label { display: flex; align-items: center; gap: 8px; }
+.operational-heading-actions select { min-height: 34px; border-color: transparent; border-radius: 8px; background-color: #f2f5f9; }
+.operational-summary {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 14px;
+}
+.operational-summary article {
+  min-height: 66px;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  gap: 2px 9px;
+  border-color: #e1e8f0;
+  border-radius: 9px;
+  padding: 10px 12px;
+  box-shadow: none;
+}
+.operational-summary svg {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  width: 34px;
+  height: 34px;
+  box-sizing: border-box;
+  border-radius: 9px;
+  padding: 8px;
+  background: #eaf4ff;
+}
+.operational-summary span { grid-column: 2; grid-row: 1; }
+.operational-summary small { grid-column: 2; grid-row: 2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.operational-summary strong { grid-column: 3; grid-row: 1 / span 2; justify-self: end; font-size: 19px; }
+.operational-grid,
+.operational-card { margin-inline: 14px; }
+.operational-grid .operational-card { margin-inline: 0; }
+.operational-card { border-color: #e1e8f0; border-radius: 10px; box-shadow: none; }
+.operational-card > header { min-height: 52px; padding: 9px 13px; }
+.operational-queue-list > article { min-height: 54px; padding-block: 9px; }
+
+@media (max-width: 1080px) {
+  .operational-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -301,6 +301,9 @@ export function UserPermissionsPage() {
   const availableDomains = domains.filter(domain => domain.status === 'ACTIVE' && !draftDomainIDs.has(domain.id))
   const currentRole = draft.find(item => item.domainId === roleDomainID)?.role ?? 'MEMBER'
   const selectedDomain = domains.find(domain => domain.id === roleDomainID)
+  const activeUserCount = users.filter(user => user.status === 'ACTIVE').length
+  const domainAdminCount = users.filter(user => user.domains.some(domain => domain.memberRole === 'DOMAIN_ADMIN')).length
+  const attentionUserCount = users.filter(user => user.status !== 'ACTIVE').length
 
   const addDomain = () => {
     if (!addDomainID) return
@@ -518,25 +521,16 @@ export function UserPermissionsPage() {
   return <AppShell className="user-permissions-shell" controlPlane>
     <section className="user-permissions-page">
       <header className="user-permissions-heading">
-        <div className="user-permissions-breadcrumb"><span>权限管理</span><CaretRight size={12} /><strong>角色权限</strong></div>
         <h1>角色权限</h1>
-        <p>管理成员所属领域、角色与实际生效权限</p>
+        <p>统一维护成员所属领域、角色与实际生效权限</p>
       </header>
 
-      <div className="user-permissions-toolbar">
-        <label className="user-permissions-search">
-          <MagnifyingGlass size={18} aria-hidden="true" />
-          <input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索姓名、邮箱或工号" aria-label="搜索姓名、邮箱或工号" />
-          {query && <AppButton text circle type="button" aria-label="清空搜索" onClick={() => setQuery('')}><X size={14} /></AppButton>}
-        </label>
-        <div className="user-permissions-filters">
-          <label><span className="sr-only">状态</span><select value={statusFilter} onChange={event => setStatusFilter(event.target.value as StatusFilter)}><option value="ALL">全部状态</option><option value="ACTIVE">启用</option><option value="DISABLED">已停用</option><option value="LOCKED">已锁定</option></select></label>
-          <label><span className="sr-only">角色</span><select value={roleFilter} onChange={event => setRoleFilter(event.target.value as RoleFilter)}><option value="ALL">全部角色</option><option value="PLATFORM_ADMIN">平台管理员</option><option value="DOMAIN_ADMIN">领域管理员</option><option value="MEMBER">普通成员</option></select></label>
-          <label><span className="sr-only">领域</span><select value={domainFilter} onChange={event => setDomainFilter(event.target.value)}><option value="ALL">全部领域</option>{domains.map(domain => <option value={domain.id} key={domain.id}>{domain.name}</option>)}</select></label>
-          <AppButton type="button" onClick={() => { setStatusFilter('ALL'); setRoleFilter('ALL'); setDomainFilter('ALL'); setQuery('') }}>重置</AppButton>
-          <AppButton type="button" onClick={exportUsers}><DownloadSimple size={16} />批量导出</AppButton>
-        </div>
-      </div>
+      <section className="user-permissions-summary" aria-label="角色权限概览">
+        <article><span className="is-blue"><UserCircle size={20} weight="duotone" /></span><div><small>全部成员</small></div><strong>{users.length}</strong></article>
+        <article><span className="is-green"><CheckCircle size={20} weight="duotone" /></span><div><small>启用成员</small></div><strong>{activeUserCount}</strong></article>
+        <article><span className="is-cyan"><ShieldCheck size={20} weight="duotone" /></span><div><small>领域管理员</small></div><strong>{domainAdminCount}</strong></article>
+        <article><span className="is-orange"><WarningCircle size={20} weight="duotone" /></span><div><small>需处理</small></div><strong>{attentionUserCount}</strong></article>
+      </section>
 
       {(error || notice) && <div className={`user-permissions-feedback ${error ? 'is-error' : 'is-success'}`} role={error ? 'alert' : 'status'}>
         {error ? <WarningCircle size={18} /> : <CheckCircle size={18} />}
@@ -544,8 +538,26 @@ export function UserPermissionsPage() {
         <AppButton text circle type="button" aria-label="关闭提示" onClick={() => { setError(''); setNotice('') }}><X size={14} /></AppButton>
       </div>}
 
-      <div className="user-permissions-workspace">
+      <div className={`user-permissions-workspace ${selected ? 'has-editor' : ''}`.trim()}>
         <section className="user-permissions-table-panel" aria-label="用户目录">
+          <header className="user-permissions-card-header">
+            <div><span><UserCircle size={20} weight="duotone" /></span><div><h2>成员目录</h2><p>按状态、角色和领域筛选成员并维护授权</p></div></div>
+            <strong>{visibleUsers.length} / {users.length} 人</strong>
+          </header>
+          <div className="user-permissions-toolbar">
+            <label className="user-permissions-search">
+              <MagnifyingGlass size={18} aria-hidden="true" />
+              <input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索姓名、邮箱或工号" aria-label="搜索姓名、邮箱或工号" />
+              {query && <AppButton text circle type="button" aria-label="清空搜索" onClick={() => setQuery('')}><X size={14} /></AppButton>}
+            </label>
+            <div className="user-permissions-filters">
+              <label><span className="sr-only">状态</span><select value={statusFilter} onChange={event => setStatusFilter(event.target.value as StatusFilter)}><option value="ALL">全部状态</option><option value="ACTIVE">启用</option><option value="DISABLED">已停用</option><option value="LOCKED">已锁定</option></select></label>
+              <label><span className="sr-only">角色</span><select value={roleFilter} onChange={event => setRoleFilter(event.target.value as RoleFilter)}><option value="ALL">全部角色</option><option value="PLATFORM_ADMIN">平台管理员</option><option value="DOMAIN_ADMIN">领域管理员</option><option value="MEMBER">普通成员</option></select></label>
+              <label><span className="sr-only">领域</span><select value={domainFilter} onChange={event => setDomainFilter(event.target.value)}><option value="ALL">全部领域</option>{domains.map(domain => <option value={domain.id} key={domain.id}>{domain.name}</option>)}</select></label>
+              <AppButton type="button" onClick={() => { setStatusFilter('ALL'); setRoleFilter('ALL'); setDomainFilter('ALL'); setQuery('') }}>重置</AppButton>
+              <AppButton type="button" onClick={exportUsers}><DownloadSimple size={16} />批量导出</AppButton>
+            </div>
+          </div>
           <div className="user-permissions-table-header" role="row">
             <span aria-hidden="true" /><span>姓名</span><span>工号</span><span>邮箱</span><span>所属领域</span><span>角色</span><span>状态</span><span>最近登录</span><span>操作</span>
           </div>
@@ -578,7 +590,7 @@ export function UserPermissionsPage() {
           </footer>
         </section>
 
-        <aside className="user-access-editor" aria-label="编辑成员权限">
+        {selected && <aside className="user-access-editor" aria-label="编辑成员权限">
           {selected ? <>
             <header><h2>编辑成员权限</h2><AppButton text circle type="button" aria-label="关闭编辑面板" onClick={() => chooseUser('')}><X size={18} /></AppButton></header>
             <section className="user-access-identity">
@@ -618,14 +630,16 @@ export function UserPermissionsPage() {
                 <p>生效权限将基于该成员的角色与所属领域自动计算。</p>
               </section>
 
-              <SubjectAttributesPanel
-                userID={selected.id}
-                disabled={busy || selected.platformAdministrator}
-                onNotice={(tone, message) => {
-                  if (tone === 'success') { setNotice(message); setError('') }
-                  else { setError(message) }
-                }}
-              />
+              {designSnapshot
+                ? <section className="subject-attributes subject-attributes-preview"><header><h3>数据范围属性 <span>2 项</span></h3></header><p className="subject-attributes-hint">用于细化成员在领域中的数据可见范围。</p><ul className="subject-attributes-list"><li><code>region</code><span>华东</span></li><li><code>channel</code><span>直营网点</span></li></ul></section>
+                : <SubjectAttributesPanel
+                  userID={selected.id}
+                  disabled={busy || selected.platformAdministrator}
+                  onNotice={(tone, message) => {
+                    if (tone === 'success') { setNotice(message); setError('') }
+                    else { setError(message) }
+                  }}
+                />}
             </>}
 
             <footer>
@@ -633,7 +647,7 @@ export function UserPermissionsPage() {
               <AppButton link type="button" disabled={busy || lifecycleBusy || selected.id === signedInUserID} onClick={() => void updateStatus()}>{lifecycleBusy ? '正在分析影响…' : selected.status === 'ACTIVE' ? '安全停用此账号' : '恢复此账号'}</AppButton>
             </footer>
           </> : <div className="user-permissions-state"><PencilSimple size={30} weight="duotone" /><strong>选择一位用户</strong><small>查看并编辑其领域与角色配置</small></div>}
-        </aside>
+        </aside>}
       </div>
 
       {deactivationPreview && selected && <div className="user-lifecycle-backdrop" role="presentation" onMouseDown={event => { if (event.currentTarget === event.target && !lifecycleBusy) setDeactivationPreview(null) }}>

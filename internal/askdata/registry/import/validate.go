@@ -33,6 +33,13 @@ const (
 	ImportNegativeContextContradiction = "IMPORT_NEGATIVE_CONTEXT_CONTRADICTION"
 	ImportSensitivityPolicyInvalid     = "IMPORT_SENSITIVITY_POLICY_INVALID"
 	ImportImpactRequiresReview         = "IMPORT_IMPACT_REQUIRES_REVIEW"
+	// 四分区 Bundle 导入引入的裁决码。前两个是非阻断的信息事实：WILL_UPDATE
+	// 标记“该 code 已存在，提交会创建新版本”；CONTENT_UNCHANGED 标记“内容与
+	// 当前认证版本一致”，该行被判为 SKIPPED 而不是重复建版。
+	ImportWillUpdate                  = "IMPORT_WILL_UPDATE"
+	ImportContentUnchanged            = "IMPORT_CONTENT_UNCHANGED"
+	ImportCreateOnlyConflict          = "IMPORT_BUNDLE_CREATE_ONLY_CONFLICT"
+	ImportKnowledgeDefinitionConflict = "IMPORT_KNOWLEDGE_DEFINITION_CONFLICT"
 )
 
 var ErrImportValidationCatalog = errors.New("semantic import validation catalog is unavailable")
@@ -61,6 +68,10 @@ type ValidationSnapshot struct {
 	HighCardinalityFields map[string]map[string]bool
 	Names                 map[string]map[string]struct{}
 	Aliases               map[string]struct{}
+	// AuthoritativeDefinitions 记录已存在 AUTHORITATIVE DEFINES 词条的目标
+	// （"TARGET_TYPE\x00target_code" → 持有该定义的知识 code）。同一目标至多
+	// 一个权威定义在 L4 强制；同 code 更新自身的权威定义不视为冲突。
+	AuthoritativeDefinitions map[string]string
 }
 
 type ValidationCatalog interface {
@@ -73,10 +84,24 @@ type MemberTargetCatalog interface {
 	) (map[string]ValidationReference, error)
 }
 
-type FourLayerValidator struct{ catalog ValidationCatalog }
+type FourLayerValidator struct {
+	catalog ValidationCatalog
+	// current 是可选的现状目录：提供后，与当前认证版本内容一致的行会被判为
+	// SKIPPED（unchanged），避免重复导入创建等价新版本。缺席时导入照常工作，
+	// 只是失去 unchanged 裁决。
+	current ExportCatalog
+}
 
 func NewFourLayerValidator(catalog ValidationCatalog) *FourLayerValidator {
 	return &FourLayerValidator{catalog: catalog}
+}
+
+// WithCurrentAssets 注入现状目录，启用 unchanged 判定。
+func (validator *FourLayerValidator) WithCurrentAssets(current ExportCatalog) *FourLayerValidator {
+	if validator != nil {
+		validator.current = current
+	}
+	return validator
 }
 
 func (validator *FourLayerValidator) ValidateRow(
@@ -114,7 +139,7 @@ func (validator *FourLayerValidator) Prepare(
 			return nil, permanentImportError("IMPORT_VALIDATOR_CONTRACT", ErrInvalidImportRow)
 		}
 		seenRows[input.RowNo] = struct{}{}
-		row := parseAndValidateL1(claim.AssetType, input)
+		row := parseBatchRow(claim.AssetType, input)
 		parsed = append(parsed, row)
 	}
 	snapshot, err := validator.catalog.LoadValidationSnapshot(
@@ -124,21 +149,7 @@ func (validator *FourLayerValidator) Prepare(
 		return nil, err
 	}
 	snapshot = normalizeValidationSnapshot(snapshot)
-	memberTargets := []string{}
-	if claim.AssetType == AssetTerm {
-		seen := map[string]struct{}{}
-		for _, row := range parsed {
-			if row.Layer != 1 || row.Values["termType"] != "MEMBER" {
-				continue
-			}
-			target := row.Values["targetCode"]
-			key := canonicalLookup(target)
-			if _, exists := seen[key]; !exists {
-				seen[key] = struct{}{}
-				memberTargets = append(memberTargets, target)
-			}
-		}
-	}
+	memberTargets := collectMemberTargets(parsed)
 	if len(memberTargets) > 0 {
 		resolver, ok := validator.catalog.(MemberTargetCatalog)
 		if !ok {
@@ -159,15 +170,25 @@ func (validator *FourLayerValidator) Prepare(
 		claim: claim, snapshot: snapshot,
 		results: make(map[int]ValidatedRow, len(rows)),
 	}
-	batch := buildBatchIndex(claim.AssetType, parsed)
+	batch := buildBatchIndex(parsed)
 	validateL2(parsed, batch, session.snapshot)
 	validateL3(parsed, batch, session.snapshot)
 	validateL4(parsed, batch, session.snapshot)
+	if validator.current != nil {
+		if err := markUnchangedRows(ctx, validator.current, claim, parsed); err != nil {
+			return nil, err
+		}
+	}
 	for _, row := range parsed {
 		sortIssues(row.Issues)
 		state := RowValid
 		if hasBlockingIssue(row.Issues) {
 			state = RowInvalid
+		}
+		if state == RowValid && rowIsUnchanged(row.Issues) {
+			// 内容与当前认证版本一致：跳过而不是重复建版。SKIPPED 行永远
+			// 不会被提交，报表把它计入 unchanged。
+			state = RowSkipped
 		}
 		normalized, marshalErr := json.Marshal(row.Values)
 		if marshalErr != nil {
@@ -182,6 +203,65 @@ func (validator *FourLayerValidator) Prepare(
 		}
 	}
 	return session, nil
+}
+
+// parseBatchRow 确定行级资产类型后运行 L1。单类型批直接使用批级类型；
+// BUNDLE 批从展开行的保留键读取行级类型与导入模式。
+func parseBatchRow(batchType AssetType, input RawImportRow) parsedImportRow {
+	if batchType != AssetBundle {
+		return parseAndValidateL1(batchType, input)
+	}
+	var envelope struct {
+		AssetType  string `json:"assetType"`
+		AssetIndex string `json:"bundleAsset"`
+		Mode       string `json:"bundleMode"`
+	}
+	rowType := AssetType("")
+	if err := json.Unmarshal(input.Raw, &envelope); err == nil {
+		rowType = AssetType(envelope.AssetType)
+	}
+	if !ValidRowAssetType(rowType) {
+		result := parsedImportRow{
+			RowNo: input.RowNo, Raw: append(json.RawMessage(nil), input.Raw...),
+			Values: map[string]string{},
+		}
+		addIssue(&result, "row", ImportTypeInvalid, "Bundle 展开行缺少合法的行级资产类型",
+			"assetType 为受支持的行级类型", envelope.AssetType)
+		return result
+	}
+	row := parseAndValidateL1(rowType, input)
+	row.CreateOnly = envelope.Mode == BundleModeCreateOnly
+	row.BundleAsset = envelope.AssetIndex
+	return row
+}
+
+// collectMemberTargets 汇总需要目录解析的成员词典目标：TERM 行的
+// termType=MEMBER 与 KNOWLEDGE 行的 targetType=MEMBER 都使用
+// dimensionCode::canonicalValue 合同。
+func collectMemberTargets(parsed []parsedImportRow) []string {
+	seen := map[string]struct{}{}
+	targets := []string{}
+	for _, row := range parsed {
+		if row.Layer != 1 {
+			continue
+		}
+		target := ""
+		switch {
+		case row.Type == AssetTerm && row.Values["termType"] == "MEMBER":
+			target = row.Values["targetCode"]
+		case row.Type == AssetKnowledge && row.Values["targetType"] == "MEMBER":
+			target = row.Values["targetCode"]
+		}
+		if target == "" {
+			continue
+		}
+		key := canonicalLookup(target)
+		if _, exists := seen[key]; !exists {
+			seen[key] = struct{}{}
+			targets = append(targets, target)
+		}
+	}
+	return targets
 }
 
 type validationSession struct {
@@ -207,11 +287,17 @@ func (session *validationSession) ValidateRow(
 }
 
 type parsedImportRow struct {
-	RowNo  int
+	RowNo int
+	// Type 是该行的资产类型：单类型批与批级类型一致，BUNDLE 批逐行确定。
+	Type   AssetType
 	Raw    json.RawMessage
 	Values map[string]string
 	Issues []ValidationIssue
 	Layer  int
+	// CreateOnly / BundleAsset 只在 Bundle 展开行上出现：前者携带批级
+	// CREATE_ONLY 模式，后者是来源 Bundle 资产下标（报表回溯用）。
+	CreateOnly  bool
+	BundleAsset string
 }
 
 type batchIndex struct {
@@ -219,16 +305,18 @@ type batchIndex struct {
 	Rows  map[int]*parsedImportRow
 }
 
-func buildBatchIndex(assetType AssetType, rows []parsedImportRow) batchIndex {
+// buildBatchIndex 按每行自身的类型建立 code 命名空间。BUNDLE 批因此天然
+// 支持跨分区引用：METRIC 行可以引用同批 MODEL/DIMENSION 行的 code。
+func buildBatchIndex(rows []parsedImportRow) batchIndex {
 	result := batchIndex{Codes: map[string]map[string][]int{}, Rows: map[int]*parsedImportRow{}}
-	kind := referenceKindForAsset(assetType)
 	for index := range rows {
 		row := &rows[index]
 		result.Rows[row.RowNo] = row
+		kind := referenceKindForAsset(row.Type)
 		if row.Layer != 1 || kind == "" {
 			continue
 		}
-		code := canonicalLookup(row.Values[primaryCodeColumn(assetType)])
+		code := canonicalLookup(row.Values[primaryCodeColumn(row.Type)])
 		if code == "" {
 			continue
 		}
@@ -265,6 +353,9 @@ func normalizeValidationSnapshot(snapshot ValidationSnapshot) ValidationSnapshot
 	if snapshot.Aliases == nil {
 		snapshot.Aliases = map[string]struct{}{}
 	}
+	if snapshot.AuthoritativeDefinitions == nil {
+		snapshot.AuthoritativeDefinitions = map[string]string{}
+	}
 	return snapshot
 }
 
@@ -290,6 +381,8 @@ func referenceKindForAsset(assetType AssetType) string {
 		return "EVAL_CASE"
 	case AssetCertifiedExample:
 		return "CERTIFIED_EXAMPLE"
+	case AssetKnowledge:
+		return "KNOWLEDGE"
 	default:
 		return ""
 	}
@@ -308,9 +401,26 @@ func primaryCodeColumn(assetType AssetType) string {
 	}
 }
 
+// informationalIssueCodes 是不改变行有效性的事实标注：影响确认提醒与
+// 创建/更新/未变化裁决。其余任何裁决码都阻断该行。
+var informationalIssueCodes = map[string]struct{}{
+	ImportImpactRequiresReview: {},
+	ImportWillUpdate:           {},
+	ImportContentUnchanged:     {},
+}
+
 func hasBlockingIssue(issues []ValidationIssue) bool {
 	for _, issue := range issues {
-		if issue.Code != ImportImpactRequiresReview {
+		if _, informational := informationalIssueCodes[issue.Code]; !informational {
+			return true
+		}
+	}
+	return false
+}
+
+func rowIsUnchanged(issues []ValidationIssue) bool {
+	for _, issue := range issues {
+		if issue.Code == ImportContentUnchanged {
 			return true
 		}
 	}

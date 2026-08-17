@@ -326,6 +326,9 @@ func (source *FileRowSource) ForEachRow(
 	if hex.EncodeToString(digest[:]) != claim.FileHash {
 		return permanentImportError("IMPORT_FILE_HASH_MISMATCH", ErrImportFileInvalid)
 	}
+	if claim.AssetType == AssetBundle {
+		return forEachBundleRow(ctx, claim, data, afterRow, consume)
+	}
 	book, err := spikeexcel.Read(
 		claim.FileName,
 		bytes.NewReader(data),
@@ -390,6 +393,40 @@ func (source *FileRowSource) ForEachRow(
 			return permanentImportError("IMPORT_ROW_JSON_INVALID", err)
 		}
 		if err := consume(rowNo, raw); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// forEachBundleRow 把 semantic-bundle/v1 文件确定性展开为扁平行序列。行号由
+// 展开顺序决定且只依赖文件字节，因此断点续跑（afterRow）与重试安全。
+func forEachBundleRow(
+	ctx context.Context,
+	claim Claim,
+	data []byte,
+	afterRow int,
+	consume func(int, json.RawMessage) error,
+) error {
+	if !strings.HasSuffix(strings.ToLower(claim.FileName), ".json") {
+		return permanentImportError("IMPORT_FILE_SHAPE_INVALID", ErrImportFileInvalid)
+	}
+	bundle, err := ParseBundle(data)
+	if err != nil {
+		return err
+	}
+	rows, err := ExpandBundle(bundle)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if row.RowNo <= afterRow {
+			continue
+		}
+		if err := consume(row.RowNo, row.Raw); err != nil {
 			return err
 		}
 	}

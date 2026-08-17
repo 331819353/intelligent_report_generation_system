@@ -687,6 +687,17 @@ GRANT INSERT, UPDATE, DELETE ON TABLE
   askdata.dimension_member_aliases,
   askdata.semantic_aliases
 TO :"app_user";
+-- 血缘边由 API 端幂等重建：关闭消失的 COMPUTED 边（UPDATE valid_to）并插入
+-- 新边。血缘从不删除历史，因此不授予 DELETE。
+GRANT INSERT, UPDATE ON TABLE askdata.lineage_edges TO :"app_user";
+-- 词条/业务知识导出用 SECURITY DEFINER 解析成员目标：只有 PUBLIC/INTERNAL
+-- 成员返回 dimensionCode::memberKey，敏感成员保持 NULL 并计入省略。
+SELECT format(
+  'GRANT EXECUTE ON FUNCTION askdata.resolve_member_export_target(uuid) TO %I, %I',
+  :'app_user', :'worker_user'
+)
+WHERE to_regprocedure('askdata.resolve_member_export_target(uuid)') IS NOT NULL
+\gexec
 GRANT INSERT(
   tenant_id,domain_id,object_type,object_version_id,view_type,sensitivity,
   index_policy,document,metadata,input_hash

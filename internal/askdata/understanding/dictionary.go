@@ -713,7 +713,9 @@ func (hit DictionaryHit) Validate() error {
 
 func validDictionaryTargetType(value string) bool {
 	switch value {
-	case "METRIC", "DIMENSION", "MEMBER", "TIME_CONTRACT", "OPERATOR", "LEGACY":
+	// CONCEPT 是业务知识分区的纯概念目标（SEM-4S-001）：词条可进入词典做
+	// 确定性匹配，但不解析到任何注册对象。
+	case "METRIC", "DIMENSION", "MEMBER", "TIME_CONTRACT", "OPERATOR", "LEGACY", "CONCEPT":
 		return true
 	default:
 		return false

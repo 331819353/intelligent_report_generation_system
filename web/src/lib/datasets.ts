@@ -5,7 +5,7 @@ export type { CanvasPoint as GraphPosition, DesignerGraphV1, GraphDimension, Gra
 export type DatasetLayer = 'ODS' | 'DIM' | 'DWD' | 'DWS' | 'ADS'
 
 export type AssetTable = {
-  id: string; dataSourceId: string; dataSourceName: string; dataSourceType: string
+  id: string; originTableId?: string; dataSourceId: string; dataSourceName: string; dataSourceType: string
   tableName: string; schemaName: string; catalogName?: string; tableType?: string; sourceComment?: string
   businessName: string; businessDescription?: string; tags?: string[]; sensitivityLevel?: string; visibility?: string
   columnCount: number; fileVersionId?: string; managementStatus?: string; enrichmentStatus?: string
@@ -206,6 +206,9 @@ export type DatasetDraftPreview = DatasetPreview & {
 export type DatasetCandidatePreview = DatasetPreview & { dslHash: string; planHash: string }
 export type AssetTablePreview = {
   columns: string[]; rows: unknown[][]; columnMetadata?: DatasetPreviewColumn[]
+  /** Execution facts kept alongside the sample so the AI dock can report them without values. */
+  rowCount?: number; durationMs?: number
+  warnings?: Array<{ code: string; message: string; joinId?: string; estimatedRows?: number }>
 }
 export type DatasetDSL = Record<string, unknown> & {
   dslVersion: string; dataset: {

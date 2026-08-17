@@ -42,9 +42,12 @@ func (creator *PostgresDraftCreator) CreateDraft(
 	if err := json.Unmarshal(row.NormalizedJSON, &values); err != nil || values == nil {
 		return DraftReference{}, ErrImportDraftContract
 	}
+	assetType, err := rowAssetType(batch, row)
+	if err != nil {
+		return DraftReference{}, err
+	}
 	var reference DraftReference
-	var err error
-	switch batch.AssetType {
+	switch assetType {
 	case AssetModel:
 		reference, err = createModelDraft(ctx, tx, batch, values)
 	case AssetMeasure:
@@ -69,6 +72,8 @@ func (creator *PostgresDraftCreator) CreateDraft(
 		reference, err = createKPIBundleDraft(ctx, tx, batch, values)
 	case AssetEvalCase:
 		reference, err = createEvaluationCaseDraft(ctx, tx, batch, values)
+	case AssetKnowledge:
+		reference, err = createKnowledgeDraft(ctx, tx, batch, values)
 	default:
 		err = ErrImportDraftContract
 	}
@@ -79,6 +84,25 @@ func (creator *PostgresDraftCreator) CreateDraft(
 		return DraftReference{}, ErrImportDraftContract
 	}
 	return reference, nil
+}
+
+// rowAssetType 恢复行级资产类型：单类型批就是批级类型；BUNDLE 批从展开行
+// 的保留键读取（提交侧不信任任何未通过校验的类型值）。
+func rowAssetType(batch SemanticImport, row ImportRow) (AssetType, error) {
+	if batch.AssetType != AssetBundle {
+		return batch.AssetType, nil
+	}
+	var envelope struct {
+		AssetType string `json:"assetType"`
+	}
+	if err := json.Unmarshal(row.RawJSON, &envelope); err != nil {
+		return "", ErrImportDraftContract
+	}
+	rowType := AssetType(envelope.AssetType)
+	if !ValidRowAssetType(rowType) {
+		return "", ErrImportDraftContract
+	}
+	return rowType, nil
 }
 
 func createModelDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, values map[string]string) (DraftReference, error) {
@@ -108,13 +132,13 @@ func createModelDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, valu
 	if err != nil {
 		return DraftReference{}, fmt.Errorf("model dataset: %w", ErrImportDraftContract)
 	}
-	entityVersionID, _, err := resolveCertifiedCode(ctx, tx, batch, "ENTITY", values["entityCode"])
+	entityVersionID, _, err := resolveImportCode(ctx, tx, batch, "ENTITY", values["entityCode"])
 	if err != nil {
 		return DraftReference{}, fmt.Errorf("model entity: %w", err)
 	}
 	primaryTimeFieldID, primaryTimeDimensionVersionID := "", ""
 	if values["primaryTimeDimensionCode"] != "" {
-		primaryTimeDimensionVersionID, _, err = resolveCertifiedCode(
+		primaryTimeDimensionVersionID, _, err = resolveImportCode(
 			ctx, tx, batch, "DIMENSION", values["primaryTimeDimensionCode"],
 		)
 		if err != nil {
@@ -133,7 +157,7 @@ func createModelDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, valu
 	}
 	timeContractVersionID := ""
 	if values["timeContractCode"] != "" {
-		timeContractVersionID, _, err = resolveCertifiedCode(ctx, tx, batch, "TIME_CONTRACT", values["timeContractCode"])
+		timeContractVersionID, _, err = resolveImportCode(ctx, tx, batch, "TIME_CONTRACT", values["timeContractCode"])
 		if err != nil {
 			return DraftReference{}, fmt.Errorf("model time contract: %w", err)
 		}
@@ -172,7 +196,7 @@ func createModelDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, valu
 }
 
 func createMeasureDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, values map[string]string) (DraftReference, error) {
-	modelVersionID, _, err := resolveCertifiedCode(ctx, tx, batch, "MODEL", values["modelCode"])
+	modelVersionID, _, err := resolveImportCode(ctx, tx, batch, "MODEL", values["modelCode"])
 	if err != nil {
 		return DraftReference{}, err
 	}
@@ -206,7 +230,7 @@ func createMetricDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, val
 	if err != nil {
 		return DraftReference{}, err
 	}
-	modelVersionID, _, err := resolveCertifiedCode(ctx, tx, batch, "MODEL", values["modelCode"])
+	modelVersionID, _, err := resolveImportCode(ctx, tx, batch, "MODEL", values["modelCode"])
 	if err != nil {
 		return DraftReference{}, err
 	}
@@ -250,7 +274,7 @@ func createMetricDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, val
 	}
 	measureCodes := collectStringFields(formula, "measureCode")
 	for index, code := range measureCodes {
-		measureVersionID, _, resolveErr := resolveCertifiedCode(ctx, tx, batch, "MEASURE", code)
+		measureVersionID, _, resolveErr := resolveImportCode(ctx, tx, batch, "MEASURE", code)
 		if resolveErr != nil {
 			return DraftReference{}, resolveErr
 		}
@@ -265,11 +289,11 @@ func createMetricDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, val
 }
 
 func createMetricDimensionDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, values map[string]string) (DraftReference, error) {
-	metricVersionID, metricID, err := resolveCertifiedCode(ctx, tx, batch, "METRIC", values["metricCode"])
+	metricVersionID, metricID, err := resolveImportCode(ctx, tx, batch, "METRIC", values["metricCode"])
 	if err != nil {
 		return DraftReference{}, err
 	}
-	dimensionVersionID, dimensionID, err := resolveCertifiedCode(ctx, tx, batch, "DIMENSION", values["dimensionCode"])
+	dimensionVersionID, dimensionID, err := resolveImportCode(ctx, tx, batch, "DIMENSION", values["dimensionCode"])
 	if err != nil {
 		return DraftReference{}, err
 	}
@@ -309,7 +333,7 @@ func createDimensionDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, 
 	if err != nil {
 		return DraftReference{}, err
 	}
-	modelVersionID, _, err := resolveCertifiedCode(ctx, tx, batch, "MODEL", values["modelCode"])
+	modelVersionID, _, err := resolveImportCode(ctx, tx, batch, "MODEL", values["modelCode"])
 	if err != nil {
 		return DraftReference{}, err
 	}
@@ -334,7 +358,7 @@ func createDimensionDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, 
 }
 
 func createMemberDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, values map[string]string) (DraftReference, error) {
-	dimensionVersionID, _, err := resolveCertifiedCode(ctx, tx, batch, "DIMENSION", values["dimensionCode"])
+	dimensionVersionID, _, err := resolveImportCode(ctx, tx, batch, "DIMENSION", values["dimensionCode"])
 	if err != nil {
 		return DraftReference{}, err
 	}
@@ -401,12 +425,12 @@ func createMemberDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, val
 }
 
 func createHierarchyDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, values map[string]string) (DraftReference, error) {
-	dimensionVersionID, _, err := resolveCertifiedCode(ctx, tx, batch, "DIMENSION", values["dimensionCode"])
+	dimensionVersionID, _, err := resolveImportCode(ctx, tx, batch, "DIMENSION", values["dimensionCode"])
 	if err != nil {
 		return DraftReference{}, err
 	}
 	if values["parentDimensionCode"] != "" {
-		if _, _, err := resolveCertifiedCode(ctx, tx, batch, "DIMENSION", values["parentDimensionCode"]); err != nil {
+		if _, _, err := resolveImportCode(ctx, tx, batch, "DIMENSION", values["parentDimensionCode"]); err != nil {
 			return DraftReference{}, err
 		}
 	}
@@ -486,17 +510,17 @@ func refreshHierarchyHash(ctx context.Context, tx pgx.Tx, versionID, code, name 
 }
 
 func createRelationshipDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, values map[string]string) (DraftReference, error) {
-	leftVersionID, _, err := resolveCertifiedCode(ctx, tx, batch, "MODEL", values["leftModelCode"])
+	leftVersionID, _, err := resolveImportCode(ctx, tx, batch, "MODEL", values["leftModelCode"])
 	if err != nil {
 		return DraftReference{}, err
 	}
-	rightVersionID, _, err := resolveCertifiedCode(ctx, tx, batch, "MODEL", values["rightModelCode"])
+	rightVersionID, _, err := resolveImportCode(ctx, tx, batch, "MODEL", values["rightModelCode"])
 	if err != nil {
 		return DraftReference{}, err
 	}
 	bridgeVersionID := ""
 	if values["bridgeModelCode"] != "" {
-		bridgeVersionID, _, err = resolveCertifiedCode(ctx, tx, batch, "MODEL", values["bridgeModelCode"])
+		bridgeVersionID, _, err = resolveImportCode(ctx, tx, batch, "MODEL", values["bridgeModelCode"])
 		if err != nil {
 			return DraftReference{}, err
 		}
@@ -538,7 +562,7 @@ func createTermDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, value
 	if targetKind == "TIME" {
 		targetKind = "TIME_CONTRACT"
 	}
-	targetVersionID, _, err := resolveCertifiedCode(ctx, tx, batch, targetKind, values["targetCode"])
+	targetVersionID, _, err := resolveImportCode(ctx, tx, batch, targetKind, values["targetCode"])
 	if err != nil && targetKind != "OPERATOR" {
 		return DraftReference{}, err
 	}
@@ -583,6 +607,87 @@ func createTermDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, value
 		batch.DomainID, objectID, versionNo, targetKind, targetVersionID, values["targetCode"],
 		values["matchMode"], matchPattern, priority, splitPipe(values["negativeContexts"]), validFrom, validTo,
 		normalizeTermSource(values["source"]), values["term"], values["term"], hash, batch.CreatedBy)
+	return draftRef(objectID, versionID, err)
+}
+
+// createKnowledgeDraft 把业务知识词条落到 business_terms/business_term_versions
+// 的治理列上（口径与 000350 迁移一致）：正文进 definition，同义词进 aliases，
+// 知识种类/权威级/关系进新增列。纯概念（无 targetType）使用 CONCEPT 目标，
+// 目标 UUID 由 code 确定性生成，与 OPERATOR 词条同一机制。
+func createKnowledgeDraft(ctx context.Context, tx pgx.Tx, batch SemanticImport, values map[string]string) (DraftReference, error) {
+	targetKind := mapKnowledgeTargetKind(values["targetType"])
+	termType, targetObjectType := values["targetType"], targetKind
+	targetVersionID, targetCode := "", values["targetCode"]
+	if targetKind == "" {
+		termType, targetObjectType = "CONCEPT", "CONCEPT"
+		targetCode = values["code"]
+		targetVersionID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("askdata/concept/"+values["code"])).String()
+	} else {
+		var err error
+		targetVersionID, _, err = resolveImportCode(ctx, tx, batch, targetKind, targetCode)
+		if err != nil {
+			return DraftReference{}, err
+		}
+	}
+	var objectID string
+	err := tx.QueryRow(ctx, `SELECT id::text FROM askdata.business_terms
+		WHERE domain_id=$1 AND term=$2 AND term_type=$3`, batch.DomainID, values["name"], termType).Scan(&objectID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		objectID = uuid.NewString()
+		_, err = tx.Exec(ctx, `INSERT INTO askdata.business_terms(
+			id,tenant_id,domain_id,term,term_type,created_by
+		) VALUES($1,$2,$3,$4,$5,$6)`, objectID, batch.TenantID, batch.DomainID,
+			values["name"], termType, batch.CreatedBy)
+	}
+	if err != nil {
+		return DraftReference{}, err
+	}
+	versionNo, err := nextVersionNo(ctx, tx, "business_term_versions", "business_term_id", objectID)
+	if err != nil {
+		return DraftReference{}, err
+	}
+	versionID := uuid.NewString()
+	priority, _ := strconv.Atoi(values["priority"])
+	if values["priority"] == "" {
+		priority = 100
+	}
+	validFromValue := values["validFrom"]
+	if validFromValue == "" {
+		validFromValue = "1970-01-01"
+	}
+	validFrom, validTo, err := parseValidity(validFromValue, values["validTo"])
+	if err != nil {
+		return DraftReference{}, ErrImportDraftContract
+	}
+	matchMode := values["matchMode"]
+	if matchMode == "" {
+		matchMode = "EXACT"
+	}
+	matchPattern := ""
+	if matchMode == "REGEX_SAFE" {
+		matchPattern = values["name"]
+	}
+	relation := values["relation"]
+	if relation == "" {
+		relation = "EXPLAINS"
+	}
+	hash, err := draftContentHash(values, map[string]any{"targetVersionId": targetVersionID})
+	if err != nil {
+		return DraftReference{}, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO askdata.business_term_versions(
+		id,tenant_id,domain_id,business_term_id,version_no,status,
+		target_object_type,target_version_id,target_code,match_mode,match_pattern,
+		priority,negative_contexts,valid_from,valid_to,source,review_status,
+		code,name,definition,aliases,knowledge_kind,authority,relation,
+		content_hash,owner_id
+	) VALUES($1,$2,$3,$4,$5,'DRAFT',$6,$7,$8,$9,NULLIF($10,''),$11,$12,$13,$14,
+		'IMPORT','PENDING',$15,$16,$17,$18,$19,$20,$21,$22,$23)`, versionID,
+		batch.TenantID, batch.DomainID, objectID, versionNo, targetObjectType,
+		targetVersionID, targetCode, matchMode, matchPattern, priority,
+		splitPipe(values["negativeContexts"]), validFrom, validTo,
+		values["code"], values["name"], values["body"], splitPipe(values["synonyms"]),
+		values["knowledgeKind"], values["authority"], relation, hash, batch.CreatedBy)
 	return draftRef(objectID, versionID, err)
 }
 
@@ -749,6 +854,121 @@ func resolveOwner(ctx context.Context, tx pgx.Tx, batch SemanticImport, email st
 	return ownerID, nil
 }
 
+// resolveImportCode 是提交事务内唯一的 code 解析入口：先解析本批已提交行
+// 创建的 DRAFT 版本（Bundle 的跨分区引用按展开顺序天然满足先后关系），再
+// 回退到域内最新 CERTIFIED 版本。批内解析只信任 semantic_import_rows 里
+// 本批 COMMITTED 行登记的版本，绝不吸附其他批次遗留的草稿。
+func resolveImportCode(
+	ctx context.Context,
+	tx pgx.Tx,
+	batch SemanticImport,
+	kind, code string,
+) (string, string, error) {
+	versionID, objectID, resolved, err := resolveBatchDraftCode(ctx, tx, batch, kind, code)
+	if err != nil {
+		return "", "", err
+	}
+	if resolved {
+		return versionID, objectID, nil
+	}
+	return resolveCertifiedCode(ctx, tx, batch, kind, code)
+}
+
+func resolveBatchDraftCode(
+	ctx context.Context,
+	tx pgx.Tx,
+	batch SemanticImport,
+	kind, code string,
+) (string, string, bool, error) {
+	if code == "" {
+		return "", "", false, nil
+	}
+	if kind == "MEMBER" {
+		dimensionCode, memberValue, err := parseMemberTargetCode(code)
+		if err != nil {
+			return "", "", false, nil
+		}
+		dimensionVersionID, _, resolveErr := resolveImportCode(ctx, tx, batch, "DIMENSION", dimensionCode)
+		if resolveErr != nil {
+			return "", "", false, nil
+		}
+		var versionID, objectID string
+		err = tx.QueryRow(ctx, `SELECT member.id::text,member.member_id::text
+			FROM askdata.semantic_import_rows AS import_row
+			JOIN askdata.dimension_members AS member
+			  ON member.id=import_row.created_version_id AND member.domain_id=$2
+			WHERE import_row.import_id=$1 AND import_row.validation_state='COMMITTED'
+			  AND member.dimension_version_id=$3 AND member.member_key_hash=$4
+			  AND member.status='DRAFT'
+			ORDER BY import_row.row_no DESC LIMIT 1`,
+			batch.ID, batch.DomainID, dimensionVersionID,
+			boundValueHash(dimensionVersionID, memberValue)).Scan(&versionID, &objectID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", false, nil
+		}
+		if err != nil {
+			return "", "", false, err
+		}
+		return versionID, objectID, true, nil
+	}
+	var query string
+	switch kind {
+	case "MODEL":
+		query = `SELECT target.id::text,target.model_id::text
+			FROM askdata.semantic_import_rows AS import_row
+			JOIN askdata.semantic_models AS target
+			  ON target.id=import_row.created_version_id AND target.domain_id=$2
+			WHERE import_row.import_id=$1 AND import_row.validation_state='COMMITTED'
+			  AND target.code=$3 AND target.status='DRAFT'
+			ORDER BY import_row.row_no DESC LIMIT 1`
+	case "MEASURE":
+		query = `SELECT target.id::text,target.measure_id::text
+			FROM askdata.semantic_import_rows AS import_row
+			JOIN askdata.measures AS target
+			  ON target.id=import_row.created_version_id AND target.domain_id=$2
+			WHERE import_row.import_id=$1 AND import_row.validation_state='COMMITTED'
+			  AND target.code=$3 AND target.status='DRAFT'
+			ORDER BY import_row.row_no DESC LIMIT 1`
+	case "DIMENSION":
+		query = `SELECT target.id::text,target.dimension_id::text
+			FROM askdata.semantic_import_rows AS import_row
+			JOIN askdata.dimensions AS target
+			  ON target.id=import_row.created_version_id AND target.domain_id=$2
+			WHERE import_row.import_id=$1 AND import_row.validation_state='COMMITTED'
+			  AND target.code=$3 AND target.status='DRAFT'
+			ORDER BY import_row.row_no DESC LIMIT 1`
+	case "HIERARCHY":
+		query = `SELECT target.id::text,target.hierarchy_id::text
+			FROM askdata.semantic_import_rows AS import_row
+			JOIN askdata.hierarchies AS target
+			  ON target.id=import_row.created_version_id AND target.domain_id=$2
+			WHERE import_row.import_id=$1 AND import_row.validation_state='COMMITTED'
+			  AND target.code=$3 AND target.status='DRAFT'
+			ORDER BY import_row.row_no DESC LIMIT 1`
+	case "METRIC":
+		query = `SELECT version.id::text,metric.id::text
+			FROM askdata.semantic_import_rows AS import_row
+			JOIN askdata.metric_versions AS version
+			  ON version.id=import_row.created_version_id AND version.domain_id=$2
+			JOIN askdata.metrics AS metric
+			  ON metric.id=version.metric_id AND metric.tenant_id=version.tenant_id
+			WHERE import_row.import_id=$1 AND import_row.validation_state='COMMITTED'
+			  AND metric.code=$3 AND version.status='DRAFT'
+			ORDER BY import_row.row_no DESC LIMIT 1`
+	default:
+		return "", "", false, nil
+	}
+	var versionID, objectID string
+	err := tx.QueryRow(ctx, query, batch.ID, batch.DomainID, code).Scan(&versionID, &objectID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	return versionID, objectID, true, nil
+}
+
 func resolveCertifiedCode(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -760,7 +980,7 @@ func resolveCertifiedCode(
 		if err != nil {
 			return "", "", ErrImportDraftContract
 		}
-		dimensionVersionID, _, err := resolveCertifiedCode(ctx, tx, batch, "DIMENSION", dimensionCode)
+		dimensionVersionID, _, err := resolveImportCode(ctx, tx, batch, "DIMENSION", dimensionCode)
 		if err != nil {
 			return "", "", err
 		}
@@ -804,7 +1024,7 @@ func resolveCodeList(ctx context.Context, tx pgx.Tx, batch SemanticImport, kind,
 	codes := splitPipe(value)
 	result := make([]string, 0, len(codes))
 	for _, code := range codes {
-		versionID, _, err := resolveCertifiedCode(ctx, tx, batch, kind, code)
+		versionID, _, err := resolveImportCode(ctx, tx, batch, kind, code)
 		if err != nil {
 			return nil, err
 		}

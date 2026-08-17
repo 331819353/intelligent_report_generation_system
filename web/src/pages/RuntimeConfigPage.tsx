@@ -50,6 +50,28 @@ const workerOptions = [
   { id: 'REPORT_WORKER', name: '报告执行节点' },
 ]
 
+const snapshotRuntimeDomains: BusinessDomain[] = [
+  { id: 'snapshot-domain-1', code: 'ENTERPRISE_OPERATION', name: '企业经营', description: '企业经营分析领域', status: 'ACTIVE', default: true, version: 6, createdAt: '2026-07-18T09:00:00+08:00', accessSensitivity: 'INTERNAL', administrators: [] },
+  { id: 'snapshot-domain-2', code: 'SUPPLY_CHAIN', name: '供应链管理', description: '供应链管理领域', status: 'ACTIVE', default: false, version: 3, createdAt: '2026-07-22T09:00:00+08:00', accessSensitivity: 'CONFIDENTIAL', administrators: [] },
+]
+const snapshotRuntimeDefinitions: RuntimeConfigDefinition[] = [
+  { key: 'domain.askdataEnabled', type: 'boolean', scopeTypes: ['DOMAIN'], compatibility: 'HOT_RELOAD', description: '控制指定领域是否开放自然语言问数入口。' },
+  { key: 'budget.dailyRuns', type: 'integer', scopeTypes: ['TENANT', 'DOMAIN'], compatibility: 'HOT_RELOAD', minimum: 100, maximum: 10000, description: '限制每日治理运行次数。' },
+  { key: 'worker.maxConcurrentJobs', type: 'integer', scopeTypes: ['WORKER'], compatibility: 'NEXT_RESTART', minimum: 1, maximum: 32, description: '限制单个节点并行任务数。' },
+  { key: 'provider.routingMode', type: 'string', scopeTypes: ['TENANT'], compatibility: 'HOT_RELOAD', enum: ['ROUND_ROBIN', 'PRIMARY_FAILOVER'], description: '配置模型服务路由方式。' },
+]
+const snapshotDeploymentParameters: DeploymentParameter[] = [
+  { name: 'AI_PROVIDER_API_KEY', category: 'SECRET_REFERENCE', configured: true, mutableOnline: false, changeGuidance: '在部署环境的密钥管理中轮换。' },
+  { name: 'DATABASE_URL', category: 'SECRET_REFERENCE', configured: true, mutableOnline: false, changeGuidance: '通过平台部署管线更新连接引用。' },
+  { name: 'OBJECT_STORAGE_ENDPOINT', category: 'DEPLOYMENT_PARAMETER', configured: true, mutableOnline: false, changeGuidance: '更新后重启报告执行节点。' },
+  { name: 'REPORT_WORKER_CONCURRENCY', category: 'DEPLOYMENT_PARAMETER', configured: true, mutableOnline: false, changeGuidance: '调整执行节点规格后同步变更。' },
+]
+const snapshotRuntimeVersions: RuntimeConfigVersion[] = [
+  { id: 'snapshot-runtime-3', scopeType: 'DOMAIN', scopeId: 'snapshot-domain-1', versionNo: 3, baseVersionId: 'snapshot-runtime-2', config: { 'domain.askdataEnabled': true, 'budget.dailyRuns': 3000 }, configHash: '74f2e86a2a38f2e86a2a38f2e86a2a38', state: 'ACTIVE', compatibility: 'HOT_RELOAD', impactSummary: '提升企业经营领域问数容量，支持月度经营复盘高峰。', createdBy: 'snapshot-admin-2', approvedBy: 'snapshot-admin-1', recordVersion: 5, createdAt: '2026-08-13T09:10:00+08:00', updatedAt: '2026-08-13T10:42:00+08:00', submittedAt: '2026-08-13T09:24:00+08:00', approvedAt: '2026-08-13T10:05:00+08:00', activatedAt: '2026-08-13T10:42:00+08:00', rolloutNodes: [{ id: 'snapshot-node-api', consumerType: 'API 服务', ordinal: 1, state: 'APPLIED', expectedHash: '74f2e86a2a38', appliedHash: '74f2e86a2a38', attempt: 1, appliedAt: '2026-08-13T10:40:00+08:00' }, { id: 'snapshot-node-ask', consumerType: '问数执行节点', ordinal: 2, state: 'APPLIED', expectedHash: '74f2e86a2a38', appliedHash: '74f2e86a2a38', attempt: 1, appliedAt: '2026-08-13T10:42:00+08:00' }] },
+  { id: 'snapshot-runtime-4', scopeType: 'TENANT', scopeId: 'snapshot-tenant', versionNo: 4, baseVersionId: 'snapshot-runtime-1', config: { 'provider.routingMode': 'PRIMARY_FAILOVER', 'budget.dailyRuns': 5200 }, configHash: 'a9d4bd44a9d4bd44a9d4bd44a9d4bd44', state: 'IN_REVIEW', compatibility: 'HOT_RELOAD', impactSummary: '将模型服务路由调整为主服务故障切换，降低高峰失败率。', createdBy: 'snapshot-admin-2', recordVersion: 2, createdAt: '2026-08-14T08:45:00+08:00', updatedAt: '2026-08-14T09:12:00+08:00', submittedAt: '2026-08-14T09:12:00+08:00' },
+  { id: 'snapshot-runtime-5', scopeType: 'WORKER', scopeId: 'REPORT_WORKER', versionNo: 2, baseVersionId: 'snapshot-runtime-worker-1', config: { 'worker.maxConcurrentJobs': 8 }, configHash: 'c36a81c4c36a81c4c36a81c4c36a81c4', state: 'DRAFT', compatibility: 'NEXT_RESTART', impactSummary: '提高报告高峰期并发执行能力。', createdBy: 'snapshot-admin-1', recordVersion: 1, createdAt: '2026-08-14T09:25:00+08:00', updatedAt: '2026-08-14T09:25:00+08:00' },
+]
+
 function formatTime(value?: string) {
   if (!value) return '—'
   return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value))
@@ -69,12 +91,13 @@ function readableError(cause: unknown, fallback: string) {
 /** 将服务端已有的配置版本、双人审批、灰度下发和回滚能力落成完整控制面。 */
 export function RuntimeConfigPage() {
   const [searchParams, setSearchParams] = useSearchParams()
-  const [definitions, setDefinitions] = useState<RuntimeConfigDefinition[]>([])
-  const [parameters, setParameters] = useState<DeploymentParameter[]>([])
-  const [versions, setVersions] = useState<RuntimeConfigVersion[]>([])
-  const [domains, setDomains] = useState<BusinessDomain[]>([])
-  const [selected, setSelected] = useState<RuntimeConfigVersion | null>(null)
-  const [loading, setLoading] = useState(true)
+  const designSnapshot = import.meta.env.DEV && searchParams.has('snapshot')
+  const [definitions, setDefinitions] = useState<RuntimeConfigDefinition[]>(designSnapshot ? snapshotRuntimeDefinitions : [])
+  const [parameters, setParameters] = useState<DeploymentParameter[]>(designSnapshot ? snapshotDeploymentParameters : [])
+  const [versions, setVersions] = useState<RuntimeConfigVersion[]>(designSnapshot ? snapshotRuntimeVersions : [])
+  const [domains, setDomains] = useState<BusinessDomain[]>(designSnapshot ? snapshotRuntimeDomains : [])
+  const [selected, setSelected] = useState<RuntimeConfigVersion | null>(designSnapshot ? snapshotRuntimeVersions[0] : null)
+  const [loading, setLoading] = useState(!designSnapshot)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -83,6 +106,7 @@ export function RuntimeConfigPage() {
   const selectedIdRef = useRef('')
 
   const load = useCallback(async (preferredId = searchParams.get('versionId') ?? '') => {
+    if (designSnapshot) return
     setLoading(true)
     setError('')
     try {
@@ -112,7 +136,7 @@ export function RuntimeConfigPage() {
     } finally {
       setLoading(false)
     }
-  }, [searchParams, setSearchParams])
+  }, [designSnapshot, searchParams, setSearchParams])
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void load() }, 0)
@@ -122,6 +146,11 @@ export function RuntimeConfigPage() {
   }, [])
 
   const choose = async (item: RuntimeConfigVersion) => {
+    if (designSnapshot) {
+      setSelected(item)
+      selectedIdRef.current = item.id
+      return
+    }
     setBusy(`open:${item.id}`)
     setError('')
     try {
@@ -186,15 +215,14 @@ export function RuntimeConfigPage() {
   const parameterHealth = parameters.filter(item => item.configured).length
 
   return <AppShell
-    title="运行配置中心"
-    eyebrow="平台控制面"
+    title="运行配置"
+    eyebrow="平台管理"
     className="administration-shell runtime-config-shell"
     controlPlane
     actions={<><AppButton type="button" disabled={loading || Boolean(busy)} onClick={() => void load()}><ArrowClockwise className={loading ? 'spin' : ''} size={17} />刷新</AppButton><AppButton variant="primary" type="button" onClick={() => setDialog('create')}><Plus size={17} />新建配置版本</AppButton></>}
   >
     <section className="runtime-config-page">
-      <header className="runtime-config-overview">
-        <div><span className="eyebrow">RUNTIME GOVERNANCE</span><h2>让每一次线上配置变更都可审、可追溯、可回滚</h2><p>在线参数与部署密钥分区管理；配置提交后需由另一位平台管理员批准，再按节点顺序安全下发。</p></div>
+      <header className="runtime-config-overview" aria-label="运行配置概览">
         <div className="runtime-config-metrics">
           <article><CheckCircle size={20} /><span>生效版本</span><strong>{activeCount}</strong></article>
           <article className={reviewCount ? 'attention' : ''}><ListChecks size={20} /><span>待审批</span><strong>{reviewCount}</strong></article>
@@ -257,7 +285,7 @@ export function RuntimeConfigPage() {
     </section>
 
     {dialog === 'create' && <CreateRuntimeConfigDialog definitions={definitions} domains={domains} versions={versions} onClose={() => setDialog(null)} onCreated={async value => { setDialog(null); setNotice('配置草稿已创建'); await load(value.id) }} />}
-    {dialog === 'reject' && selected && <RejectRuntimeConfigDialog busy={busy === 'reject'} onClose={() => setDialog(null)} onSubmit={reason => void reject(reason)} />}
+    {dialog === 'reject' && selected && <RejectRuntimeConfigDialog version={selected} busy={busy === 'reject'} onClose={() => setDialog(null)} onSubmit={reason => void reject(reason)} />}
   </AppShell>
 }
 
@@ -297,18 +325,23 @@ function CreateRuntimeConfigDialog({ definitions, domains, versions, onClose, on
       await onCreated(created)
     } catch (cause) { setError(readableError(cause, '配置版本创建失败')) } finally { setBusy(false) }
   }
-  return <div className="administration-dialog-backdrop"><section className="administration-dialog runtime-config-dialog" role="dialog" aria-modal="true" aria-labelledby="create-runtime-config-title"><header><div><span className="eyebrow">NEW CONFIGURATION</span><h2 id="create-runtime-config-title">新建运行配置版本</h2><p>选择作用范围与本次变更项，创建后进入双人审批流程。</p></div><AppButton text circle type="button" disabled={busy} aria-label="关闭" onClick={onClose}><X size={17} /></AppButton></header><form onSubmit={submit}>
+  return <div className="administration-dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><section className="administration-dialog runtime-config-dialog dialog-tone-blue dialog-size-wide" role="dialog" aria-modal="true" aria-labelledby="create-runtime-config-title" aria-describedby="create-runtime-config-description"><header><div className="dialog-title-group"><span className="dialog-title-icon" aria-hidden="true"><GearSix size={21} /></span><div><span className="eyebrow">运行配置</span><h2 id="create-runtime-config-title">新建运行配置版本</h2><p id="create-runtime-config-description">选择作用范围与本次变更项，创建后进入双人审批流程。</p></div></div><AppButton text circle type="button" disabled={busy} aria-label="关闭" onClick={onClose}><X size={17} /></AppButton></header><form className="dialog-form" onSubmit={submit}><div className="dialog-form-body">
+    <div className="dialog-guidance"><ShieldCheck size={17} /><div><strong>当前操作仅创建配置草稿</strong><span>草稿需由另一位平台管理员审批，通过后才会进入分阶段下发。</span></div></div>
     <fieldset className="runtime-config-scope"><legend>作用范围</legend>{(['DOMAIN', 'TENANT', 'WORKER'] as RuntimeConfigScope[]).map(scope => <label className={scopeType === scope ? 'active' : ''} key={scope}><input type="radio" name="scope" checked={scopeType === scope} onChange={() => changeScope(scope)} /><span><strong>{scopeLabel[scope]}</strong><small>{scope === 'DOMAIN' ? '仅影响一个业务领域' : scope === 'TENANT' ? '全租户共享策略' : '指定执行节点'}</small></span></label>)}</fieldset>
     <label><span>目标</span>{scopeType === 'DOMAIN' ? <select value={scopeId} onChange={event => setScopeId(event.target.value)}>{domains.filter(item => item.status === 'ACTIVE').map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select> : scopeType === 'WORKER' ? <select value={scopeId} onChange={event => setScopeId(event.target.value)}>{workerOptions.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select> : <input value={scopeId} readOnly />}</label>
     <div className="runtime-config-fieldset"><span>配置项</span>{available.map(definition => { const enabled = enabledKeys.includes(definition.key); const label = keyLabels[definition.key]; return <article className={enabled ? 'active' : ''} key={definition.key}><label><input type="checkbox" checked={enabled} onChange={() => toggleKey(definition)} /><span><strong>{label?.name ?? definition.key}</strong><small>{label?.description ?? definition.description}</small></span></label>{enabled && <div>{definition.type === 'boolean' ? <select value={String(values[definition.key])} onChange={event => setValues(current => ({ ...current, [definition.key]: event.target.value === 'true' }))}><option value="true">启用</option><option value="false">停用</option></select> : definition.type === 'integer' ? <input type="number" min={definition.minimum} max={definition.maximum} value={Number(values[definition.key])} onChange={event => setValues(current => ({ ...current, [definition.key]: Number(event.target.value) }))} /> : <select value={String(values[definition.key])} onChange={event => setValues(current => ({ ...current, [definition.key]: event.target.value }))}>{definition.enum?.map(value => <option value={value} key={value}>{value === 'ROUND_ROBIN' ? '轮询分配' : value === 'PRIMARY_FAILOVER' ? '主服务故障切换' : value}</option>)}</select>}<small>{definition.compatibility === 'HOT_RELOAD' ? '在线热更新' : '需重启节点'}</small></div>}</article>})}</div>
     <label><span>影响说明</span><textarea maxLength={2000} value={impactSummary} onChange={event => setImpactSummary(event.target.value)} placeholder="说明变更原因、影响范围与验证方式" /></label>
     {base && <p className="runtime-config-base"><ClockCounterClockwise size={15} />基于当前 {stateLabel[base.state]} 版本 V{base.versionNo} 创建，可在生效后安全回滚。</p>}
-    {error && <div className="administration-feedback error" role="alert">{error}</div>}
-    <footer><AppButton type="button" disabled={busy} onClick={onClose}>取消</AppButton><AppButton variant="primary" type="submit" disabled={busy || !scopeId || !enabledKeys.length || !impactSummary.trim()}>{busy ? <SpinnerGap className="spin" size={15} /> : <Plus size={15} />}创建草稿</AppButton></footer>
+    {error && <div className="administration-feedback error" role="alert">{error}</div>}</div>
+    <footer><span className="dialog-footer-note">已选择 {enabledKeys.length} 个配置项</span><div><AppButton type="button" disabled={busy} onClick={onClose}>取消</AppButton><AppButton variant="primary" type="submit" disabled={busy || !scopeId || !enabledKeys.length || !impactSummary.trim()}>{busy ? <SpinnerGap className="spin" size={15} /> : <Plus size={15} />}创建草稿</AppButton></div></footer>
   </form></section></div>
 }
 
-function RejectRuntimeConfigDialog({ busy, onClose, onSubmit }: { busy: boolean; onClose: () => void; onSubmit: (reason: string) => void }) {
+function RejectRuntimeConfigDialog({ version, busy, onClose, onSubmit }: { version: RuntimeConfigVersion; busy: boolean; onClose: () => void; onSubmit: (reason: string) => void }) {
   const [reason, setReason] = useState('')
-  return <div className="administration-dialog-backdrop"><section className="administration-dialog runtime-config-reject" role="dialog" aria-modal="true" aria-labelledby="reject-runtime-config-title"><header><div><span className="eyebrow">REVIEW DECISION</span><h2 id="reject-runtime-config-title">拒绝配置变更</h2><p>请记录可执行的修改意见，发起人可据此创建新版本。</p></div><AppButton text circle type="button" disabled={busy} aria-label="关闭" onClick={onClose}><X size={17} /></AppButton></header><form onSubmit={event => { event.preventDefault(); if (reason.trim()) onSubmit(reason.trim()) }}><label><span>拒绝原因</span><textarea autoFocus minLength={1} maxLength={1000} value={reason} onChange={event => setReason(event.target.value)} placeholder="说明风险、缺失信息或需要调整的配置项" /></label><footer><AppButton type="button" disabled={busy} onClick={onClose}>取消</AppButton><AppButton variant="danger" type="submit" disabled={busy || !reason.trim()}>{busy && <SpinnerGap className="spin" size={15} />}确认拒绝</AppButton></footer></form></section></div>
+  return <div className="administration-dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}><section className="administration-dialog runtime-config-reject dialog-tone-red dialog-size-compact" role="dialog" aria-modal="true" aria-labelledby="reject-runtime-config-title" aria-describedby="reject-runtime-config-description"><header><div className="dialog-title-group"><span className="dialog-title-icon" aria-hidden="true"><WarningCircle size={21} /></span><div><span className="eyebrow">配置审批</span><h2 id="reject-runtime-config-title">拒绝配置变更</h2><p id="reject-runtime-config-description">请记录可执行的修改意见，发起人可据此创建新版本。</p></div></div><AppButton text circle type="button" disabled={busy} aria-label="关闭" onClick={onClose}><X size={17} /></AppButton></header><form className="dialog-form" onSubmit={event => { event.preventDefault(); if (reason.trim()) onSubmit(reason.trim()) }}><div className="dialog-form-body">
+    <div className="dialog-resource-summary is-danger"><WarningCircle size={19} /><div><small>待拒绝配置</small><strong>{scopeLabel[version.scopeType]} · 版本 V{version.versionNo}</strong><span>{version.impactSummary}</span></div></div>
+    <label><span>拒绝原因</span><textarea autoFocus minLength={4} maxLength={1000} value={reason} onChange={event => setReason(event.target.value)} placeholder="说明风险、缺失信息或需要调整的配置项" /><small>{reason.trim().length}/1000 · 至少 4 个字符</small></label></div>
+    <footer><span className="dialog-footer-note danger-text">该版本将结束审批，发起人可创建新版本</span><div><AppButton type="button" disabled={busy} onClick={onClose}>取消</AppButton><AppButton variant="danger" type="submit" disabled={busy || reason.trim().length < 4}>{busy ? <SpinnerGap className="spin" size={15} /> : <WarningCircle size={15} />}确认拒绝</AppButton></div></footer>
+  </form></section></div>
 }

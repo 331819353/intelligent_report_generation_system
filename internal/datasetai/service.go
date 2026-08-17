@@ -66,6 +66,10 @@ type Planner interface {
 	Plan(context.Context, string, string, string, PlanRequest) (PlanResult, error)
 }
 
+type TableSuggester interface {
+	SuggestTables(context.Context, string, string, TableSuggestionRequest) (TableSuggestionResult, error)
+}
+
 // ServiceOptions bounds each model phase, including that phase's possible repair call,
 // and mirrors the generic orchestration input ceiling so catalog selection can fail early.
 // MODIFY has two independently bounded phases: semantic intent and graph planning.
@@ -74,6 +78,15 @@ type ServiceOptions struct {
 	MaxProviderInputBytes int
 	Retriever             AssetRetriever
 	RetrievalMode         string
+	// Sessions persists conversational modeling state. When nil the service plans
+	// statelessly, exactly as before sessions existed.
+	Sessions SessionStore
+	// Knowledge supplies governed business terms, metrics and relationships to the
+	// blueprint turn. Nil means no semantic layer is available; the turn still runs.
+	Knowledge KnowledgeProvider
+	// Sampler reads a few real rows through the governed sampling path so source
+	// screening and the blueprint can look at actual values. Nil means metadata only.
+	Sampler TableSampler
 }
 
 type Service struct {
@@ -83,6 +96,9 @@ type Service struct {
 	maxProviderInputBytes int
 	retriever             AssetRetriever
 	retrievalMode         string
+	sessions              SessionStore
+	knowledge             KnowledgeProvider
+	sampler               TableSampler
 }
 
 // NewService accepts an optional options value to preserve the package's existing test and
@@ -98,6 +114,9 @@ func NewService(catalog AssetCatalog, invoker Invoker, configured ...ServiceOpti
 		}
 		options.Retriever = configured[0].Retriever
 		options.RetrievalMode = configured[0].RetrievalMode
+		options.Sessions = configured[0].Sessions
+		options.Knowledge = configured[0].Knowledge
+		options.Sampler = configured[0].Sampler
 	}
 	mode := strings.ToUpper(strings.TrimSpace(options.RetrievalMode))
 	if mode != "SHADOW" && mode != "HYBRID" {
@@ -107,7 +126,328 @@ func NewService(catalog AssetCatalog, invoker Invoker, configured ...ServiceOpti
 		catalog: catalog, invoker: invoker, timeout: options.Timeout,
 		maxProviderInputBytes: options.MaxProviderInputBytes,
 		retriever:             options.Retriever, retrievalMode: mode,
+		sessions: options.Sessions, knowledge: options.Knowledge, sampler: options.Sampler,
 	}
+}
+
+// SuggestTables exposes the planner's authoritative metadata retrieval as a read-only
+// preflight step. It never calls the LLM and never mutates the draft. When vector coverage
+// is unavailable, the retriever's tag/description lexical ranking remains usable and the
+// response explicitly reports the degraded state to the UI.
+func (s *Service) SuggestTables(ctx context.Context, tenantID, actorID string, raw TableSuggestionRequest) (TableSuggestionResult, error) {
+	if s == nil || s.catalog == nil || strings.TrimSpace(tenantID) == "" {
+		return TableSuggestionResult{}, ErrProviderUnavailable
+	}
+	instruction := strings.TrimSpace(raw.Instruction)
+	if count := utf8.RuneCountInString(instruction); count < 1 || count > maxInstructionRunes {
+		return TableSuggestionResult{}, ErrInvalidRequest
+	}
+	limit := raw.Limit
+	if limit == 0 {
+		limit = 4
+	}
+	if limit < 1 || limit > maxRetrievedCatalogTables {
+		return TableSuggestionResult{}, ErrInvalidRequest
+	}
+	role := strings.ToUpper(strings.TrimSpace(raw.Role))
+	if role != "" && role != ScopeTableRolePrimary && role != ScopeTableRoleDimension {
+		return TableSuggestionResult{}, ErrInvalidRequest
+	}
+	modelKind := strings.ToUpper(strings.TrimSpace(raw.ModelKind))
+	if strings.TrimSpace(raw.SessionID) != "" {
+		if s.sessions == nil || strings.TrimSpace(actorID) == "" {
+			return TableSuggestionResult{}, ErrSessionStoreUnavailable
+		}
+		session, sessionErr := s.sessions.Get(ctx, tenantID, actorID, strings.TrimSpace(raw.SessionID))
+		if sessionErr != nil {
+			return TableSuggestionResult{}, sessionErr
+		}
+		if session.Status != SessionStatusActive {
+			return TableSuggestionResult{}, ErrSessionNotFound
+		}
+		if session.State.Blueprint == nil || session.State.Blueprint.Phase != BlueprintPhaseBusiness || len(session.State.PendingBlueprintStages()) > 0 {
+			return TableSuggestionResult{}, ErrBlueprintRequired
+		}
+		instruction = sessionSourceRetrievalQuery(session.State)
+		modelKind = session.State.ModelKind
+	}
+
+	retrieval := assetembedding.RetrievalResult{
+		TableScores: map[string]float64{}, ColumnScores: map[string]float64{},
+		Degraded: true, DegradedReason: "RETRIEVAL_MODE_LEXICAL",
+	}
+	if s.retrievalMode != "LEXICAL" && s.retriever == nil {
+		retrieval.DegradedReason = "RETRIEVER_UNAVAILABLE"
+	}
+	if s.retrievalMode != "LEXICAL" && s.retriever != nil {
+		loaded, err := s.retriever.Retrieve(ctx, tenantID, instruction, nil, maxRetrievedCatalogTables, maxCatalogColumns)
+		if err != nil {
+			slog.WarnContext(ctx, "dataset AI table suggestion retrieval degraded", "mode", s.retrievalMode, "error", err)
+			retrieval.DegradedReason = "ASSET_RETRIEVAL_FAILED"
+		} else {
+			retrieval = loaded
+		}
+	}
+
+	tables, _, _, err := s.searchCatalogTables(ctx, tenantID)
+	if err != nil {
+		return TableSuggestionResult{}, err
+	}
+	excluded := make(map[string]bool, len(raw.CurrentTableIDs))
+	for _, tableID := range raw.CurrentTableIDs {
+		tableID = strings.TrimSpace(tableID)
+		if tableID != "" {
+			excluded[tableID] = true
+		}
+	}
+	ranked := rankCatalogTables(tables, excluded, instruction)
+	if s.retrievalMode == "HYBRID" && len(retrieval.TableIDs) > 0 {
+		ranked = rankCatalogTablesByRetrieval(tables, retrieval.TableIDs, excluded, instruction)
+	}
+	ranked = preferSourceLayers(ranked, modelKind)
+	ranked = preferSourceRole(ranked, modelKind, role)
+	relatedSources := relatedCatalogTables(tables, raw.CurrentTableIDs)
+	if role == ScopeTableRoleDimension && len(relatedSources) > 0 {
+		ranked = preferRelatedCatalogTables(ranked, relatedSources)
+	}
+	items := make([]TableSuggestion, 0, limit)
+	seenLogicalTables := map[string]bool{}
+	retrieved := make(map[string]bool, len(retrieval.TableIDs))
+	for _, tableID := range retrieval.TableIDs {
+		retrieved[tableID] = true
+	}
+	for _, table := range ranked {
+		if len(items) >= limit {
+			break
+		}
+		if excluded[table.ID] || !availableCatalogTable(table) {
+			continue
+		}
+		candidateRole := catalogTableSourceRole(table, modelKind)
+		if role == ScopeTableRoleDimension && candidateRole != ScopeTableRoleDimension {
+			continue
+		}
+		if role == ScopeTableRolePrimary && candidateRole == ScopeTableRoleDimension {
+			continue
+		}
+		logicalKey := catalogLogicalTableKey(table)
+		relatedDimension := role == ScopeTableRoleDimension && relatedSources[table.ID] > 0
+		if !retrieved[table.ID] && catalogTableInstructionScore(table, instruction) == 0 && !relatedDimension {
+			continue
+		}
+		if seenLogicalTables[logicalKey] {
+			continue
+		}
+		seenLogicalTables[logicalKey] = true
+		items = append(items, TableSuggestion{TableID: table.ID, Score: retrieval.TableScores[table.ID], Layer: catalogTableLayer(table)})
+	}
+	return TableSuggestionResult{
+		Items: items, RetrievalMode: s.retrievalMode,
+		EmbeddingReady: retrieval.EmbeddingReady,
+		Degraded:       retrieval.Degraded, DegradedReason: retrieval.DegradedReason,
+	}, nil
+}
+
+func sessionSourceRetrievalQuery(state ModelingSessionState) string {
+	parts := []string{state.Goal}
+	if state.Intent != nil {
+		parts = append(parts, state.Intent.Entities...)
+		parts = append(parts, state.Intent.Measures...)
+		parts = append(parts, state.Intent.Dimensions...)
+		parts = append(parts, state.Intent.TimeExpressions...)
+		parts = append(parts, state.Intent.Filters...)
+	}
+	if state.Blueprint != nil {
+		if metrics, ok := state.StageDecisionFor(StageMetricDefinition); ok {
+			for _, metric := range metrics.Metrics {
+				parts = append(parts, metric.Name, metric.Definition)
+			}
+		}
+	}
+	return truncateRunes(strings.Join(normalizeTextList(parts), " "), maxInstructionRunes)
+}
+
+// preferSourceRole gives each of the two source-confirmation passes a stable,
+// deterministic candidate order. The final scan applies the role boundary so the
+// requested limit counts candidates of that role, not a mixed pool that will be
+// mostly discarded by the client.
+func preferSourceRole(tables []asset.Table, modelKind, role string) []asset.Table {
+	if role == "" {
+		return tables
+	}
+	bucket := func(table asset.Table) int {
+		isDimension := catalogTableSourceRole(table, modelKind) == ScopeTableRoleDimension
+		if role == ScopeTableRoleDimension {
+			if isDimension {
+				return 0
+			}
+			return 1
+		}
+		if isDimension && modelKind != "DIM" {
+			return 1
+		}
+		return 0
+	}
+	result := append([]asset.Table(nil), tables...)
+	sort.SliceStable(result, func(i, j int) bool { return bucket(result[i]) < bucket(result[j]) })
+	return result
+}
+
+// catalogTableSourceRole uses the published layer first, then governed identity
+// metadata for raw ODS assets. ODS is a storage layer, not a fact-table role: treating
+// every ODS table as PRIMARY hides raw dimensions even when they are correctly tagged.
+func catalogTableSourceRole(table asset.Table, modelKind string) string {
+	if modelKind == "DIM" {
+		return ScopeTableRolePrimary
+	}
+	layer := catalogTableLayer(table)
+	if layer == "DIM" {
+		return ScopeTableRoleDimension
+	}
+	if layer == "DWD" || layer == "DWS" || layer == "ADS" {
+		return ScopeTableRolePrimary
+	}
+	identity := strings.ToLower(strings.Join([]string{table.TableName, table.BusinessName, strings.Join(table.Tags, " ")}, " "))
+	for _, marker := range []string{"dim_", "维表", "维度", "主数据", "档案", "role:dimension", "role：dimension", "作用:维度表", "作用：维度表", "作用:主数据", "作用：主数据"} {
+		if strings.Contains(identity, marker) {
+			return ScopeTableRoleDimension
+		}
+	}
+	for _, marker := range []string{"fact_", "事实表", "role:fact", "role：fact", "作用:事实表", "作用：事实表"} {
+		if strings.Contains(identity, marker) {
+			return ScopeTableRolePrimary
+		}
+	}
+	return ""
+}
+
+// relatedCatalogTables turns declared foreign keys on the already confirmed primary
+// sources into deterministic dimension recall. It supplements semantic retrieval; it
+// does not guess relationships from table order or ask the model to invent joins.
+func relatedCatalogTables(tables []asset.Table, currentTableIDs []string) map[string]int {
+	current := make(map[string]bool, len(currentTableIDs))
+	for _, tableID := range currentTableIDs {
+		current[strings.TrimSpace(tableID)] = true
+	}
+	references := map[string]int{}
+	for _, table := range tables {
+		if !current[table.ID] {
+			continue
+		}
+		for _, foreignKey := range table.ForeignKeys {
+			key := catalogReferencedTableKey(foreignKey.ReferencedTable)
+			if key == "" {
+				continue
+			}
+			for _, candidate := range tables {
+				if candidate.ID == table.ID || catalogTableNameKey(candidate) != key {
+					continue
+				}
+				score := 1
+				if strings.TrimSpace(table.DataSourceID) != "" && table.DataSourceID == candidate.DataSourceID {
+					score = 2
+				}
+				if score > references[candidate.ID] {
+					references[candidate.ID] = score
+				}
+			}
+		}
+	}
+	return references
+}
+
+func preferRelatedCatalogTables(tables []asset.Table, related map[string]int) []asset.Table {
+	result := append([]asset.Table(nil), tables...)
+	sort.SliceStable(result, func(i, j int) bool {
+		return related[result[i].ID] > related[result[j].ID]
+	})
+	return result
+}
+
+func catalogReferencedTableKey(value string) string {
+	value = strings.Trim(strings.TrimSpace(value), "`\"")
+	if position := strings.LastIndex(value, "."); position >= 0 {
+		value = value[position+1:]
+	}
+	return catalogTableNameKey(asset.Table{TableName: value})
+}
+
+// catalogTableLayer reports the warehouse layer a candidate belongs to: the
+// published layer for dataset versions, ODS for raw physical tables.
+func catalogTableLayer(table asset.Table) string {
+	if isDatasetVersionCatalogID(table.ID) {
+		return strings.ToUpper(strings.TrimSpace(table.SchemaName))
+	}
+	return "ODS"
+}
+
+// sourceLayerPreference scores how well a candidate's layer suits building a
+// model of the given kind (docs/10 §2.1 PRIMARY/DIMENSION source rules).
+func sourceLayerPreference(modelKind, layer string) int {
+	switch modelKind {
+	case "DWS":
+		return map[string]int{"DWD": 3, "DIM": 3, "DWS": 1, "ODS": 0}[layer]
+	case "ADS":
+		return map[string]int{"DWS": 3, "DIM": 2, "DWD": 1, "ODS": -1}[layer]
+	case "DWD":
+		return map[string]int{"ODS": 2, "DIM": 1, "DWD": 0, "DWS": -1}[layer]
+	case "DIM":
+		return map[string]int{"ODS": 2, "DIM": 1, "DWD": 0, "DWS": -1}[layer]
+	}
+	return 0
+}
+
+// preferSourceLayers moves candidates from the preferred layers ahead of the
+// rest while keeping relevance order inside each bucket. Relevance is never
+// discarded: a discouraged layer still appears, only later.
+func preferSourceLayers(tables []asset.Table, modelKind string) []asset.Table {
+	if modelKind == "" {
+		return tables
+	}
+	bucket := func(table asset.Table) int {
+		score := sourceLayerPreference(modelKind, catalogTableLayer(table))
+		switch {
+		case score >= 2:
+			return 0
+		case score < 0:
+			return 2
+		default:
+			return 1
+		}
+	}
+	result := append([]asset.Table(nil), tables...)
+	sort.SliceStable(result, func(i, j int) bool { return bucket(result[i]) < bucket(result[j]) })
+	return result
+}
+
+func catalogLogicalTableKey(table asset.Table) string {
+	// Only collapse two catalog entries when they explicitly point at the same
+	// physical origin (for example a raw table and its mapped ODS version). Two
+	// assets that merely share a name are independent candidates: source, schema,
+	// fields and data scope may all be different.
+	if originTableID := strings.ToLower(strings.TrimSpace(table.OriginTableID)); originTableID != "" {
+		return "asset:" + originTableID
+	}
+	if tableID := strings.ToLower(strings.TrimSpace(table.ID)); tableID != "" {
+		return "asset:" + tableID
+	}
+	return "name:" + catalogTableNameKey(table)
+}
+
+// catalogTableNameKey is used only to resolve source-declared foreign-key table
+// names. It must not be used to de-duplicate catalog assets.
+func catalogTableNameKey(table asset.Table) string {
+	value := strings.ToLower(strings.TrimSpace(table.TableName))
+	value = strings.Map(func(character rune) rune {
+		if unicode.IsLetter(character) || unicode.IsDigit(character) {
+			return character
+		}
+		return -1
+	}, value)
+	if value != "" {
+		return value
+	}
+	return strings.ToLower(strings.TrimSpace(table.BusinessName))
 }
 
 const changeIntentSystemPrompt = `你是企业数据集 DAG 修改意图解析器。你只把用户自然语言转换成结构化 changeSet，不生成候选图，不执行保存、发布或查询，也绝不生成 SQL。
@@ -141,7 +481,8 @@ const changeIntentSystemPrompt = `你是企业数据集 DAG 修改意图解析�
 27. 修改现有派生产物时，fieldChanges.field 绝不能填写 transformId、产物 id、产物 code 或中文名，必须复制对应 derivedFields.physicalField，并用最终 groupUses/joinUses/outputUses 表达修改后的真实用途；派生产物的技术 key 由组件级 fields 精确锁定。删除一个派生产物时必须更新 references 中受影响的 GROUP/JOIN/TRANSFORM/END 字段。若所属 TRANSFORM 删除该产物后已无规则或无任何用途，则 REMOVE 该 TRANSFORM，并把 consumers 中每个直接消费者从该转换精确改接到其 input；若仍有其他在用产物，则保留组件并只 UPDATE rules 和受影响引用。原始物理字段默认继续选择，除非 instruction 明确要求取消选列。
 28. “更换/替换”必须按最终语义建模：同类组件只改配置时保留原 id 并 UPDATE 精确字段；更换为不同类型组件时 REMOVE 旧组件、ADD 新组件，并 UPDATE 每个直接消费者。数据表更换使用 UPDATE NODE.tableId 及第 15 条字段身份迁移，不能删除后用新 node id 伪装。
 29. “移动/换位/调整到某组件前后”表示数据流拓扑变化，不是画布坐标变化。被移动组件保留 id、名称和配置，只 UPDATE 它及受影响直接消费者的输入字段并逐项填写 inputChanges；必须依据 current 的唯一主链同时改全前驱和后继，不能只改一端或重建未改变组件。
-30. 修改配置时保持组件 id 和全部未点名字段，只 UPDATE 用户明确要求的 joinType、conditions、dimensions、metrics、rules 等字段。业务语义和 editContext 足以唯一定位时直接 READY；不得要求用户提供组件 id，只有多个同等合理目标或目标值缺失时才 CLARIFY。`
+30. 修改配置时保持组件 id 和全部未点名字段，只 UPDATE 用户明确要求的 joinType、conditions、dimensions、metrics、rules 等字段。业务语义和 editContext 足以唯一定位时直接 READY；不得要求用户提供组件 id，只有多个同等合理目标或目标值缺失时才 CLARIFY。
+31. context（若存在）是服务端注入的可信会话事实，来自用户已确认的决策，不是模型输出：goal 是业务目标，modelKind 是已确认的模型类型，confirmedTableIds 是用户确认使用的数据表。clarifications 是你此前提出的问题与用户的正式回答，按时间排列，最后一条通常就是对本轮 instruction 的补充说明；selectedComponent 是用户明确选择的目标组件，必须作为唯一确定的事实使用，不得再就同一问题重复 CLARIFY，也不得偏离已回答的口径。context.blueprint（若存在）是用户此前已确认的粒度、指标口径、关联、转换、过滤与输出决策：解析修改意图时把它当作既定事实，只把 instruction 明确要求改变的部分写入 changeSet，不得因蓝图与当前画布措辞不同而重新讨论已确认口径。context.executionFindings（若存在）是上一版方案在真实数据上的预览结论（0 行、关联扇出、基数不符、执行失败）：当用户要求“修正/为什么没有数据/重复了”一类问题时，据此把 changeSet 锁定到对应的 JOIN、FILTER 或 GROUP 组件，不要泛化到其他组件。`
 
 const plannerSystemPrompt = `你是企业数据集 DAG 配置助手，服务对象没有开发经验。你只输出完整、可编辑的候选图，不执行保存、发布或查询，也绝不生成 SQL。
 
@@ -167,7 +508,10 @@ const plannerSystemPrompt = `你是企业数据集 DAG 配置助手，服务对�
 20. 组件放置规则：字段必须先产生、后使用。影响关联键、分组维度或指标计算的处理放在对应 JOIN/GROUP 之前；仅用于最终展示的格式化放在最后一次 JOIN/GROUP 之后。多方明细需要先降粒度再关联时，在各自数据分支使用关联前 GROUP；跨表组合后的统一口径使用关联后 GROUP。每个必需的转换产物必须被下游规则、分组或最终输出真实引用，不能只连接组件却丢弃其结果。
 21. “每月”“月度”“按月”或其他受支持的年、季度、月、日时间粒度汇总，必须在 GROUP 前生成独立 DATE_FORMAT TRANSFORM，并让 GROUP 以 transformId.outputId 引用其 STRING 产物且 grouping=""。禁止直接在 GROUP 日期维度写 MONTH 或其他粒度。
 22. 最终自检：从 END 逆向遍历到每个 NODE，确认所有节点均被唯一主流程覆盖、每个中间组件都有且只有一个下游消费者、所有字段在被引用前已产生、最终输出 key 来自 END.input 的实际产物。summary 必须用简短中文概括最终采用的组件链路及省略阶段的业务原因，不输出内部思考过程。
-23. 输出只包含响应 Schema 要求的候选方案字段。changeSet 由服务端持有，不要在响应中重复、改写或解释。`
+23. 输出只包含响应 Schema 要求的候选方案字段。changeSet 由服务端持有，不要在响应中重复、改写或解释。
+24. context（若存在）是服务端注入的可信建模范围，来自用户已确认的决策：goal 与 modelKind 描述业务目标和模型类型，confirmedTableIds 是本次建模允许使用的全部数据表；assets 已按该范围裁剪，绝不能引入或臆造范围外的表。
+25. context.blueprint（若存在）是用户已逐段确认的建模口径，优先级高于 instruction 中的措辞：grain 决定最终输出粒度与时间口径；每条 joins 必须生成同表对、同关联键、同 joinType 的 JOIN；metric.binding.mode=AGGREGATE 时必须在 GROUP 中以 binding.aggregation 绑定 binding.tableId+column，PASSTHROUGH 时必须把 binding.tableId+column 直接输出到该 metric 对应的 END code，DERIVED 时必须生成 NUMBER_ARITHMETIC 且 operation 与有序 inputKeys 的物理来源逐项等于 binding.operation+inputs，并把其产物输出到对应 END code；transforms 必须按 componentType、operation、inputs 与 placement 生成对应组件；每条 filters 必须用 componentType=FILTER、family=CONDITION、rules 为空、conditions 非空的 TRANSFORM 表达，inputKey 指向对应字段，operator/value/valueMode 逐值一致，放置在被过滤字段产生之后、分组之前；每个 outputs 项都必须出现在 END.outputs 且 code 一致。不得改写、合并或省略任何已确认口径；蓝图未提及的细节再由你按上述规则补全。
+26. context.executionFindings（若存在）是上一版已应用方案在真实数据上预览得到的可信结论：EMPTY_RESULT 表示返回 0 行，优先检查关联键方向/类型与过滤条件是否过严；JOIN_FANOUT_RISK / JOIN_CARDINALITY_MISMATCH / JOIN_MANY_TO_MANY 表示 joinId 对应关联在数据上会扇出，必须改用唯一键、把多方分支先按关联键 GROUP 再关联，或把度量改为 COUNT_DISTINCT；EXECUTION_ERROR 表示执行失败。新方案必须针对这些结论作出修正并在 assumptions 中说明。`
 
 // Plan returns a validated proposal only. The existing dataset validation and save endpoints
 // remain the sole persistence boundary.
@@ -179,9 +523,33 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 	if err != nil {
 		return PlanResult{}, err
 	}
+	// Once a deployment has modeling-session persistence, every blank-canvas
+	// build must enter through the unified business → source → physical workflow.
+	// Stateless CREATE remains available only to compatibility deployments that
+	// have not configured a session store; MODIFY is still anchored by its live
+	// current graph and locked changeSet.
+	if input.Current == nil && s.sessions != nil && input.SessionID == "" {
+		return PlanResult{}, ErrScopeRequired
+	}
 	resourceID = strings.TrimSpace(resourceID)
 	if resourceID != "" && input.Current == nil {
 		return PlanResult{}, errors.Join(ErrInvalidRequest, ErrCurrentRequired)
+	}
+	session, err := s.loadPlanSession(ctx, tenantID, actorID, input)
+	if err != nil {
+		return PlanResult{}, err
+	}
+	if err := s.recordClarificationAnswer(ctx, session, input); err != nil {
+		return PlanResult{}, err
+	}
+	promptCtx := buildModelingPromptContext(session, input.ClarificationAnswer)
+	scopeTableIDs := []string{}
+	if session != nil {
+		scopeTableIDs = session.State.ScopeTableIDs()
+	}
+	var blueprintCtx *promptBlueprintContext
+	if promptCtx != nil {
+		blueprintCtx = promptCtx.Blueprint
 	}
 	mode := "CREATE"
 	lockedChangeSet := ChangeSet{Operations: []ChangeOperation{}, FieldChanges: []FieldChange{}}
@@ -199,11 +567,24 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 			),
 		)
 	} else {
+		if session != nil {
+			if session.State.Scope == nil || len(session.State.Scope.Tables) == 0 {
+				return PlanResult{}, ErrScopeRequired
+			}
+			if session.State.Blueprint == nil || session.State.Blueprint.Phase == BlueprintPhaseBusiness {
+				return PlanResult{}, ErrBlueprintRequired
+			}
+		}
+		// A blueprint with open stages must be settled on the blueprint card first:
+		// generating against half-confirmed decisions defeats the whole protocol.
+		if session != nil && session.State.Blueprint != nil && !session.State.BlueprintReady() {
+			return PlanResult{}, fmt.Errorf("%w: pending stages %s", ErrBlueprintRequired, strings.Join(session.State.PendingBlueprintStages(), ","))
+		}
 		transformRequirements = deriveCreateTransformRequirements(input.Instruction)
 		reportPlanProgress(ctx, ProgressStageContext, ProgressStatusSucceeded, "当前为空画布，将生成新的 DAG 流程")
 	}
 	reportPlanProgress(ctx, ProgressStageCatalog, ProgressStatusRunning, "正在读取授权范围内的数据表与字段元数据")
-	loaded, err := s.loadCatalog(ctx, tenantID, input, mode, lockedChangeSet)
+	loaded, err := s.loadCatalog(ctx, tenantID, input, mode, lockedChangeSet, promptCtx, scopeTableIDs)
 	if err != nil {
 		return PlanResult{}, err
 	}
@@ -219,15 +600,23 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 	if mode == "MODIFY" {
 		reportPlanProgress(ctx, ProgressStageIntent, ProgressStatusRunning, "正在解析修改范围并锁定当前 DAG 基线")
 		intentCtx, cancelIntent := context.WithTimeout(ctx, s.timeout)
-		intent, err := s.extractChangeIntent(intentCtx, tenantID, actorID, resourceID, input, loaded.tables)
+		intent, err := s.extractChangeIntent(intentCtx, tenantID, actorID, resourceID, input, promptCtx, loaded.tables)
 		cancelIntent()
 		if err != nil {
+			// The question the model raised is part of the session's durable state:
+			// the follow-up answer is only accepted against a recorded open question.
+			var clarificationErr *ClarificationRequiredError
+			if errors.As(err, &clarificationErr) {
+				if recordErr := s.recordClarificationAsked(ctx, session, clarificationErr); recordErr != nil {
+					return PlanResult{}, recordErr
+				}
+			}
 			return PlanResult{}, err
 		}
 		lockedChangeSet = intent.ChangeSet
 		reportPlanProgress(ctx, ProgressStageIntent, ProgressStatusSucceeded, "已识别修改范围，未声明的当前画布组件将保持不变")
 	}
-	providerRequest, err := buildProviderRequest(input, mode, lockedChangeSet, loaded.tables)
+	providerRequest, err := buildProviderRequest(input, mode, lockedChangeSet, promptCtx, loaded.tables)
 	if err != nil {
 		return PlanResult{}, err
 	}
@@ -279,6 +668,12 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 		}
 	} else if validationErr == nil {
 		validationErr = annotateInvalidOutput(validateTransformRequirements(proposal.Plan, transformRequirements), InvalidOutputStagePlanValidation, false, result.RequestID)
+		if validationErr == nil {
+			validationErr = annotateInvalidOutput(validateBlueprintCompliance(proposal.Plan, blueprintCtx), InvalidOutputStagePlanValidation, false, result.RequestID)
+		}
+		if validationErr == nil && promptCtx != nil {
+			validationErr = annotateInvalidOutput(validateModelKindPlan(proposal.Plan, promptCtx.ModelKind, blueprintCtx), InvalidOutputStagePlanValidation, false, result.RequestID)
+		}
 		proposal.ChangeSet = ChangeSet{Operations: []ChangeOperation{}, FieldChanges: []FieldChange{}}
 	}
 	if validationErr != nil {
@@ -341,6 +736,12 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 			}
 		} else if validationErr == nil {
 			validationErr = annotateInvalidOutput(validateTransformRequirements(proposal.Plan, transformRequirements), InvalidOutputStagePlanValidation, true, result.RequestID)
+			if validationErr == nil {
+				validationErr = annotateInvalidOutput(validateBlueprintCompliance(proposal.Plan, blueprintCtx), InvalidOutputStagePlanValidation, true, result.RequestID)
+			}
+			if validationErr == nil && promptCtx != nil {
+				validationErr = annotateInvalidOutput(validateModelKindPlan(proposal.Plan, promptCtx.ModelKind, blueprintCtx), InvalidOutputStagePlanValidation, true, result.RequestID)
+			}
 			proposal.ChangeSet = ChangeSet{Operations: []ChangeOperation{}, FieldChanges: []FieldChange{}}
 		}
 		if validationErr != nil {
@@ -368,6 +769,16 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 	if err := validateTransformRequirements(proposal.Plan, transformRequirements); err != nil {
 		return PlanResult{}, annotateInvalidOutput(err, InvalidOutputStagePlanValidation, repairAttempted, result.RequestID)
 	}
+	if mode == "CREATE" {
+		if err := validateBlueprintCompliance(proposal.Plan, blueprintCtx); err != nil {
+			return PlanResult{}, annotateInvalidOutput(err, InvalidOutputStagePlanValidation, repairAttempted, result.RequestID)
+		}
+		if promptCtx != nil {
+			if err := validateModelKindPlan(proposal.Plan, promptCtx.ModelKind, blueprintCtx); err != nil {
+				return PlanResult{}, annotateInvalidOutput(err, InvalidOutputStagePlanValidation, repairAttempted, result.RequestID)
+			}
+		}
+	}
 	if mode == "MODIFY" {
 		if err := validateLockedTransformUsage(proposal.Plan, lockedChangeSet); err != nil {
 			return PlanResult{}, annotateInvalidOutput(err, InvalidOutputStagePlanValidation, repairAttempted, result.RequestID)
@@ -377,6 +788,9 @@ func (s *Service) Plan(ctx context.Context, tenantID, actorID, resourceID string
 			return PlanResult{}, annotateInvalidOutput(err, InvalidOutputStageChangeSetValidation, repairAttempted, result.RequestID)
 		}
 		proposal.ChangeSet = canonical
+	}
+	if err := s.recordProposalStaged(ctx, session, result.RequestID, mode, proposal.Summary, input.Instruction, input.Current, proposal.Plan); err != nil {
+		return PlanResult{}, err
 	}
 	reportPlanProgress(ctx, ProgressStageValidation, ProgressStatusSucceeded, "候选 DAG 已通过拓扑、字段血缘与修改范围校验")
 	reportPlanProgress(ctx, ProgressStageComplete, ProgressStatusSucceeded, "DAG 候选方案生成完成，等待前端确认")
@@ -1143,11 +1557,11 @@ func preserveProtectedDatasetMetadata(current, proposal GraphPlan, locked Change
 	return proposal
 }
 
-func (s *Service) extractChangeIntent(ctx context.Context, tenantID, actorID, resourceID string, input PlanRequest, catalog []CatalogTable) (ChangeIntent, error) {
+func (s *Service) extractChangeIntent(ctx context.Context, tenantID, actorID, resourceID string, input PlanRequest, promptCtx *promptModelingContext, catalog []CatalogTable) (ChangeIntent, error) {
 	if input.Current == nil {
 		return ChangeIntent{}, errors.Join(ErrInvalidRequest, ErrCurrentRequired)
 	}
-	request, err := buildChangeIntentProviderRequest(input, catalog)
+	request, err := buildChangeIntentProviderRequest(input, promptCtx, catalog)
 	if err != nil {
 		return ChangeIntent{}, err
 	}
@@ -1206,12 +1620,64 @@ func (s *Service) extractChangeIntent(ctx context.Context, tenantID, actorID, re
 		}
 	}
 	if intent.Status == "CLARIFY" {
-		return ChangeIntent{}, &ClarificationRequiredError{Question: intent.Question}
+		return ChangeIntent{}, &ClarificationRequiredError{
+			Question:   intent.Question,
+			Candidates: resolveClarificationCandidates(*input.Current, intent.Candidates),
+		}
 	}
 	return intent, nil
 }
 
-func buildChangeIntentProviderRequest(input PlanRequest, catalog []CatalogTable) (aiplatform.ProviderRequest, error) {
+// resolveClarificationCandidates attaches trusted display names from the caller's own
+// current graph. Candidate refs were already validated against that graph, so a missing
+// name can only mean an unnamed component; the stable id remains the fallback label.
+func resolveClarificationCandidates(current GraphPlan, refs []ComponentRef) []ClarificationCandidate {
+	result := make([]ClarificationCandidate, 0, len(refs))
+	for _, ref := range refs {
+		name := ""
+		switch ref.ComponentKind {
+		case "DATASET":
+			name = current.Dataset.Name
+		case "NODE":
+			for _, node := range current.Nodes {
+				if node.ID == ref.ComponentID {
+					name = node.Alias
+				}
+			}
+		case "JOIN":
+			for _, join := range current.Joins {
+				if join.ID == ref.ComponentID {
+					name = join.Name
+				}
+			}
+		case "GROUP":
+			for _, group := range current.Groups {
+				if group.ID == ref.ComponentID {
+					name = group.Name
+				}
+			}
+		case "TRANSFORM":
+			for _, transform := range current.Transforms {
+				if transform.ID == ref.ComponentID {
+					name = transform.Name
+				}
+			}
+		case "END":
+			name = current.End.Name
+		}
+		if strings.TrimSpace(name) == "" {
+			name = ref.ComponentID
+		}
+		result = append(result, ClarificationCandidate{
+			ComponentKind: ref.ComponentKind,
+			ComponentID:   ref.ComponentID,
+			ComponentName: name,
+		})
+	}
+	return result
+}
+
+func buildChangeIntentProviderRequest(input PlanRequest, promptCtx *promptModelingContext, catalog []CatalogTable) (aiplatform.ProviderRequest, error) {
 	if input.Current == nil {
 		return aiplatform.ProviderRequest{}, errors.Join(ErrInvalidRequest, ErrCurrentRequired)
 	}
@@ -1219,6 +1685,7 @@ func buildChangeIntentProviderRequest(input PlanRequest, catalog []CatalogTable)
 		Instruction:           input.Instruction,
 		Current:               *input.Current,
 		EditContext:           buildPromptEditContext(input.Current),
+		Context:               promptCtx,
 		TransformRequirements: []TransformRequirement{},
 		Assets:                catalog,
 	})
@@ -1272,7 +1739,7 @@ type catalogCandidate struct {
 	activeColumnCount   int
 }
 
-func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRequest, mode string, changeSet ChangeSet) (catalogLoadResult, error) {
+func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRequest, mode string, changeSet ChangeSet, promptCtx *promptModelingContext, scope []string) (catalogLoadResult, error) {
 	currentColumns, currentOrder := currentCatalogReferences(input.Current)
 	requiredColumns := cloneRequiredColumns(currentColumns)
 	requiredOrder := append([]string(nil), currentOrder...)
@@ -1282,6 +1749,18 @@ func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRe
 		requiredSet[id] = true
 		currentSet[id] = true
 	}
+	// Session-confirmed scope tables are user decisions, so they join the required
+	// set. In CREATE mode the confirmed scope *is* the catalog: the promise "only
+	// these tables" is enforced structurally, not left to instruction prose.
+	scopeSet := make(map[string]bool, len(scope))
+	for _, tableID := range scope {
+		scopeSet[tableID] = true
+		if !requiredSet[tableID] {
+			requiredSet[tableID] = true
+			requiredOrder = append(requiredOrder, tableID)
+		}
+	}
+	scopeLocked := mode == "CREATE" && len(scope) > 0
 	retrieval := assetembedding.RetrievalResult{TableScores: map[string]float64{}, ColumnScores: map[string]float64{}, Degraded: true}
 	physicalRequiredOrder := make([]string, 0, len(requiredOrder))
 	for _, tableID := range requiredOrder {
@@ -1310,7 +1789,10 @@ func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRe
 	for _, tableID := range requiredOrder {
 		table, err := s.catalog.GetTable(ctx, tenantID, tableID)
 		if err != nil || !availableCatalogTable(table) {
-			if currentSet[tableID] {
+			// A table from the live canvas or the confirmed session scope was valid
+			// when the user committed to it; its disappearance is staleness, not a
+			// malformed request.
+			if currentSet[tableID] || scopeSet[tableID] {
 				return catalogLoadResult{}, ErrContextStale
 			}
 			return catalogLoadResult{}, fmt.Errorf("%w: a hinted table is unavailable", ErrInvalidRequest)
@@ -1323,6 +1805,9 @@ func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRe
 			if currentSet[tableID] && candidate.requiredColumnCount < len(currentColumns[tableID]) {
 				return catalogLoadResult{}, ErrContextStale
 			}
+			if scopeSet[tableID] && len(candidate.columns) == 0 {
+				return catalogLoadResult{}, ErrContextStale
+			}
 			return catalogLoadResult{}, fmt.Errorf("%w: a hinted field is unavailable", ErrInvalidRequest)
 		}
 		requiredCandidates = append(requiredCandidates, candidate)
@@ -1333,12 +1818,24 @@ func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRe
 	totalTables, searchTruncated := 0, false
 	// A DIM/DWD/DWS/ADS editor is pinned to immutable dataset-version inputs. Physical
 	// metadata tables are not compatible replacement candidates and exposing
-	// them here lets the model silently downgrade the layer contract.
-	if len(currentOrder) == 0 || len(physicalRequiredOrder) > 0 {
+	// them here lets the model silently downgrade the layer contract — but other
+	// published versions (a DIM to enrich a DWS, say) are legitimate candidates,
+	// so the search runs and is narrowed to versions. A locked CREATE scope
+	// forbids every table outside the confirmed set.
+	if !scopeLocked {
 		var err error
 		searched, totalTables, searchTruncated, err = s.searchCatalogTables(ctx, tenantID)
 		if err != nil {
 			return catalogLoadResult{}, err
+		}
+		if len(currentOrder) > 0 && len(physicalRequiredOrder) == 0 {
+			versionsOnly := searched[:0]
+			for _, table := range searched {
+				if isDatasetVersionCatalogID(table.ID) {
+					versionsOnly = append(versionsOnly, table)
+				}
+			}
+			searched = versionsOnly
 		}
 	}
 	rankedTables := rankCatalogTables(searched, requiredSet, input.Instruction)
@@ -1378,7 +1875,7 @@ func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRe
 		included = append(included, candidate)
 	}
 	if len(result) > 0 {
-		fits, err := s.catalogFits(input, mode, changeSet, result)
+		fits, err := s.catalogFits(input, mode, changeSet, promptCtx, result)
 		if err != nil {
 			return catalogLoadResult{}, err
 		}
@@ -1397,7 +1894,7 @@ func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRe
 		admitted := false
 		for columnCount > 0 {
 			trial := appendCatalogTable(result, catalogTable(candidate, columnCount))
-			fits, err := s.catalogFits(input, mode, changeSet, trial)
+			fits, err := s.catalogFits(input, mode, changeSet, promptCtx, trial)
 			if err != nil {
 				return catalogLoadResult{}, err
 			}
@@ -1431,7 +1928,7 @@ func (s *Service) loadCatalog(ctx context.Context, tenantID string, input PlanRe
 			for step > 0 {
 				trial := cloneCatalog(result)
 				trial[index] = catalogTable(included[index], start+step)
-				fits, err := s.catalogFits(input, mode, changeSet, trial)
+				fits, err := s.catalogFits(input, mode, changeSet, promptCtx, trial)
 				if err != nil {
 					return catalogLoadResult{}, err
 				}
@@ -1529,25 +2026,11 @@ func rankCatalogTables(tables []asset.Table, current map[string]bool, instructio
 		score int
 		order int
 	}
-	normalizedInstruction := strings.ToLower(instruction)
-	tokens := meaningfulTokens(normalizedInstruction)
 	ranked := make([]scoredTable, 0, len(tables))
 	for index, table := range tables {
-		score := 0
+		score := catalogTableInstructionScore(table, instruction)
 		if current[table.ID] {
 			score += 10000
-		}
-		for _, name := range []string{table.BusinessName, table.TableName} {
-			name = strings.ToLower(strings.TrimSpace(name))
-			if name != "" && strings.Contains(normalizedInstruction, name) {
-				score += 1000
-			}
-		}
-		haystack := strings.ToLower(strings.Join(append([]string{table.BusinessName, table.TableName, table.BusinessDescription}, table.Tags...), " "))
-		for _, token := range tokens {
-			if strings.Contains(haystack, token) {
-				score += 50
-			}
 		}
 		ranked = append(ranked, scoredTable{value: table, score: score, order: index})
 	}
@@ -1562,6 +2045,24 @@ func rankCatalogTables(tables []asset.Table, current map[string]bool, instructio
 		result[index] = item.value
 	}
 	return result
+}
+
+func catalogTableInstructionScore(table asset.Table, instruction string) int {
+	normalizedInstruction := strings.ToLower(instruction)
+	score := 0
+	for _, name := range []string{table.BusinessName, table.TableName} {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name != "" && strings.Contains(normalizedInstruction, name) {
+			score += 1000
+		}
+	}
+	haystack := strings.ToLower(strings.Join(append([]string{table.BusinessName, table.TableName, table.BusinessDescription}, table.Tags...), " "))
+	for _, token := range meaningfulTokens(normalizedInstruction) {
+		if strings.Contains(haystack, token) {
+			score += 50
+		}
+	}
+	return score
 }
 
 func rankCatalogTablesByRetrieval(tables []asset.Table, retrievedIDs []string, current map[string]bool, instruction string) []asset.Table {
@@ -1688,11 +2189,21 @@ func catalogTable(candidate catalogCandidate, columnCount int) CatalogTable {
 		Tags:    append([]string(nil), candidate.table.Tags...),
 		Columns: make([]CatalogColumn, 0, columnCount),
 	}
+	if len(candidate.table.PrimaryKeyColumns) > 0 {
+		result.PrimaryKeyColumns = append([]string(nil), candidate.table.PrimaryKeyColumns...)
+	}
+	for _, foreignKey := range candidate.table.ForeignKeys {
+		result.ForeignKeys = append(result.ForeignKeys, CatalogForeignKey{
+			Columns: append([]string(nil), foreignKey.Columns...), ReferencedTable: foreignKey.ReferencedTable,
+			ReferencedColumns: append([]string(nil), foreignKey.ReferencedColumns...),
+		})
+	}
 	for _, column := range candidate.columns[:columnCount] {
 		result.Columns = append(result.Columns, CatalogColumn{
 			Name: column.ColumnName, BusinessName: column.BusinessName,
 			BusinessDescription: column.BusinessDescription, CanonicalType: column.CanonicalType,
 			Tags: append([]string(nil), column.Tags...), SemanticType: column.SemanticType, Nullable: column.Nullable,
+			PrimaryKey: column.PrimaryKey, ForeignKey: column.ForeignKey, Unique: column.Unique,
 		})
 	}
 	return result
@@ -1716,7 +2227,7 @@ func cloneCatalog(value []CatalogTable) []CatalogTable {
 	return result
 }
 
-func buildProviderRequest(input PlanRequest, mode string, changeSet ChangeSet, catalog []CatalogTable) (aiplatform.ProviderRequest, error) {
+func buildProviderRequest(input PlanRequest, mode string, changeSet ChangeSet, promptCtx *promptModelingContext, catalog []CatalogTable) (aiplatform.ProviderRequest, error) {
 	instruction := input.Instruction
 	transformRequirements := []TransformRequirement{}
 	if mode == "MODIFY" {
@@ -1730,6 +2241,7 @@ func buildProviderRequest(input PlanRequest, mode string, changeSet ChangeSet, c
 		Instruction:           instruction,
 		Mode:                  mode,
 		Current:               input.Current,
+		Context:               plannerModelingContext(mode, promptCtx),
 		TransformRequirements: transformRequirements,
 		ChangeSet:             changeSet,
 		Assets:                catalog,
@@ -1753,9 +2265,9 @@ func buildProviderRequest(input PlanRequest, mode string, changeSet ChangeSet, c
 	}, nil
 }
 
-func (s *Service) catalogFits(input PlanRequest, mode string, changeSet ChangeSet, catalog []CatalogTable) (bool, error) {
+func (s *Service) catalogFits(input PlanRequest, mode string, changeSet ChangeSet, promptCtx *promptModelingContext, catalog []CatalogTable) (bool, error) {
 	if mode == "MODIFY" {
-		intentRequest, err := buildChangeIntentProviderRequest(input, catalog)
+		intentRequest, err := buildChangeIntentProviderRequest(input, promptCtx, catalog)
 		if err != nil {
 			return false, err
 		}
@@ -1764,7 +2276,7 @@ func (s *Service) catalogFits(input PlanRequest, mode string, changeSet ChangeSe
 			return fits, err
 		}
 	}
-	request, err := buildProviderRequest(input, mode, changeSet, catalog)
+	request, err := buildProviderRequest(input, mode, changeSet, promptCtx, catalog)
 	if err != nil {
 		return false, err
 	}
@@ -1904,6 +2416,8 @@ func repairInstruction(validationErr error) string {
 		guidance = "END 只能输出其输入实际产生的字段，字段与 code 均不得重复。转换产物以及由 GROUP 继续保留的转换字段都使用 transformId.outputId；物理字段使用 nodeId.column，禁止使用 groupId.结果名或自行构造聚合 key。"
 	case InvalidOutputReasonChangeScope:
 		guidance = "严格只落实锁定 changeSet，保持未授权组件、字段和顺序逐值不变。"
+	case InvalidOutputReasonBlueprint:
+		guidance = "context.blueprint 是用户已确认的建模口径：每条 joins 必须存在同表对、同关联键、同 joinType 的 JOIN；每个带 binding 的 metric 必须在 GROUP 中以相同聚合绑定同一物理列；每条 filters 必须由 FILTER 组件的 conditions 表达；每个 outputs.code 必须出现在 END.outputs。按本地校验详情补齐缺失项，不得改写已确认口径。"
 	case InvalidOutputReasonResponseFormat, InvalidOutputReasonProviderResponse, InvalidOutputReasonSchema:
 		guidance = "只返回一个符合响应 Schema 的完整 JSON 对象，不要输出解释、代码围栏、额外字段或尾随内容。"
 	}

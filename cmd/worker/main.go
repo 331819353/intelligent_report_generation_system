@@ -592,7 +592,11 @@ func main() {
 		registryimport.NewWorker(
 			registryimport.NewPostgresStore(pool),
 			registryimport.NewFileRowSource(objectStorage),
-			registryimport.NewFourLayerValidator(registryimport.NewPostgresValidationCatalog(pool)),
+			// 现状目录让校验器能把“内容与当前认证版本一致”的行判为 unchanged
+			// （SKIPPED），重复导入不再制造等价新版本。
+			registryimport.NewFourLayerValidator(
+				registryimport.NewPostgresValidationCatalog(pool),
+			).WithCurrentAssets(registryimport.NewPostgresExportCatalog(pool)),
 		),
 		workerID,
 		cfg.WorkerPollInterval,
@@ -846,7 +850,14 @@ func runAssetEmbeddingWorker(
 	pollInterval time.Duration,
 ) {
 	const lease = 2 * time.Minute
+	documentsReconciled := false
 	runTenantWorkerLoop(ctx, pollInterval, func(ctx context.Context) (bool, error) {
+		if !documentsReconciled {
+			if err := worker.RequeueStaleDocuments(ctx); err != nil {
+				return false, err
+			}
+			documentsReconciled = true
+		}
 		processed := false
 		tenantIDs, err := worker.TenantIDs(ctx)
 		if err != nil {

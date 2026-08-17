@@ -12,7 +12,7 @@ import (
 
 const (
 	SchemaVersion        = "1.1"
-	PromptVersion        = "metadata-completion-v14"
+	PromptVersion        = "metadata-completion-v15"
 	SourceFormatCSV      = "CSV"
 	SourceFormatExcel    = "EXCEL"
 	SourceFormatDatabase = "DATABASE"
@@ -282,12 +282,28 @@ func sameTags(left, right []string) bool {
 var allowedTags = map[string]bool{
 	"产业:制造业": true, "产业:服务业": true, "产业:信息产业": true,
 	"主题:经营分析": true, "主题:风险监控": true, "主题:企业画像": true,
+	"主题:订单": true, "主题:订单商品": true, "主题:售后服务": true, "主题:支付": true, "主题:履约": true,
+	"主题:客户": true, "主题:商品": true, "主题:门店": true, "主题:库存": true, "主题:采购": true,
+	"主题:供应商": true, "主题:员工": true, "主题:组织": true, "主题:渠道": true, "主题:营销": true,
 	"作用:维度表": true, "作用:事实表": true, "作用:主数据": true, "作用:指标来源": true, "作用:辅助信息": true,
-	"功能:交易明细": true, "功能:业务流水": true, "功能:周期快照": true, "功能:汇总结果": true, "功能:代码映射": true,
-	"范围:运营分析": true, "范围:财务分析": true, "范围:风险分析": true, "范围:客户分析": true, "范围:供应链分析": true,
-	"粒度:事件": true, "粒度:订单": true, "粒度:客户": true, "粒度:产品": true, "粒度:组织": true, "粒度:日": true, "粒度:月": true,
+	"过程:销售": true, "过程:支付": true, "过程:履约": true, "过程:售后": true, "过程:客户经营": true,
+	"过程:商品管理": true, "过程:门店经营": true, "过程:库存管理": true, "过程:采购": true, "过程:营销": true,
+	"功能:交易明细": true, "功能:业务流水": true, "功能:事件明细": true, "功能:周期快照": true,
+	"功能:汇总结果": true, "功能:实体主数据": true, "功能:关系映射": true, "功能:代码映射": true,
+	"内容:订单头": true, "内容:订单行": true, "内容:支付信息": true, "内容:营销归因": true,
+	"内容:收货地域": true, "内容:履约信息": true, "内容:售后处理": true, "内容:客户画像": true,
+	"内容:商品属性": true, "内容:门店属性": true, "内容:金额指标": true, "内容:状态信息": true,
+	"范围:运营分析": true, "范围:财务分析": true, "范围:风险分析": true, "范围:客户分析": true,
+	"范围:供应链分析": true, "范围:商品分析": true, "范围:履约分析": true, "范围:营销分析": true, "范围:人力资源分析": true,
+	"粒度:事件": true, "粒度:订单": true, "粒度:订单商品": true, "粒度:售后工单": true,
+	"粒度:客户": true, "粒度:产品": true, "粒度:门店": true, "粒度:组织": true, "粒度:渠道": true,
+	"粒度:供应商": true, "粒度:员工": true, "粒度:交易": true, "粒度:支付": true, "粒度:库存记录": true,
+	"粒度:日期": true, "粒度:日": true, "粒度:月": true,
+	"时间:事件时间": true, "时间:业务日期": true, "时间:快照日期": true, "时间:生效时间": true,
 	"关联:主键": true, "关联:外键": true, "关联:业务键": true, "关联:桥接键": true,
 }
+
+const maxControlledTagsPerTarget = 16
 
 var allowedSemanticTypes = map[string]bool{
 	"DATE": true, "TIME": true, "DATETIME": true, "REGION": true, "COMPANY_NAME": true,
@@ -377,6 +393,9 @@ func validateValue(value SuggestionValue, column, fileColumn bool) error {
 	}
 	if len(value.Tags) == 0 {
 		return errors.New("tags must contain at least one controlled tag")
+	}
+	if len(value.Tags) > maxControlledTagsPerTarget {
+		return fmt.Errorf("tags must contain at most %d controlled tags", maxControlledTagsPerTarget)
 	}
 	seen := map[string]bool{}
 	for _, tag := range value.Tags {

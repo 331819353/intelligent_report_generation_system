@@ -107,6 +107,12 @@ func loadSemanticReferences(
 		FROM latest_terms AS term
 		WHERE term.rank=1 AND term.status<>'DEPRECATED'
 		UNION ALL
+		SELECT 'KNOWLEDGE',knowledge.code::text,knowledge.name,knowledge.term_id,knowledge.status,
+			false,''::text,''::text,'{}'::text[]
+		FROM latest_terms AS knowledge
+		WHERE knowledge.rank=1 AND knowledge.status<>'DEPRECATED'
+		  AND knowledge.knowledge_kind<>'ALIAS'
+		UNION ALL
 		SELECT 'TIME_CONTRACT',contract.code::text,contract.name,contract.id,version.status,
 			false,''::text,''::text,version.supported_grains
 		FROM askdata.time_contracts AS contract
@@ -138,6 +144,47 @@ func loadSemanticReferences(
 			reference.Active = reference.Certified
 		}
 		putReference(snapshot, reference)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return loadAuthoritativeDefinitions(ctx, tx, domainID, snapshot)
+}
+
+// loadAuthoritativeDefinitions 载入域内既有 AUTHORITATIVE DEFINES 词条的目标
+// 与持有者 code，供 L4 强制“同一目标至多一个权威定义”。
+func loadAuthoritativeDefinitions(
+	ctx context.Context,
+	tx pgx.Tx,
+	domainID string,
+	snapshot *ValidationSnapshot,
+) error {
+	rows, err := tx.Query(ctx, `WITH latest AS (
+		SELECT version.*,row_number() OVER(
+			PARTITION BY version.business_term_id ORDER BY version.version_no DESC,version.id DESC
+		) AS rank
+		FROM askdata.business_term_versions AS version WHERE version.domain_id=$1
+	)
+	SELECT target_object_type,target_code,code::text FROM latest
+	WHERE rank=1 AND status<>'DEPRECATED'
+	  AND authority='AUTHORITATIVE' AND relation='DEFINES' AND target_code<>''
+	ORDER BY target_object_type,target_code`, domainID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var targetType, targetCode, code string
+		if err := rows.Scan(&targetType, &targetCode, &code); err != nil {
+			return err
+		}
+		if targetType == "TIME_CONTRACT" {
+			targetType = "TIME"
+		}
+		key := targetType + "\x00" + canonicalLookup(targetCode)
+		if _, exists := snapshot.AuthoritativeDefinitions[key]; !exists {
+			snapshot.AuthoritativeDefinitions[key] = canonicalLookup(code)
+		}
 	}
 	return rows.Err()
 }

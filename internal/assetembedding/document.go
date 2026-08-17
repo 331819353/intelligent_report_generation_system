@@ -10,6 +10,8 @@ import (
 )
 
 type tableFacts struct {
+	SourceID            string
+	SourceName          string
 	SourceType          string
 	CatalogName         string
 	SchemaName          string
@@ -35,6 +37,8 @@ func tableDocument(value tableFacts) string {
 	lines := []string{
 		"文档版本：" + DocumentVersion,
 		"资产类型：TABLE",
+		"数据源标识：" + clean(value.SourceID),
+		"数据源名称：" + clean(value.SourceName),
 		"数据源类型：" + clean(value.SourceType),
 		"Catalog：" + clean(value.CatalogName),
 		"Schema：" + clean(value.SchemaName),
@@ -58,6 +62,8 @@ func columnDocument(table tableFacts, column columnFacts) string {
 	return strings.Join([]string{
 		"文档版本：" + DocumentVersion,
 		"资产类型：COLUMN",
+		"数据源标识：" + clean(table.SourceID),
+		"数据源名称：" + clean(table.SourceName),
 		"数据源类型：" + clean(table.SourceType),
 		"所属表物理名：" + clean(table.TableName),
 		"所属表业务名：" + clean(table.BusinessName),

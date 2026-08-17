@@ -78,13 +78,19 @@ func (withdrawer *PostgresDraftWithdrawer) WithdrawDraftsSelective(
 		}
 		grouped[row.CreatedVersionID] = append(grouped[row.CreatedVersionID], row)
 	}
+	// 逆行号顺序撤回：BUNDLE 批内后提交的行可能依赖先提交的行（指标引用
+	// 模型、成员引用维度），先删依赖者才能让被依赖者通过引用检查。
 	sort.Slice(versionIDs, func(i, j int) bool {
-		return grouped[versionIDs[i]][0].RowNo < grouped[versionIDs[j]][0].RowNo
+		return grouped[versionIDs[i]][0].RowNo > grouped[versionIDs[j]][0].RowNo
 	})
 	for _, versionID := range versionIDs {
 		versionRows := grouped[versionID]
 		row := versionRows[0]
-		table, err := versionTableForAsset(batch.AssetType)
+		rowType, err := rowAssetType(batch, row)
+		if err != nil {
+			return nil, err
+		}
+		table, err := versionTableForAsset(rowType)
 		if err != nil {
 			return nil, err
 		}
@@ -117,7 +123,7 @@ func (withdrawer *PostgresDraftWithdrawer) WithdrawDraftsSelective(
 		if tag.RowsAffected() != 1 {
 			return nil, ErrImportConflict
 		}
-		if err := deleteOrphanIdentity(ctx, tx, batch, row.CreatedObjectID); err != nil {
+		if err := deleteOrphanIdentity(ctx, tx, rowType, row.CreatedObjectID); err != nil {
 			return nil, err
 		}
 	}
@@ -158,7 +164,7 @@ func versionTableForAsset(asset AssetType) (string, error) {
 		return "hierarchies", nil
 	case AssetRelationship:
 		return "relationships", nil
-	case AssetTerm:
+	case AssetTerm, AssetKnowledge:
 		return "business_term_versions", nil
 	case AssetCertifiedExample:
 		return "certified_example_versions", nil
@@ -214,16 +220,16 @@ func draftAndReleaseReferences(
 	return result, rows.Err()
 }
 
-func deleteOrphanIdentity(ctx context.Context, tx pgx.Tx, batch SemanticImport, objectID string) error {
+func deleteOrphanIdentity(ctx context.Context, tx pgx.Tx, assetType AssetType, objectID string) error {
 	var query string
-	switch batch.AssetType {
+	switch assetType {
 	case AssetMetric:
 		query = `DELETE FROM askdata.metrics AS identity WHERE id=$1 AND status='DRAFT'
 			AND NOT EXISTS(SELECT 1 FROM askdata.metric_versions WHERE metric_id=identity.id)`
 	case AssetMetricDimension:
 		query = `DELETE FROM askdata.metric_dimensions AS identity WHERE id=$1
 			AND NOT EXISTS(SELECT 1 FROM askdata.metric_dimension_versions WHERE metric_dimension_id=identity.id)`
-	case AssetTerm:
+	case AssetTerm, AssetKnowledge:
 		query = `DELETE FROM askdata.business_terms AS identity WHERE id=$1
 			AND NOT EXISTS(SELECT 1 FROM askdata.business_term_versions WHERE business_term_id=identity.id)`
 	case AssetCertifiedExample:

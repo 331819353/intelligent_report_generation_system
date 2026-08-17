@@ -94,7 +94,7 @@ export function DatasetAIDock({ hasProposal, existingDAG = false, children }: Da
       <span>AI</span>
     </button>
     <div className="dataset-ai-conversation" role="dialog" aria-label="AI 数据流助手">
-      <header className="dataset-ai-conversation-header"><span aria-hidden="true"><MagicWandIcon size={18} weight="fill" /></span><div><strong>AI 数据流助手</strong><small>{existingDAG ? hasProposal ? '继续调整组件方案，确认后应用修改' : '修改、新增或删除当前 DAG 组件' : hasProposal ? '对话调整方案，确认后生成到画布' : '分阶段确认并生成可编辑 DAG'}</small></div><button type="button" aria-label="关闭 AI 数据流助手" onClick={() => setOpen(false)}><XIcon size={16} weight="bold" /></button></header>
+      <header className="dataset-ai-conversation-header"><span aria-hidden="true"><MagicWandIcon size={18} weight="fill" /></span><div><strong>AI 数据流助手</strong><small>{existingDAG ? hasProposal ? '继续调整组件方案，确认后应用修改' : '修改、新增或删除当前画布组件' : hasProposal ? '对话调整方案，确认后生成到画布' : '分阶段确认并生成可编辑 DAG'}</small></div><button type="button" aria-label="关闭 AI 数据流助手" onClick={() => setOpen(false)}><XIcon size={16} weight="bold" /></button></header>
       {children}
     </div>
   </section>

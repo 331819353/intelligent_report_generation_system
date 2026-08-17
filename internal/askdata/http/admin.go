@@ -14,8 +14,10 @@ import (
 	"github.com/google/uuid"
 
 	"intelligent-report-generation-system/internal/askdata"
+	"intelligent-report-generation-system/internal/askdata/lineage"
 	"intelligent-report-generation-system/internal/askdata/registry"
 	registryimport "intelligent-report-generation-system/internal/askdata/registry/import"
+	"intelligent-report-generation-system/internal/askdata/retrieval"
 	"intelligent-report-generation-system/internal/auth"
 )
 
@@ -47,6 +49,17 @@ type semanticBulkCertifier interface {
 type semanticExporter interface {
 	Count(context.Context, registryimport.ExportSelection) (int, error)
 	Generate(context.Context, registryimport.ExportSelection) (registryimport.ExportArtifact, error)
+	GenerateBundle(context.Context, registryimport.ExportSelection) (registryimport.ExportArtifact, error)
+}
+
+type semanticImportJSONReporter interface {
+	Generate(context.Context, string, string, string) (registryimport.ImportReportJSON, error)
+}
+
+// semanticLineageBackend 是血缘图的读取与重建面。
+type semanticLineageBackend interface {
+	lineage.EdgeReader
+	Rebuild(context.Context, string, string) (int, error)
 }
 
 type adminIdempotencyProvider interface {
@@ -62,6 +75,9 @@ type ImportMutationServices struct {
 	ExportJobs      registryimport.ExportJobReader
 	ExportArtifacts registryimport.ImportObjectStorage
 	ReleaseReview   *registry.ReleaseReviewService
+	JSONReport      semanticImportJSONReporter
+	Lineage         semanticLineageBackend
+	Discovery       *retrieval.Facade
 }
 
 type AdminHandler struct {
@@ -87,6 +103,9 @@ type AdminHandler struct {
 	timeContractAdmin  registry.TimeContractAdminBackend
 	releaseComposer    registry.ReleaseComposer
 	rowAccessCoverage  registry.RowAccessCoverageBackend
+	jsonReport         semanticImportJSONReporter
+	lineageBackend     semanticLineageBackend
+	discovery          *retrieval.Facade
 }
 
 func NewAdminHandler(
@@ -149,6 +168,8 @@ func newProtectedAdminHandlerWithImports(
 		withdraw:    mutationServices.Withdraw, certify: mutationServices.Certify,
 		export: mutationServices.Export, exportJobs: mutationServices.ExportJobs,
 		exportArtifacts: mutationServices.ExportArtifacts, releaseReview: mutationServices.ReleaseReview,
+		jsonReport: mutationServices.JSONReport, lineageBackend: mutationServices.Lineage,
+		discovery: mutationServices.Discovery,
 	}
 	if additivity, ok := backend.(registry.AdditivityAdminBackend); ok {
 		handler.additivity = additivity
@@ -290,6 +311,38 @@ func newProtectedAdminHandlerWithImports(
 		mux.HandleFunc(
 			"POST /api/v1/askdata/semantic/imports",
 			handler.uploadImport,
+		)
+		// Bundle 导入合同的机器可读 JSON Schema：外部生成方与前端向导据此
+		// 构造 semantic-bundle/v1 文件。
+		mux.HandleFunc(
+			"GET /api/v1/askdata/semantic/imports/schema",
+			handler.getBundleSchema,
+		)
+	}
+	if handler.jsonReport != nil {
+		mux.HandleFunc(
+			"GET /api/v1/askdata/semantic/imports/{id}/rows",
+			handler.getImportRows,
+		)
+	}
+	if handler.discovery != nil {
+		mux.HandleFunc(
+			"POST /api/v1/askdata/semantic/retrieval",
+			handler.retrieveSemanticAssets,
+		)
+	}
+	if handler.lineageBackend != nil {
+		mux.HandleFunc(
+			"GET /api/v1/askdata/semantic/graph/neighbourhood",
+			handler.getLineageNeighbourhood,
+		)
+		mux.HandleFunc(
+			"POST /api/v1/askdata/semantic/graph/impact",
+			handler.getLineageImpact,
+		)
+		mux.HandleFunc(
+			"POST /api/v1/askdata/semantic/graph/rebuild",
+			handler.rebuildLineage,
 		)
 	}
 	if handler.importReads != nil {

@@ -7,7 +7,12 @@ import (
 )
 
 type Table struct {
-	ID                  string   `json:"id"`
+	ID string `json:"id"`
+	// OriginTableID links a virtual ODS dataset version back to the physical
+	// metadata asset it represents. Candidate de-duplication uses this provenance;
+	// a table name is never an asset identity because different sources may expose
+	// same-named tables with different fields or row scopes.
+	OriginTableID       string   `json:"originTableId,omitempty"`
 	DataSourceID        string   `json:"dataSourceId"`
 	DataSourceName      string   `json:"dataSourceName"`
 	DataSourceType      string   `json:"dataSourceType"`
@@ -42,6 +47,21 @@ type Table struct {
 	RefreshState string `json:"refreshState,omitempty"`
 	RefreshStage string `json:"refreshStage,omitempty"`
 	RefreshNote  string `json:"refreshNote,omitempty"`
+	// PrimaryKeyColumns / ForeignKeys are the declared key constraints captured at
+	// metadata sync. They are the strongest deterministic join evidence a raw
+	// table offers and feed the modeling blueprint's join candidates.
+	PrimaryKeyColumns []string     `json:"primaryKeyColumns,omitempty"`
+	ForeignKeys       []ForeignKey `json:"foreignKeys,omitempty"`
+}
+
+// ForeignKey is one declared FOREIGN KEY constraint. ReferencedTable is the
+// bare table name reported by the source (schema qualification is not
+// guaranteed), so consumers match it against table names, not ids.
+type ForeignKey struct {
+	Name              string   `json:"name,omitempty"`
+	Columns           []string `json:"columns"`
+	ReferencedTable   string   `json:"referencedTable"`
+	ReferencedColumns []string `json:"referencedColumns"`
 }
 type Column struct {
 	ID                  string   `json:"id"`
@@ -60,6 +80,10 @@ type Column struct {
 	ManualLocked        bool     `json:"manualLocked"`
 	AssetStatus         string   `json:"assetStatus"`
 	BusinessVersion     int64    `json:"businessVersion"`
+	// Declared key flags from the source schema (metadata_columns.is_*).
+	PrimaryKey bool `json:"primaryKey"`
+	ForeignKey bool `json:"foreignKey"`
+	Unique     bool `json:"unique"`
 }
 type Search struct {
 	Query, DataSourceID, SourceType, Status, Sensitivity, Tag, Visibility, ManagementStatus string

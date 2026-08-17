@@ -23,21 +23,25 @@ func NewPostgresExportCatalog(pool *pgxpool.Pool) *PostgresExportCatalog {
 
 type exportVersionContract struct {
 	table, identityColumn, releaseType string
+	// filter 是可选的版本行过滤片段（不带 AND 前缀）。TERM 与 KNOWLEDGE
+	// 共用 business_term_versions，靠 knowledge_kind 划分各自的导出范围。
+	filter string
 }
 
 var exportVersionContracts = map[AssetType]exportVersionContract{
-	AssetModel:            {"semantic_models", "model_id", "SEMANTIC_MODEL"},
-	AssetMeasure:          {"measures", "measure_id", "MEASURE"},
-	AssetMetric:           {"metric_versions", "metric_id", "METRIC"},
-	AssetMetricDimension:  {"metric_dimension_versions", "metric_dimension_id", "METRIC_DIMENSION"},
-	AssetDimension:        {"dimensions", "dimension_id", "DIMENSION"},
-	AssetMember:           {"dimension_members", "member_id", "MEMBER"},
-	AssetHierarchy:        {"hierarchies", "hierarchy_id", "HIERARCHY"},
-	AssetRelationship:     {"relationships", "relationship_id", "RELATIONSHIP"},
-	AssetTerm:             {"business_term_versions", "business_term_id", "BUSINESS_TERM"},
-	AssetCertifiedExample: {"certified_example_versions", "certified_example_id", "CERTIFIED_EXAMPLE"},
-	AssetKPIBundle:        {"kpi_bundle_versions", "kpi_bundle_id", "KPI_BUNDLE"},
-	AssetEvalCase:         {"evaluation_case_versions", "evaluation_case_asset_id", "EVAL_CASE"},
+	AssetModel:            {"semantic_models", "model_id", "SEMANTIC_MODEL", ""},
+	AssetMeasure:          {"measures", "measure_id", "MEASURE", ""},
+	AssetMetric:           {"metric_versions", "metric_id", "METRIC", ""},
+	AssetMetricDimension:  {"metric_dimension_versions", "metric_dimension_id", "METRIC_DIMENSION", ""},
+	AssetDimension:        {"dimensions", "dimension_id", "DIMENSION", ""},
+	AssetMember:           {"dimension_members", "member_id", "MEMBER", ""},
+	AssetHierarchy:        {"hierarchies", "hierarchy_id", "HIERARCHY", ""},
+	AssetRelationship:     {"relationships", "relationship_id", "RELATIONSHIP", ""},
+	AssetTerm:             {"business_term_versions", "business_term_id", "BUSINESS_TERM", "knowledge_kind='ALIAS'"},
+	AssetCertifiedExample: {"certified_example_versions", "certified_example_id", "CERTIFIED_EXAMPLE", ""},
+	AssetKPIBundle:        {"kpi_bundle_versions", "kpi_bundle_id", "KPI_BUNDLE", ""},
+	AssetEvalCase:         {"evaluation_case_versions", "evaluation_case_asset_id", "EVAL_CASE", ""},
+	AssetKnowledge:        {"business_term_versions", "business_term_id", "BUSINESS_TERM", "knowledge_kind<>'ALIAS'"},
 }
 
 func (catalog *PostgresExportCatalog) CountExportRows(
@@ -153,8 +157,8 @@ func selectedExportVersionIDs(
 			return []string{}, nil
 		}
 		query := fmt.Sprintf(`SELECT id::text FROM askdata.%s
-			WHERE domain_id=$1 AND status='CERTIFIED' AND id=ANY($2::uuid[])
-			ORDER BY id`, contract.table)
+			WHERE domain_id=$1 AND status='CERTIFIED' AND id=ANY($2::uuid[])%s
+			ORDER BY id`, contract.table, exportContractFilter(contract))
 		rows, err := tx.Query(ctx, query, selection.DomainID, pinned)
 		if err != nil {
 			return nil, err
@@ -180,15 +184,17 @@ func selectedExportVersionIDs(
 	var args []any
 	if selection.ReleaseID == "" {
 		query = fmt.Sprintf(`SELECT DISTINCT ON (%s) id::text
-			FROM askdata.%s WHERE domain_id=$1 AND status='CERTIFIED'
-			ORDER BY %s,version_no DESC,id DESC`, contract.identityColumn, contract.table, contract.identityColumn)
+			FROM askdata.%s WHERE domain_id=$1 AND status='CERTIFIED'%s
+			ORDER BY %s,version_no DESC,id DESC`, contract.identityColumn, contract.table,
+			exportContractFilter(contract), contract.identityColumn)
 		args = []any{selection.DomainID}
 	} else {
 		query = fmt.Sprintf(`SELECT version.id::text
 			FROM askdata.release_objects AS manifest
 			JOIN askdata.%s AS version ON version.id=manifest.object_version_id
-			WHERE manifest.release_id=$1 AND manifest.domain_id=$2 AND manifest.object_type=$3
-			ORDER BY version.%s,version.version_no,version.id`, contract.table, contract.identityColumn)
+			WHERE manifest.release_id=$1 AND manifest.domain_id=$2 AND manifest.object_type=$3%s
+			ORDER BY version.%s,version.version_no,version.id`, contract.table,
+			exportContractFilter(contract), contract.identityColumn)
 		args = []any{selection.ReleaseID, selection.DomainID, contract.releaseType}
 	}
 	rows, err := tx.Query(ctx, query, args...)
@@ -244,9 +250,18 @@ func loadExportRows(
 		return loadKPIBundleExportRows(ctx, tx, ids)
 	case AssetEvalCase:
 		return loadEvaluationCaseExportRows(ctx, tx, ids)
+	case AssetKnowledge:
+		return loadKnowledgeExportRows(ctx, tx, ids)
 	default:
 		return nil, 0, ErrExportInvalid
 	}
+}
+
+func exportContractFilter(contract exportVersionContract) string {
+	if contract.filter == "" {
+		return ""
+	}
+	return " AND " + contract.filter
 }
 
 func loadModelExportRows(ctx context.Context, tx pgx.Tx, ids []string) ([]map[string]string, int, error) {
@@ -567,21 +582,16 @@ func loadTermExportRows(ctx context.Context, tx pgx.Tx, ids []string) ([]map[str
 		    JOIN askdata.metrics AS metric ON metric.id=target.metric_id WHERE target.id=version.target_version_id)
 		  WHEN 'DIMENSION' THEN (SELECT target.code::text FROM askdata.dimensions AS target
 		    WHERE target.id=version.target_version_id)
-		  WHEN 'MEMBER' THEN (SELECT dimension.code::text||'::'||target.member_key
-		    FROM askdata.dimension_members AS target JOIN askdata.dimensions AS dimension
-		      ON dimension.id=target.dimension_version_id WHERE target.id=version.target_version_id)
+		  WHEN 'MEMBER' THEN askdata.resolve_member_export_target(version.target_version_id)
 		  WHEN 'TIME_CONTRACT' THEN (SELECT contract.code::text
 		    FROM askdata.time_contract_versions AS target JOIN askdata.time_contracts AS contract
 		      ON contract.id=target.time_contract_id WHERE target.id=version.target_version_id)
 		  ELSE version.target_code END,
 		version.match_mode,
 		COALESCE(version.match_pattern,''),version.priority,version.negative_contexts,
-		version.valid_from,version.valid_to,version.source,
-		COALESCE(member.sensitivity,'')
+		version.valid_from,version.valid_to,version.source
 		FROM askdata.business_term_versions AS version
 		JOIN askdata.business_terms AS identity ON identity.id=version.business_term_id
-		LEFT JOIN askdata.dimension_members AS member
-		  ON version.target_object_type='MEMBER' AND member.id=version.target_version_id
 		WHERE version.id=ANY($1::uuid[]) ORDER BY identity.term,identity.term_type,version.version_no`, ids)
 	if err != nil {
 		return nil, 0, err
@@ -590,29 +600,102 @@ func loadTermExportRows(ctx context.Context, tx pgx.Tx, ids []string) ([]map[str
 	result := []map[string]string{}
 	omitted := 0
 	for rows.Next() {
-		var term, termType, targetType, targetCode, matchMode, matchPattern string
-		var source, memberSensitivity string
+		var term, termType, targetType, matchMode, matchPattern, source string
+		var targetCode *string
 		var priority int
 		var negatives []string
 		var validFrom, validTo *time.Time
 		if err := rows.Scan(&term, &termType, &targetType, &targetCode,
 			&matchMode, &matchPattern, &priority, &negatives, &validFrom, &validTo,
-			&source, &memberSensitivity); err != nil {
+			&source); err != nil {
 			return nil, 0, err
 		}
-		if targetType == "MEMBER" && (memberSensitivity == "CONFIDENTIAL" || memberSensitivity == "RESTRICTED") {
+		// MEMBER 目标经 SECURITY DEFINER 解析：敏感成员返回 NULL，与导出的
+		// 敏感省略策略同一边界；其余目标解析为空是合同错误。
+		if targetType == "MEMBER" && (targetCode == nil || *targetCode == "") {
 			omitted++
 			continue
 		}
-		if targetCode == "" {
+		if targetCode == nil || *targetCode == "" {
 			return nil, 0, fmt.Errorf("%w: unresolved %s target", ErrExportContract, targetType)
 		}
 		_ = matchPattern
 		result = append(result, exportRow(AssetTerm,
-			"term", term, "termType", termType, "targetCode", targetCode,
+			"term", term, "termType", termType, "targetCode", *targetCode,
 			"matchMode", matchMode, "priority", strconv.Itoa(priority),
 			"negativeContexts", pipeJoin(negatives), "validFrom", exportTime(validFrom),
 			"validTo", exportTime(validTo), "source", source))
+	}
+	return result, omitted, rows.Err()
+}
+
+// loadKnowledgeExportRows 导出业务知识词条（knowledge_kind<>'ALIAS'）。目标
+// code 按当前对象解析，CONCEPT 目标导出为空 targetType/targetCode；敏感成员
+// 目标与词条导出同一省略策略。
+func loadKnowledgeExportRows(ctx context.Context, tx pgx.Tx, ids []string) ([]map[string]string, int, error) {
+	rows, err := tx.Query(ctx, `SELECT version.code::text,version.name,version.knowledge_kind,
+		version.authority,version.definition,version.aliases,version.relation,
+		version.target_object_type,
+		CASE version.target_object_type
+		  WHEN 'METRIC' THEN (SELECT metric.code::text FROM askdata.metric_versions AS target
+		    JOIN askdata.metrics AS metric ON metric.id=target.metric_id WHERE target.id=version.target_version_id)
+		  WHEN 'DIMENSION' THEN (SELECT target.code::text FROM askdata.dimensions AS target
+		    WHERE target.id=version.target_version_id)
+		  WHEN 'MEMBER' THEN askdata.resolve_member_export_target(version.target_version_id)
+		  WHEN 'TIME_CONTRACT' THEN (SELECT contract.code::text
+		    FROM askdata.time_contract_versions AS target JOIN askdata.time_contracts AS contract
+		      ON contract.id=target.time_contract_id WHERE target.id=version.target_version_id)
+		  ELSE '' END,
+		version.match_mode,version.priority,version.negative_contexts,
+		version.valid_from,version.valid_to
+		FROM askdata.business_term_versions AS version
+		WHERE version.id=ANY($1::uuid[])
+		ORDER BY version.code,version.version_no`, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	result := []map[string]string{}
+	omitted := 0
+	for rows.Next() {
+		var code, name, knowledgeKind, authority, body, relation string
+		var targetObjectType, matchMode string
+		var targetCode *string
+		var synonyms, negatives []string
+		var priority int
+		var validFrom, validTo *time.Time
+		if err := rows.Scan(&code, &name, &knowledgeKind, &authority, &body, &synonyms,
+			&relation, &targetObjectType, &targetCode, &matchMode, &priority,
+			&negatives, &validFrom, &validTo); err != nil {
+			return nil, 0, err
+		}
+		// 敏感成员目标由 SECURITY DEFINER 解析为 NULL：整条知识按省略处理。
+		if targetObjectType == "MEMBER" && (targetCode == nil || *targetCode == "") {
+			omitted++
+			continue
+		}
+		targetType := targetObjectType
+		switch targetObjectType {
+		case "CONCEPT", "OPERATOR", "LEGACY":
+			targetType = ""
+		case "TIME_CONTRACT":
+			targetType = "TIME"
+		}
+		resolvedTarget := ""
+		if targetType != "" {
+			if targetCode == nil || *targetCode == "" {
+				return nil, 0, fmt.Errorf("%w: unresolved %s target", ErrExportContract, targetObjectType)
+			}
+			resolvedTarget = *targetCode
+		}
+		result = append(result, exportRow(AssetKnowledge,
+			"code", code, "name", name, "knowledgeKind", knowledgeKind,
+			"authority", authority, "body", body, "synonyms", pipeJoin(synonyms),
+			"targetType", targetType, "targetCode", resolvedTarget,
+			"relation", relation, "matchMode", matchMode,
+			"priority", strconv.Itoa(priority),
+			"negativeContexts", pipeJoin(negatives),
+			"validFrom", exportTime(validFrom), "validTo", exportTime(validTo)))
 	}
 	return result, omitted, rows.Err()
 }

@@ -223,6 +223,7 @@ export function DomainAccessPage() {
 
   const enterableCount = items.filter(domain => joinedStatuses.has(domain.accessStatus)).length
   const availableCount = items.filter(domain => applyStatuses.has(domain.accessStatus)).length
+  const pendingCount = items.filter(domain => domain.accessStatus === 'PENDING').length
 
   const chooseView = (next: CatalogView) => {
     setView(next)
@@ -341,38 +342,17 @@ export function DomainAccessPage() {
     <section className="domain-access-page">
       <header className="domain-access-heading">
         <div className="domain-access-heading-copy">
-          <div className="domain-access-breadcrumb"><span>权限管理</span><CaretRight size={12} /><strong>领域权限</strong></div>
-          <h1>业务领域</h1>
-          <p>选择一个领域开始分析，或申请新的访问权限</p>
+          <h1>领域权限</h1>
+          <p>浏览业务领域、进入已授权领域或提交访问申请</p>
         </div>
       </header>
 
-      <div className="domain-access-toolbar">
-        <div className="domain-access-tabs" role="tablist" aria-label="领域目录视图">
-          {([
-            ['ALL', `全部 ${items.length}`],
-            ['ENTERABLE', `可进入 ${enterableCount}`],
-            ['AVAILABLE', `可申请 ${availableCount}`],
-            ['APPLICATIONS', `我的申请 ${applications.length}`],
-          ] as const).map(([value, label]) => <AppButton
-            text
-            type="button"
-            role="tab"
-            aria-selected={view === value}
-            className={view === value ? 'is-active' : ''}
-            key={value}
-            onClick={() => chooseView(value)}
-          >{label}</AppButton>)}
-        </div>
-        <div className="domain-access-tools">
-          <label className="domain-access-search">
-            <MagnifyingGlass size={18} aria-hidden="true" />
-            <input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索领域名称或编码" aria-label="搜索领域名称或编码" />
-            {query && <AppButton text circle type="button" aria-label="清空搜索" onClick={() => setQuery('')}><X size={14} /></AppButton>}
-          </label>
-          <AppButton link type="button" onClick={() => setShowIsolationNote(value => !value)}>了解领域隔离<CaretRight size={13} /></AppButton>
-        </div>
-      </div>
+      <section className="domain-access-summary" aria-label="领域权限概览">
+        <article><span className="is-blue"><Buildings size={20} weight="duotone" /></span><div><small>全部领域</small></div><strong>{items.length}</strong></article>
+        <article><span className="is-green"><CheckCircle size={20} weight="duotone" /></span><div><small>可进入</small></div><strong>{enterableCount}</strong></article>
+        <article><span className="is-cyan"><PaperPlaneTilt size={20} weight="duotone" /></span><div><small>可申请</small></div><strong>{availableCount}</strong></article>
+        <article><span className="is-orange"><Clock size={20} weight="duotone" /></span><div><small>审批中</small></div><strong>{pendingCount}</strong></article>
+      </section>
 
       {showIsolationNote && <div className="domain-access-isolation-note" role="status">
         <GlobeHemisphereWest size={20} weight="duotone" />
@@ -386,6 +366,36 @@ export function DomainAccessPage() {
 
       <div className={`domain-access-workspace ${selected && view !== 'APPLICATIONS' ? 'has-detail' : ''}`.trim()}>
         <section className="domain-access-table-panel" aria-label={view === 'APPLICATIONS' ? '我的领域申请' : '领域目录'}>
+          <header className="domain-access-card-header">
+            <div><span><GlobeHemisphereWest size={20} weight="duotone" /></span><div><h2>{view === 'APPLICATIONS' ? '我的申请' : '领域目录'}</h2><p>{view === 'APPLICATIONS' ? '查看申请进度、审批结果与处理说明' : '按领域查看访问状态、角色和授权入口'}</p></div></div>
+            <strong>{view === 'APPLICATIONS' ? visibleApplications.length : visibleItems.length} / {view === 'APPLICATIONS' ? applications.length : items.length} 项</strong>
+          </header>
+          <div className="domain-access-toolbar">
+            <div className="domain-access-tabs" role="tablist" aria-label="领域目录视图">
+              {([
+                ['ALL', '全部'],
+                ['ENTERABLE', '可进入'],
+                ['AVAILABLE', '可申请'],
+                ['APPLICATIONS', '我的申请'],
+              ] as const).map(([value, label]) => <AppButton
+                text
+                type="button"
+                role="tab"
+                aria-selected={view === value}
+                className={view === value ? 'is-active' : ''}
+                key={value}
+                onClick={() => chooseView(value)}
+              >{label}</AppButton>)}
+            </div>
+            <div className="domain-access-tools">
+              <label className="domain-access-search">
+                <MagnifyingGlass size={18} aria-hidden="true" />
+                <input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索领域名称或编码" aria-label="搜索领域名称或编码" />
+                {query && <AppButton text circle type="button" aria-label="清空搜索" onClick={() => setQuery('')}><X size={14} /></AppButton>}
+              </label>
+              <AppButton link type="button" onClick={() => setShowIsolationNote(value => !value)}>领域隔离说明<CaretRight size={13} /></AppButton>
+            </div>
+          </div>
           {view === 'APPLICATIONS'
             ? <>
               <div className="domain-application-header" role="row">

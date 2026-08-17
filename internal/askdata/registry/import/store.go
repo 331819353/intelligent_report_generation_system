@@ -75,17 +75,27 @@ const (
 	AssetCertifiedExample AssetType = "CERTIFIED_EXAMPLE"
 	AssetKPIBundle        AssetType = "KPI_BUNDLE"
 	AssetEvalCase         AssetType = "EVAL_CASE"
+	// AssetKnowledge 是业务知识分区的词条（落在 business_term_versions 的治理
+	// 列上）；AssetBundle 是 semantic-bundle/v1 的批级类型，行级类型在展开时
+	// 逐行确定，Bundle 本身永远不是行级类型。
+	AssetKnowledge AssetType = "KNOWLEDGE"
+	AssetBundle    AssetType = "BUNDLE"
 )
 
 func (value AssetType) Valid() bool {
 	switch value {
 	case AssetModel, AssetMeasure, AssetMetric, AssetMetricDimension, AssetDimension,
 		AssetMember, AssetHierarchy, AssetRelationship, AssetTerm,
-		AssetCertifiedExample, AssetKPIBundle, AssetEvalCase:
+		AssetCertifiedExample, AssetKPIBundle, AssetEvalCase, AssetKnowledge, AssetBundle:
 		return true
 	default:
 		return false
 	}
+}
+
+// ValidRowAssetType 是行级资产类型合同：BUNDLE 只是批级容器。
+func ValidRowAssetType(value AssetType) bool {
+	return value.Valid() && value != AssetBundle
 }
 
 type State string

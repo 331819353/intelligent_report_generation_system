@@ -33,9 +33,20 @@ func (handler *AdminHandler) requestSemanticExport(writer http.ResponseWriter, r
 	if !ok {
 		return
 	}
-	selection, err := parseSemanticExportSelection(request, scope)
+	selection, format, err := parseSemanticExportSelection(request, scope)
 	if err != nil {
 		writeImportError(writer, err)
+		return
+	}
+	if format == "json" {
+		// Bundle 导出是同步有界的（超限报 SEMANTIC_EXPORT_TOO_LARGE），
+		// 不进入异步 xlsx 作业通道。
+		artifact, err := handler.export.GenerateBundle(request.Context(), selection)
+		if err != nil {
+			writeImportError(writer, err)
+			return
+		}
+		writeSemanticExportArtifact(writer, artifact)
 		return
 	}
 	rowCount, err := handler.export.Count(request.Context(), selection)
@@ -148,37 +159,45 @@ func (handler *AdminHandler) downloadSemanticExport(writer http.ResponseWriter, 
 func parseSemanticExportSelection(
 	request *http.Request,
 	scope registry.AdminScope,
-) (registryimport.ExportSelection, error) {
+) (registryimport.ExportSelection, string, error) {
 	query := request.URL.Query()
 	want := 3
 	if _, exists := query["releaseId"]; exists {
 		want = 4
 	}
+	format := query.Get("format")
 	if len(query) != want || len(query["domainId"]) != 1 ||
 		len(query["assetTypes"]) != 1 || len(query["format"]) != 1 ||
-		(want == 4 && len(query["releaseId"]) != 1) || query.Get("format") != "xlsx" {
-		return registryimport.ExportSelection{}, registryimport.ErrExportInvalid
+		(want == 4 && len(query["releaseId"]) != 1) ||
+		(format != "xlsx" && format != "json") {
+		return registryimport.ExportSelection{}, "", registryimport.ErrExportInvalid
 	}
 	domainID := query.Get("domainId")
 	parsedDomain, err := uuid.Parse(domainID)
 	if err != nil || parsedDomain.String() != domainID || domainID != scope.DomainID {
-		return registryimport.ExportSelection{}, registry.ErrRegistryPermissionDenied
+		return registryimport.ExportSelection{}, "", registry.ErrRegistryPermissionDenied
 	}
 	rawTypes := query.Get("assetTypes")
 	parts := strings.Split(rawTypes, ",")
 	if rawTypes == "" || len(parts) > registryimport.MaxExportAssetTypes {
-		return registryimport.ExportSelection{}, registryimport.ErrExportInvalid
+		return registryimport.ExportSelection{}, "", registryimport.ErrExportInvalid
 	}
 	assetTypes := make([]registryimport.AssetType, 0, len(parts))
 	seen := map[registryimport.AssetType]struct{}{}
 	for _, rawType := range parts {
 		assetType := registryimport.AssetType(rawType)
 		if rawType == "" || rawType != strings.ToUpper(rawType) ||
-			strings.TrimSpace(rawType) != rawType || !assetType.Valid() {
-			return registryimport.ExportSelection{}, registryimport.ErrExportInvalid
+			strings.TrimSpace(rawType) != rawType || !assetType.Valid() ||
+			assetType == registryimport.AssetBundle {
+			return registryimport.ExportSelection{}, "", registryimport.ErrExportInvalid
+		}
+		// Bundle 合同只覆盖四分区语义资产；评测与认证问法有独立的导出通道。
+		if format == "json" && (assetType == registryimport.AssetCertifiedExample ||
+			assetType == registryimport.AssetEvalCase) {
+			return registryimport.ExportSelection{}, "", registryimport.ErrExportInvalid
 		}
 		if _, duplicate := seen[assetType]; duplicate {
-			return registryimport.ExportSelection{}, registryimport.ErrExportInvalid
+			return registryimport.ExportSelection{}, "", registryimport.ErrExportInvalid
 		}
 		seen[assetType] = struct{}{}
 		assetTypes = append(assetTypes, assetType)
@@ -187,15 +206,57 @@ func parseSemanticExportSelection(
 	if releaseID != "" {
 		parsedRelease, err := uuid.Parse(releaseID)
 		if err != nil || parsedRelease.String() != releaseID {
-			return registryimport.ExportSelection{}, registryimport.ErrExportInvalid
+			return registryimport.ExportSelection{}, "", registryimport.ErrExportInvalid
 		}
 	} else if want == 4 {
-		return registryimport.ExportSelection{}, registryimport.ErrExportInvalid
+		return registryimport.ExportSelection{}, "", registryimport.ErrExportInvalid
 	}
 	return registryimport.ExportSelection{
 		TenantID: scope.TenantID, DomainID: domainID, ActorID: scope.ActorID,
 		ReleaseID: releaseID, AssetTypes: registryimport.CanonicalAssetTypes(assetTypes),
-	}, nil
+	}, format, nil
+}
+
+// getBundleSchema 发布 semantic-bundle/v1 的机器可读 JSON Schema。
+func (handler *AdminHandler) getBundleSchema(writer http.ResponseWriter, request *http.Request) {
+	if _, ok := handler.resolveScope(writer, request); !ok {
+		return
+	}
+	if request.URL.RawQuery != "" {
+		writeImportError(writer, registryimport.ErrImportUploadInvalid)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/schema+json")
+	writer.Header().Set("Content-Length", strconv.Itoa(len(registry.SemanticBundleSchema)))
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(registry.SemanticBundleSchema)
+}
+
+// getImportRows 返回导入批的行级 JSON 事实：裁决（create/update/unchanged/
+// failed）、逐行问题与检索就绪派生状态，供导入向导渲染。
+func (handler *AdminHandler) getImportRows(writer http.ResponseWriter, request *http.Request) {
+	scope, ok := handler.resolveScope(writer, request)
+	if !ok {
+		return
+	}
+	if request.URL.RawQuery != "" {
+		writeImportError(writer, registryimport.ErrImportReportInvalid)
+		return
+	}
+	importID := request.PathValue("id")
+	parsedID, err := uuid.Parse(importID)
+	if err != nil || parsedID.String() != importID {
+		writeImportError(writer, registryimport.ErrImportReportInvalid)
+		return
+	}
+	report, err := handler.jsonReport.Generate(
+		request.Context(), scope.TenantID, scope.DomainID, importID,
+	)
+	if err != nil {
+		writeImportError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, report)
 }
 
 func parseSemanticExportJobRequest(
