@@ -151,13 +151,15 @@ func Validate(document Document) error {
 	} else {
 		validateLayerContract(&issues, document)
 	}
+	// sourceMode 是历史兼容标记：只接受早期分类器写入的 PRE_AGGREGATED，且它
+	// 只能出现在源表直落的 DWS 上；血缘本身由拓扑决定，不依赖该标记。
 	if document.Dataset.SourceMode != "" &&
 		document.Dataset.SourceMode != SourceModePreAggregated {
-		add("dataset.sourceMode", "仅支持 PRE_AGGREGATED")
+		add("dataset.sourceMode", "sourceMode 为遗留字段，仅接受 PRE_AGGREGATED")
 	}
 	if document.Dataset.SourceMode == SourceModePreAggregated &&
-		document.Dataset.Layer != LayerDWS {
-		add("dataset.sourceMode", "PRE_AGGREGATED 只能用于源端已汇总的 DWS")
+		(document.Dataset.Layer != LayerDWS || document.Lineage() != LineageSource) {
+		add("dataset.sourceMode", "PRE_AGGREGATED 只能标记源表直落的 DWS")
 	}
 	if document.Dataset.SemanticContractVersion != "" &&
 		document.Dataset.SemanticContractVersion != "1.0" {
@@ -625,16 +627,50 @@ func (layer Layer) Valid() bool {
 		layer == LayerDWS || layer == LayerADS
 }
 
-// validateLayerContract 校验仅依赖当前 DSL 的层级合同。跨数据集版本的上游层级
-// 由 ValidateLayerDependencies 在仓储解析精确发布版本后补充校验。
+// validateLayerContract 校验仅依赖当前 DSL 的层级合同。层级只约束输出粒度；
+// 血缘方式决定拓扑要求：
+//
+//   - SOURCE 血缘（单个物理 TABLE、无 Join）可以直落任何层级，但必须保持源表
+//     既有粒度：不允许去重、分组或再次聚合。ODS 只允许这种血缘。
+//   - MODELED 血缘（显式声明层级的 DIM/DWD/DWS/ADS）只能引用已发布数据集版本；
+//     跨版本的上游层级方向由 ValidateLayerDependencies 在仓储解析后补充校验。
+//
+// 未显式声明 layer 的历史正文按稳定推断结果 grandfather，不施加拓扑要求。
 func validateLayerContract(issues *[]ValidationIssue, document Document) {
 	add := func(path, reason string) {
 		*issues = append(*issues, ValidationIssue{Path: path, Reason: reason})
 	}
 	hasAggregation := documentHasBusinessAggregation(document)
 	hasGrouping := len(document.GroupBy) > 0 || len(document.Having) > 0 || len(document.PreAggregations) > 0
-	preAggregatedSource := IsPreAggregatedSourceMapping(document)
-	switch document.Dataset.Layer {
+	source := document.Lineage() == LineageSource
+	layer := document.Dataset.Layer
+
+	// 未声明 layer 的历史单表聚合正文按 DWS 推断并继续 grandfather；显式声明层级的
+	// 新文档必须遵守直落粒度合同。
+	if source && layer != LayerODS && document.layerSpecified {
+		if document.Dataset.Type != "SINGLE_SOURCE" || document.Distinct ||
+			hasGrouping || hasAggregation {
+			add("dataset.layer", fmt.Sprintf(
+				"%s 源表直落必须保持物理表既有粒度，不允许去重、分组或再次聚合；需要改变粒度请先落 ODS 再分层建模",
+				layer,
+			))
+		}
+	}
+	requireModeledUpstreams := func(expected string) {
+		if !document.layerSpecified || source {
+			return
+		}
+		for index, node := range document.Nodes {
+			if node.Type != "DATASET" {
+				add(fmt.Sprintf("nodes[%d].type", index), fmt.Sprintf(
+					"分层建模的 %s 只能引用已发布 %s 数据集版本；物理表请以单表源直落方式声明层级",
+					layer, expected,
+				))
+			}
+		}
+	}
+
+	switch layer {
 	case LayerODS:
 		if document.Distinct {
 			add("distinct", "ODS 不允许改变源表行粒度")
@@ -649,13 +685,7 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 			add("dataset.layer", "ODS 不允许分组或聚合")
 		}
 	case LayerDIM:
-		if document.layerSpecified {
-			for index, node := range document.Nodes {
-				if node.Type != "DATASET" {
-					add(fmt.Sprintf("nodes[%d].type", index), "显式 DIM 只能引用已发布 ODS 数据集版本")
-				}
-			}
-		}
+		requireModeledUpstreams("ODS")
 		if hasGrouping || hasAggregation {
 			add("dataset.layer", "DIM 保存实体说明信息，不允许业务分组或聚合")
 		}
@@ -666,13 +696,7 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 		if document.Distinct {
 			add("distinct", "DWD 必须保留事实明细，不能去重")
 		}
-		if document.layerSpecified {
-			for index, node := range document.Nodes {
-				if node.Type != "DATASET" {
-					add(fmt.Sprintf("nodes[%d].type", index), "显式 DWD 只能引用已发布 ODS 或 DIM 数据集版本")
-				}
-			}
-		}
+		requireModeledUpstreams("ODS 或 DIM")
 		if (hasGrouping || hasAggregation) && !document.sourcePreview {
 			add("dataset.layer", "DWD 必须保持明细粒度，不允许业务分组或聚合")
 		}
@@ -680,24 +704,15 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 		if document.Distinct {
 			add("distinct", "DWS 使用显式聚合合同，不能使用 DIM 去重开关")
 		}
-		if document.layerSpecified && !preAggregatedSource {
-			for index, node := range document.Nodes {
-				if node.Type != "DATASET" {
-					add(fmt.Sprintf("nodes[%d].type", index), "显式 DWS 只能引用已发布 DWD 或 DIM 数据集版本")
-				}
-			}
-		}
+		requireModeledUpstreams("DWD 或 DIM")
 		if document.OutputGrain.Description == "" || len(document.OutputGrain.KeyFields) == 0 {
 			add("outputGrain", "DWS 必须显式声明输出业务粒度和粒度键")
 		}
-		if preAggregatedSource {
-			if document.Dataset.Type != "SINGLE_SOURCE" || len(document.Nodes) != 1 ||
-				document.Nodes[0].Type != "TABLE" || len(document.Joins) > 0 ||
-				hasGrouping || hasAggregation || document.Distinct {
-				add("dataset.sourceMode", "PRE_AGGREGATED DWS 必须保持单个物理表的既有汇总粒度")
-			}
-			if !documentHasMeasureField(document) {
-				add("fields", "PRE_AGGREGATED DWS 至少需要一个度量字段")
+		if source {
+			// 直落的 DWS 由源表提供既有汇总度量；历史单表聚合正文（未声明层级）
+			// 仍以其聚合表达式满足要求。
+			if !documentHasMeasureField(document) && !hasAggregation {
+				add("fields", "源表直落的 DWS 至少需要一个度量字段")
 			}
 		} else if !hasAggregation {
 			add("dataset.layer", "DWS 至少需要一个聚合指标")
@@ -706,13 +721,7 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 		if document.Distinct {
 			add("distinct", "ADS 不允许使用 DIM 去重开关")
 		}
-		if document.layerSpecified {
-			for index, node := range document.Nodes {
-				if node.Type != "DATASET" {
-					add(fmt.Sprintf("nodes[%d].type", index), "显式 ADS 只能引用已发布 DWS 数据集版本")
-				}
-			}
-		}
+		requireModeledUpstreams("DWS")
 		if document.OutputGrain.Description == "" || len(document.OutputGrain.KeyFields) == 0 {
 			add("outputGrain", "ADS 必须显式声明面向消费场景的输出粒度和粒度键")
 		}
@@ -723,25 +732,23 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 	}
 }
 
-// IsPreAggregatedSourceMapping identifies the narrow server-owned exception
-// used when a physical source table already represents aggregate rows.
-func IsPreAggregatedSourceMapping(document Document) bool {
-	return document.Dataset.Layer == LayerDWS &&
-		document.Dataset.SourceMode == SourceModePreAggregated
+// Lineage 由 DSL 拓扑推导血缘方式：恰好一个物理 TABLE 节点且没有 Join 是
+// SOURCE（源表直落）；否则是 MODELED（分层加工，含未声明层级的历史多表正文）。
+func (document Document) Lineage() Lineage {
+	if len(document.Nodes) == 1 &&
+		document.Nodes[0].Type == "TABLE" &&
+		len(document.Joins) == 0 {
+		return LineageSource
+	}
+	return LineageModeled
 }
 
-// IsSourceBackedMaterialization identifies the only datasets that may copy a
-// physical source directly into a warehouse layer. ODS preserves source rows;
-// PRE_AGGREGATED DWS preserves a source-side aggregate grain. Both contracts
-// must remain a single trusted TABLE node without joins.
+// IsSourceBackedMaterialization identifies datasets that copy a physical source
+// directly into a warehouse layer: the SOURCE lineage. The declared layer only
+// names the grain the source rows already carry; the build plan is always one
+// frozen extract, one run-scoped stage, then one atomic materialization.
 func IsSourceBackedMaterialization(document Document) bool {
-	if document.Dataset.Layer != LayerODS &&
-		!IsPreAggregatedSourceMapping(document) {
-		return false
-	}
-	return len(document.Nodes) == 1 &&
-		document.Nodes[0].Type == "TABLE" &&
-		len(document.Joins) == 0
+	return document.Lineage() == LineageSource
 }
 
 // EnableSourceBackedMaterialization upgrades legacy published source mappings

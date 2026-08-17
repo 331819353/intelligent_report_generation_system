@@ -506,18 +506,26 @@ func (store *PostgresStore) Activate(
 			return err
 		}
 		var versionLayer, versionStatus, versionSchemaHash string
-		if err := tx.QueryRow(ctx, `SELECT layer,status,schema_hash
-			FROM platform.dataset_versions
-			WHERE id=$1 AND dataset_id=$2 FOR SHARE`,
+		var ownerDeleted bool
+		// The owning dataset must still be live: a build that outlives a soft
+		// delete must not resurrect a warehouse relation the cleanup job has
+		// already dropped or is about to drop.
+		if err := tx.QueryRow(ctx, `SELECT version.layer,version.status,version.schema_hash,
+				owner.deleted_at IS NOT NULL
+			FROM platform.dataset_versions AS version
+			JOIN platform.datasets AS owner
+			  ON owner.id=version.dataset_id AND owner.tenant_id=version.tenant_id
+			WHERE version.id=$1 AND version.dataset_id=$2
+			FOR SHARE OF version,owner`,
 			claim.DatasetVersionID, claim.DatasetID).
-			Scan(&versionLayer, &versionStatus, &versionSchemaHash); err != nil {
+			Scan(&versionLayer, &versionStatus, &versionSchemaHash, &ownerDeleted); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNotFound
 			}
 			return err
 		}
 		if versionLayer != string(claim.Layer) ||
-			versionStatus != "PUBLISHED" ||
+			versionStatus != "PUBLISHED" || ownerDeleted ||
 			versionSchemaHash != activation.SchemaHash {
 			return ErrConflict
 		}

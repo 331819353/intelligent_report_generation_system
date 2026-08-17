@@ -73,7 +73,7 @@ func (s *PostgresStore) SetPublicationCommitSink(sink PublicationCommitSink) {
 	s.publicationSink = sink
 }
 
-// SetMappedPublicationCommitSink 接入源端 ODS/DWS 发布后的全量入仓 outbox。
+// SetMappedPublicationCommitSink 接入 SOURCE 血缘（任意层级单表直落）发布后的全量入仓 outbox。
 func (s *PostgresStore) SetMappedPublicationCommitSink(sink MappedPublicationCommitSink) {
 	s.mappedPublicationSink = sink
 }
@@ -136,9 +136,6 @@ func createDatasetTxWithOptions(
 	originTableID string,
 	options derivedWriteOptions,
 ) (string, error) {
-	if prepared.Document.Dataset.SourceMode != "" && originTableID == "" {
-		return "", fmt.Errorf("%w: sourceMode is reserved for mapped physical sources", ErrInvalidDocument)
-	}
 	var datasetID, versionID string
 	if err := tx.QueryRow(ctx, `INSERT INTO platform.datasets(
 		tenant_id,code,name,description,dataset_type,layer,origin_table_id,
@@ -303,12 +300,10 @@ func (s *PostgresStore) List(ctx context.Context, tenantID string, limit, offset
 func (s *PostgresStore) Update(ctx context.Context, tenantID, actorID, id string, input UpdateInput, prepared Prepared) (Record, error) {
 	err := database.WithTenantTx(ctx, s.pool, tenantID, func(tx pgx.Tx) error {
 		var version int64
-		var versionID, originTableID, currentSourceMode string
+		var versionID string
 		// 行锁把版本检查、草稿覆盖和派生索引重建串成一个原子操作；expectedVersion
 		// 防止后保存的浏览器静默覆盖另一位用户已经提交的草稿。
-		err := tx.QueryRow(ctx, `SELECT dataset.version,dataset.current_draft_version_id::text,
-			COALESCE(dataset.origin_table_id::text,''),
-			COALESCE(draft.dsl_json#>>'{dataset,sourceMode}','')
+		err := tx.QueryRow(ctx, `SELECT dataset.version,dataset.current_draft_version_id::text
 			FROM platform.datasets AS dataset
 			JOIN platform.dataset_versions AS draft
 			  ON draft.id=dataset.current_draft_version_id
@@ -316,7 +311,7 @@ func (s *PostgresStore) Update(ctx context.Context, tenantID, actorID, id string
 			 AND draft.tenant_id=dataset.tenant_id
 			WHERE dataset.id::text=$1 AND dataset.deleted_at IS NULL
 			FOR UPDATE OF dataset,draft`, id).
-			Scan(&version, &versionID, &originTableID, &currentSourceMode)
+			Scan(&version, &versionID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -325,15 +320,6 @@ func (s *PostgresStore) Update(ctx context.Context, tenantID, actorID, id string
 		}
 		if version != input.ExpectedVersion {
 			return ErrConflict
-		}
-		if prepared.Document.Dataset.SourceMode != "" && originTableID == "" {
-			return ErrInvalidDocument
-		}
-		if string(prepared.Document.Dataset.SourceMode) != currentSourceMode {
-			// sourceMode is assigned only by the trusted physical-table classifier.
-			// Human edits may preserve the mapped mode, but cannot promote an ODS
-			// source to DWS or turn a modeled dataset into a source mapping.
-			return ErrInvalidDocument
 		}
 		var draftRecordVersion int64
 		err = tx.QueryRow(ctx, `UPDATE platform.dataset_versions SET layer=$1,dsl_json=$2,schema_hash=$3,logical_plan_json=$4,plan_hash=$5,record_version=record_version+1,updated_by=$6 WHERE id=$7 AND status='DRAFT' RETURNING record_version`,
@@ -981,19 +967,19 @@ func (s *PostgresStore) enqueuePublicationProcessing(
 	tenantID, actorID string,
 	record VersionRecord,
 ) error {
-	if record.Layer == LayerODS || record.Layer == LayerDWS {
-		document, err := DecodeAndNormalize(record.DSL)
-		if err != nil {
-			return err
+	document, err := DecodeAndNormalize(record.DSL)
+	if err != nil {
+		return err
+	}
+	// SOURCE 血缘（任意层级的单表直落）走源抽取物化：物理表按声明层级原样落仓，
+	// 没有可解析的上游数据集版本。MODELED 血缘继续走指标候选提取与治理物化。
+	if IsSourceBackedMaterialization(document) {
+		if s.mappedPublicationSink == nil {
+			return errors.New("source-backed dataset materialization sink is not configured")
 		}
-		if IsSourceBackedMaterialization(document) {
-			if s.mappedPublicationSink == nil {
-				return errors.New("source-backed dataset materialization sink is not configured")
-			}
-			return s.mappedPublicationSink.EnqueueMappedDatasetMaterializationTx(
-				ctx, tx, tenantID, actorID, record,
-			)
-		}
+		return s.mappedPublicationSink.EnqueueMappedDatasetMaterializationTx(
+			ctx, tx, tenantID, actorID, record,
+		)
 	}
 	if s.publicationSink != nil {
 		if err := s.publicationSink.EnqueueDatasetMetricExtractionTx(

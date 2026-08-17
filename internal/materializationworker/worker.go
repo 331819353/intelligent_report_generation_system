@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"intelligent-report-generation-system/internal/materialization"
+	"intelligent-report-generation-system/internal/querycompiler"
 	"intelligent-report-generation-system/internal/warehouse"
 )
 
@@ -64,6 +65,11 @@ func (worker *Worker) ProcessNext(
 	go worker.heartbeat(heartbeatCtx, cancelWork, *claim, lease, heartbeatDone)
 
 	resolved, err := worker.resolver.Resolve(workCtx, *claim)
+	// Whatever the outcome, run-scoped staging tables are transient copies of
+	// the source and are dropped once the run reaches a terminal state. The
+	// discard is best-effort: it never changes the run outcome and a stale run
+	// can still be reclaimed idempotently on retry.
+	defer worker.discardStaging(ctx, *claim, resolved.Tables)
 	var activation materialization.Activation
 	var failureQuality []materialization.QualityResult
 	if err == nil {
@@ -166,6 +172,24 @@ func (worker *Worker) ProcessNext(
 		return true, heartbeatErr
 	}
 	return true, activateErr
+}
+
+// discardStaging drops the run-scoped staging tables of a finished run when the
+// builder supports it. Errors are deliberately swallowed: the run outcome has
+// already been recorded and a leftover staging table is reclaimed by the next
+// build of the same run identity.
+func (worker *Worker) discardStaging(
+	ctx context.Context,
+	claim materialization.Claim,
+	tables map[string]querycompiler.TableRef,
+) {
+	discarder, ok := worker.builder.(StagingDiscarder)
+	if !ok || len(tables) == 0 {
+		return
+	}
+	discardCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	_ = discarder.DiscardStaging(discardCtx, claim.TenantID, claim.ID, tables)
 }
 
 func (worker *Worker) heartbeat(

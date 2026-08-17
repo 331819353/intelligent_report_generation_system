@@ -24,6 +24,7 @@ import {
   SignOut,
   SpinnerGap,
   Stack,
+  TreeStructure,
   UserCircle,
   WarningCircle,
   X,
@@ -108,7 +109,14 @@ function domainRoleLabel(domain: BusinessDomain, subject: string, snapshot: bool
 const navigation: NavItem[] = [
   { label: '分析首页', to: '/home', icon: House },
   { label: '智能问数', to: '/ask-data', icon: ChatCircleDots },
-  { label: '智能报告', to: '/reports', icon: FileText },
+  {
+    label: '智能报告',
+    icon: FileText,
+    children: [
+      { label: '报告中心', to: '/reports', icon: FileText },
+      { label: '模板中心', to: '/report-templates', icon: TreeStructure },
+    ],
+  },
   {
     label: '数据资产',
     icon: Database,
@@ -190,6 +198,7 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
   const [canManage, setCanManage] = useState<boolean | null>(designSnapshot ? true : hasRealAccessToken ? null : false)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [openNavigationBranches, setOpenNavigationBranches] = useState<Record<string, boolean>>(() => ({
+    智能报告: navigationItemIsActive(location.pathname, '/reports') || navigationItemIsActive(location.pathname, '/report-templates'),
     数据资产: navigationItemIsActive(location.pathname, '/data-sources') || navigationItemIsActive(location.pathname, '/datasets'),
     语义资产: navigationItemIsActive(location.pathname, '/semantic'),
     权限管理: location.pathname === '/domain-access' || location.pathname === '/platform-management/users',

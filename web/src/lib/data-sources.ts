@@ -233,6 +233,8 @@ export type DataSourceTableRecord = {
   businessName: string
   businessDescription: string
   tags: string[]
+  /** 由“层级:”标签派生的数仓层级；元数据清洗判定，人工可改（见 lib/warehouse-layer.ts）。 */
+  warehouseLayer?: 'ODS' | 'DIM' | 'DWD' | 'DWS' | 'ADS'
   sensitivityLevel: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED'
   visibility: 'PRIVATE' | 'TENANT_PUBLIC'
   assetStatus?: string

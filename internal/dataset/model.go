@@ -18,8 +18,16 @@ const (
 	GroupByModeSets     GroupByMode = "GROUPING_SETS"
 )
 
-// Layer 是数据资产在数仓加工链路中的稳定层级。它与 SINGLE_SOURCE/CROSS_SOURCE
-// 的物理来源分类正交：前者描述加工语义，后者描述执行时涉及的数据源数量。
+// Layer 是数据集的粒度合同：它只回答“这个数据集的一行代表什么”，不再规定
+// 数据集必须由哪一层加工而来。层级与血缘方式（Lineage）正交：
+//
+//	ODS  贴源粒度：与物理源表逐行一致，不改变源表行粒度。
+//	DIM  实体粒度：一行一个业务实体，必须声明实体粒度与业务键，不做业务聚合。
+//	DWD  明细粒度：一行一个业务事实/事件，不去重、不聚合，可关联维度。
+//	DWS  汇总粒度：一行一个汇总统计粒度，必须声明粒度键并至少携带一个度量。
+//	ADS  应用粒度：面向消费场景的输出粒度，必须声明粒度键；语义合同 1.0 需绑定消费合同。
+//
+// 它与 SINGLE_SOURCE/CROSS_SOURCE 同样正交：后者只描述执行时涉及的数据源数量。
 type Layer string
 
 const (
@@ -30,11 +38,29 @@ const (
 	LayerADS Layer = "ADS"
 )
 
-// SourceMode marks a system-owned physical source whose rows already carry a
-// governed analytical grain. PRE_AGGREGATED is intentionally distinct from a
-// modeled DWS: it preserves the source rows instead of aggregating DWD inputs.
+// Lineage 是数据集的血缘方式，由 DSL 拓扑推导，不单独持久化：
+//
+//	SOURCE   源表直落：恰好一个物理 TABLE 节点、无 Join。物理表（含导入表、既有
+//	         宽表）按声明层级直接进入数仓，保持源表既有粒度；五个层级都可以直落。
+//	MODELED  分层加工：全部节点引用已发布数据集版本，上游层级必须满足
+//	         ODS→DIM/DWD→DWS→ADS 的方向约束（见 ValidateLayerDependencies）。
+//
+// 完整链路仍然是标准建模路径；直落只是把“进入数仓的层级”交给声明者决定，
+// 层级本身的粒度合同对两种血缘一视同仁。
+type Lineage string
+
+const (
+	LineageSource  Lineage = "SOURCE"
+	LineageModeled Lineage = "MODELED"
+)
+
+// SourceMode 是遗留兼容标记。早期版本只允许 ODS 直落，源端已汇总的物理表需要
+// 服务端分类器写入 PRE_AGGREGATED 才能以 DWS 直落；现在任何单表源直落都是
+// 一等血缘，该标记不再承担校验职责。已发布 DSL 继续原样解码与编码以保持
+// 内容哈希稳定；新文档不再写入。
 type SourceMode string
 
+// SourceModePreAggregated 仅为解码历史 DSL 保留，语义等价于 SOURCE 血缘的 DWS。
 const SourceModePreAggregated SourceMode = "PRE_AGGREGATED"
 
 // PublicationOrigin 是数据库持久化的不可变发布来源。调用方不能在请求或
@@ -162,7 +188,8 @@ type Descriptor struct {
 	Subject                 string       `json:"subject,omitempty"`
 	Type                    string       `json:"type"`
 	Layer                   Layer        `json:"layer,omitempty"`
-	SourceMode              SourceMode   `json:"sourceMode,omitempty"`
+	// SourceMode 只为历史 DSL 保留（见 SourceMode 类型说明）；血缘方式请用 Document.Lineage()。
+	SourceMode SourceMode `json:"sourceMode,omitempty"`
 	SemanticContractVersion string       `json:"semanticContractVersion,omitempty"`
 	ConsumerContractID      string       `json:"consumerContractId,omitempty"`
 	Grain                   *OutputGrain `json:"grain,omitempty"`

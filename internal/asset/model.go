@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"intelligent-report-generation-system/internal/warehouselayer"
 )
 
 type Table struct {
@@ -25,8 +27,11 @@ type Table struct {
 	BusinessName        string   `json:"businessName"`
 	BusinessDescription string   `json:"businessDescription"`
 	Tags                []string `json:"tags"`
-	SensitivityLevel    string   `json:"sensitivityLevel"`
-	Visibility          string   `json:"visibility"`
+	// WarehouseLayer 是从“层级:”标签派生的数仓层级（ODS/DIM/DWD/DWS/ADS）。
+	// 元数据清洗时判定，人工可通过改写标签修改；它是该表默认映射数据集的首选层级。
+	WarehouseLayer   string `json:"warehouseLayer,omitempty"`
+	SensitivityLevel string `json:"sensitivityLevel"`
+	Visibility       string `json:"visibility"`
 	// ManualLocked 仅用于兼容历史表记录的数据库扫描，不再作为表级业务能力暴露。
 	ManualLocked     bool   `json:"-"`
 	AssetStatus      string `json:"assetStatus"`
@@ -166,8 +171,13 @@ func (m BusinessMetadata) Validate(column bool) error {
 			return errors.New("invalid tag")
 		}
 	}
+	// 人工可以改写清洗给出的层级判断，但表资产至多一个合法层级标签，字段不携带。
+	if err := warehouselayer.Validate(m.Tags, column, false); err != nil {
+		return err
+	}
 	return nil
 }
+
 
 func (m ManualCompletionInput) Validate() error {
 	if m.ExpectedVersion <= 0 {

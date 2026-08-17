@@ -43,8 +43,9 @@ type odsProjector interface {
 
 // ODSResolver reloads a published single-table source-backed contract,
 // validates its frozen SOURCE input and stages the exact remote/file version
-// into PostgreSQL. It serves ODS and PRE_AGGREGATED DWS only, and never accepts
-// physical names, SQL or connection details from the claim.
+// into PostgreSQL. It serves the SOURCE lineage of every layer (a single
+// physical table declared at its existing grain), and never accepts physical
+// names, SQL or connection details from the claim.
 type ODSResolver struct {
 	pool            *pgxpool.Pool
 	databaseStagers map[datasource.Type]databaseStager
@@ -76,8 +77,8 @@ func (resolver *ODSResolver) SetDatabaseStager(sourceType datasource.Type, stage
 }
 
 // CompositeResolver keeps warehouse-input resolution separate from source
-// extraction. Layer identity and the source-backed DWS exception are loaded
-// again by each concrete resolver.
+// extraction. Layer identity and every explicit source-backed exception are
+// loaded again by each concrete resolver.
 type CompositeResolver struct {
 	ods      Resolver
 	postgres Resolver
@@ -195,7 +196,10 @@ func validateSourceClaim(claim materialization.Claim) error {
 		claim.Plan.Layer != claim.Layer ||
 		claim.Plan.Mode != claim.Mode ||
 		(claim.Layer != materialization.LayerODS &&
-			claim.Layer != materialization.LayerDWS) {
+			claim.Layer != materialization.LayerDIM &&
+			claim.Layer != materialization.LayerDWD &&
+			claim.Layer != materialization.LayerDWS &&
+			claim.Layer != materialization.LayerADS) {
 		return executionError(
 			CodeTrustedPlanInvalid,
 			"the registered source-backed build plan is invalid",

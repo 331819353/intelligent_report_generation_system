@@ -684,8 +684,7 @@
 }
 
 .data-source-assets-shell.mode-detail .asset-table-form {
-  grid-template-rows: auto minmax(0, 1fr);
-  align-content: stretch;
+  display: block;
   gap: 0;
   overflow-y: auto;
   padding-bottom: 20px;
@@ -736,7 +735,7 @@
 .asset-table-form-fields {
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-rows: repeat(5, auto);
   gap: 15px;
   margin: 18px 16px 0;
   border-radius: 12px;
@@ -745,8 +744,8 @@
 }
 .data-source-assets-shell.mode-detail .asset-table-form-fields > label:nth-child(2) {
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr);
-  align-content: stretch;
+  grid-template-rows: auto auto;
+  align-content: start;
 }
 .data-source-assets-shell.mode-detail .asset-table-form-fields > label,
 .data-source-assets-shell.mode-detail .asset-form-grid label {
@@ -757,6 +756,15 @@
   color: #56667c;
   font-size: 12px;
   font-weight: 680;
+}
+.data-source-assets-shell.mode-detail .asset-table-form-fields > label > small {
+  min-width: 0;
+  max-width: 100%;
+  color: #7d8b9e;
+  font-size: 11px;
+  font-weight: 520;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 .data-source-assets-shell.mode-detail .asset-form-grid { gap: 10px; padding: 0; }
 .data-source-assets-shell.mode-detail .asset-table-form input,
@@ -772,8 +780,8 @@
 .data-source-assets-shell.mode-detail .asset-table-form input,
 .data-source-assets-shell.mode-detail .asset-table-form select { height: 40px; padding-inline: 11px; }
 .data-source-assets-shell.mode-detail .asset-table-form textarea {
-  height: 100%;
-  min-height: 220px;
+  height: clamp(160px, 22vh, 190px);
+  min-height: 160px;
   overflow: auto;
   padding: 10px 11px;
   line-height: 1.65;

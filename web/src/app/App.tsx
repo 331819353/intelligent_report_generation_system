@@ -14,6 +14,7 @@ const ManagementCenterPage = lazy(() => import('../pages/ManagementCenterPage').
 const DomainAccessPage = lazy(() => import('../pages/DomainAccessPage').then(module => ({ default: module.DomainAccessPage })))
 const AskDataPage = lazy(() => import('../pages/AskDataPage').then(module => ({ default: module.AskDataPage })))
 const ReportAssetsPage = lazy(() => import('../pages/ReportAssetsPage').then(module => ({ default: module.ReportAssetsPage })))
+const TemplateCenterPage = lazy(() => import('../pages/TemplateCenterPage').then(module => ({ default: module.TemplateCenterPage })))
 const ReportPage = lazy(() => import('../pages/ReportPage').then(module => ({ default: module.ReportPage })))
 const ReportEditorPage = lazy(() => import('../pages/ReportEditorPage').then(module => ({ default: module.ReportEditorPage })))
 const ReportPublishReviewPage = lazy(() => import('../pages/ReportPublishReviewPage').then(module => ({ default: module.ReportPublishReviewPage })))
@@ -93,6 +94,7 @@ export function App() {
         <Route path="/ask-data" element={<BusinessRoute><AskDataPage /></BusinessRoute>} />
         <Route path="/ask-data/conversations/:conversationId" element={<BusinessRoute><AskDataPage /></BusinessRoute>} />
         <Route path="/reports" element={<BusinessRoute><ReportAssetsPage /></BusinessRoute>} />
+        <Route path="/report-templates" element={<BusinessRoute><TemplateCenterPage /></BusinessRoute>} />
         <Route path="/report-shares/:shareToken" element={<BusinessRoute><ReportShareAccessPage /></BusinessRoute>} />
         <Route path="/reports/new" element={<BusinessRoute><ReportEditorPage /></BusinessRoute>} />
         <Route path="/reports/:reportId/publish-review" element={<BusinessRoute><ReportPublishReviewPage /></BusinessRoute>} />

@@ -329,6 +329,11 @@ func (s *Service) applySemanticNaming(
 	if layer != LayerDWD && layer != LayerDWS && layer != LayerADS {
 		return prepared, nil
 	}
+	if prepared.Document.Lineage() == LineageSource {
+		// 单表直落沿用物理表的元数据命名；语义命名只服务于有受治理上游的
+		// 分层加工数据集。
+		return prepared, nil
+	}
 	if s.semanticNamer == nil {
 		// Internal services and unit tests that do not assemble an AI provider
 		// retain the historical behavior. The production API always registers

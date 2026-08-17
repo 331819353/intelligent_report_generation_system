@@ -11,16 +11,17 @@ type LayerDependencyResolver interface {
 	ResolveDatasetVersionLayer(context.Context, string) (Layer, error)
 }
 
-// ValidateLayerDependencies 校验显式 DATASET 上游的层级方向：
+// ValidateLayerDependencies 校验 MODELED 血缘中显式 DATASET 上游的层级方向：
 //
 //	DIM <- ODS
 //	DWD <- at least one ODS + optional DIM
 //	DWS <- DWD or DIM (DIM is limited to factless entity-count aggregation)
 //	ADS <- DWS
 //
-// 显式声明 layer 的新 DIM/DWD/DWS/ADS 文档由基础校验强制只使用 DATASET 节点；这里继续
-// 解析每个精确版本的实际层级。未声明 layer 的历史正文可按稳定推断结果
-// grandfather，但不会因此放宽它已声明的 DATASET 上游。
+// SOURCE 血缘（单表直落）没有受治理的上游数据集版本可解析：物理表本身就是声明
+// 层级的粒度来源，因此直接通过。显式声明 layer 的 MODELED 文档由基础校验强制只
+// 使用 DATASET 节点；这里继续解析每个精确版本的实际层级。未声明 layer 的历史正文
+// 可按稳定推断结果 grandfather，但不会因此放宽它已声明的 DATASET 上游。
 func ValidateLayerDependencies(ctx context.Context, document Document, resolver LayerDependencyResolver) error {
 	if resolver == nil {
 		for _, node := range document.Nodes {
@@ -35,9 +36,7 @@ func ValidateLayerDependencies(ctx context.Context, document Document, resolver 
 	if layer == "" {
 		layer = InferLayer(document)
 	}
-	if IsPreAggregatedSourceMapping(document) {
-		// The physical table itself is the immutable analytical-grain source;
-		// there is no governed DWD/DIM version to resolve for this narrow mode.
+	if document.Lineage() == LineageSource {
 		return nil
 	}
 	var expected map[Layer]bool

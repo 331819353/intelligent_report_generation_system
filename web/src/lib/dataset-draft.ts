@@ -296,6 +296,7 @@ export async function hydrateDatasetDraft(record: DatasetRecord, tables: AssetTa
     code: record.code, name: record.name, description: record.description,
     domain: text(object(dsl.dataset).domain), subject: text(object(dsl.dataset).subject),
     layer: record.layer,
+    // 遗留标记原样保留，避免改写早期分类器发布的 DWS 内容哈希。
     ...(text(object(dsl.dataset).sourceMode) === 'PRE_AGGREGATED'
       ? { sourceMode: 'PRE_AGGREGATED' as const } : {}),
     semanticContractVersion: text(object(dsl.dataset).semanticContractVersion),

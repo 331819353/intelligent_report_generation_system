@@ -14,6 +14,7 @@ import (
 
 	aiplatform "intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/semanticquality"
+	"intelligent-report-generation-system/internal/warehouselayer"
 )
 
 type Provider interface {
@@ -46,6 +47,7 @@ const (
 
 const metadataCompletionSystemPrompt = `你是企业数据资产元数据补全器。只能依据给定技术元数据和按字段数量自适应抽取的三至十行数据样本生成结果，不得虚构资产或返回未请求的目标。每次最多处理五个字段；每个目标的 missingFields 是本轮唯一需要新增或修复的属性；不在 missingFields 中的属性已经确认，必须原样复用对应 currentBusinessName、currentDescription、currentTags、currentSemanticType、currentSensitivity，不得重写。contextColumns 是分批处理时提供的全表字段上下文，包含字段当前业务定义；其中 manualLocked=true 的字段必须参与表级业务名称、说明和标签的识别，但绝不能作为输出目标或被改写。columns 才是本批唯一允许输出的字段目标，不得为 contextColumns 中未出现在 columns 的字段生成结果。
 表级描述和标签必须优先说明该表的业务功能、适用范围与一行数据的粒度。业务领域由当前用户所属领域统一确定，不属于标签，不得生成、改写或推断任何“领域:”标签。表标签按证据优先覆盖五个检索面：事实表/维度表等作用、订单/客户等业务主题、销售/售后等业务过程、订单商品/客户等精确粒度、由字段集合直接证明的内容覆盖。内容覆盖用于区分同名表实际装载的信息，例如订单头、支付信息、营销归因、收货地域、履约信息；只能依据字段名、字段说明与字段组合选择“内容:”标签，不能仅凭表名或样例值猜测。“内容:订单行”必须有商品/SKU/行项目/数量等独立字段，金额字段说明中提到商品不构成订单行证据；订单表没有这些字段时使用“内容:订单头”。存在日期时间证据时再标记事件时间、业务日期、快照日期或生效时间。事实表通常应包含业务过程、精确粒度和时间行为，维度表通常应包含业务主题、精确粒度和主数据功能。不要把“订单+产品”两个宽泛粒度当作“订单商品”的替代。每个目标最多选择十六个强相关标签，不要用大量通用标签稀释区分度。
+表标签还必须恰好包含一个“层级:”标签，判断这张物理表当前已经处于的数仓层级，而不是它将来应该被加工到哪一层：原始业务系统的交易/事件/流水/状态明细、未经清洗的贴源导入表选“层级:ODS”；客户、商品、门店、组织、日历等实体主数据或维度表选“层级:DIM”；已按统一口径清洗、以一行一个业务事实或事件保留明细粒度的宽表（常见 dwd_ 前缀、含维度冗余字段）选“层级:DWD”；每行是按日期/客户/渠道等维度汇总统计的聚合结果（常见 agg_/dws_/summary/统计/汇总/指标 等证据、度量列为汇总值）选“层级:DWS”；面向报表、看板或应用直接消费的结果宽表（常见 ads_/report/rpt/看板/驾驶舱 等证据）选“层级:ADS”。证据不足时按“ODS 优先于 DWD、DWD 优先于 DWS”的保守顺序选择，绝不能仅凭有数值字段就判定为 DWS。字段标签不得携带“层级:”标签。
 字段标签只描述该字段本身的键角色、指标/辅助作用、代码映射或直接业务主题，不得把整张表的所有标签机械复制到每个字段。关联标签必须以 primaryKeyColumns、constraints、PrimaryKey、ForeignKey、Unique 等结构化证据为准；无法从证据确定目标表时应明确写“候选关联键”，不得编造目标。每个字段的 semanticType 必须与输入 canonicalType 兼容：AMOUNT、PERCENTAGE、QUANTITY 只能用于数值类型，DATE、TIME、DATETIME 只能用于相应日期时间类型，BOOLEAN 只能用于布尔类型；TEXT 字段不得标为上述数值、日期时间或布尔语义，应从 TEXT、CATEGORY、IDENTIFIER、REGION、COMPANY_NAME 中选择。
 对 Excel/CSV 工作表，table.name 是 Sheet 名称，columns.name 是本批解析后的真实表头，contextColumns 包含全表字段概览，sampleRows 的键和值分别对应本批表头和该列真实内容；必须结合 Sheet 名称、全表字段概览、本批字段类型和样本值判断表业务名称、字段业务名称及字段业务描述，不得只翻译物理名称或忽略样本内容。当 sourceFormat=CSV 或 EXCEL 时，表的 businessName 必须是准确简洁的中文业务名称；每个字段的 businessName 必须使用中文业务名称：原表头含中文时保持其中文含义，不得翻译成英文；原表头为英文时翻译为准确简洁的中文名称。businessDescription 必须继续使用中文描述字段含义。原始文件表头保留在 columns.name，不要用英文技术编码覆盖中文业务名称。
 标签应覆盖适用的产业、主题、作用、过程、功能、内容覆盖、范围、粒度、时间行为和关联角色；至少返回一个标签，只能使用 JSON Schema 中的受控词表且不得重复。columns 中只包含本次发生变化且需要完善的字段，每个字段必须恰好返回一次；targetTable=false 时不得返回 table。`
@@ -716,7 +718,7 @@ func mergePartialSuggestion(
 		value.BusinessDescription = candidate.BusinessDescription
 		provided = append(provided, "businessDescription")
 	}
-	if validControlledTags(candidate.Tags) {
+	if validControlledTags(candidate.Tags, column) {
 		value.Tags = append([]string(nil), candidate.Tags...)
 		provided = append(provided, "tags")
 	}
@@ -769,7 +771,7 @@ func completionMissingFields(
 		!containsChinese(value.BusinessDescription)) {
 		missing = append(missing, "businessDescription")
 	}
-	if !validControlledTags(value.Tags) {
+	if !validControlledTags(value.Tags, column) {
 		missing = append(missing, "tags")
 	}
 	if !allowedSensitivity[value.SensitivityLevel] {
@@ -783,7 +785,10 @@ func completionMissingFields(
 	return missing
 }
 
-func validControlledTags(tags []string) bool {
+// validControlledTags 判断当前标签是否已经完整：受控词表、无重复，且表资产恰好
+// 携带一个层级标签、字段资产不携带。缺少层级标签的历史表会因此把 tags 重新列为
+// 待补全属性，让下一次清洗补齐层级判断。
+func validControlledTags(tags []string, column bool) bool {
 	if len(tags) == 0 || len(tags) > maxControlledTagsPerTarget {
 		return false
 	}
@@ -794,7 +799,7 @@ func validControlledTags(tags []string) bool {
 		}
 		seen[tag] = true
 	}
-	return true
+	return warehouselayer.Validate(tags, column, true) == nil
 }
 
 func validateSuggestionForTarget(

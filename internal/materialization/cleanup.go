@@ -76,6 +76,19 @@ func (store *PostgresStore) EnqueueDatasetMaterializationCleanupTx(
 		tenantID, datasetID, layer).Scan(&expectedCount); err != nil {
 		return 0, err
 	}
+	// A build that is still queued or running for the deleted dataset must not
+	// activate a fresh materialization after the cleanup job has already dropped
+	// the old ones. Cancel it in the same transaction; the worker's lease check
+	// then rejects any late completion.
+	if _, err := tx.Exec(ctx, `UPDATE platform.dataset_build_runs
+		SET status='CANCELLED',error_code='DATASET_DELETED',
+			error_message='dataset deleted before the build completed',
+			lease_owner='',lease_token=NULL,lease_expires_at=NULL,
+			completed_at=now(),updated_at=now()
+		WHERE tenant_id=$1 AND dataset_id=$2 AND status IN ('QUEUED','RUNNING')`,
+		tenantID, datasetID); err != nil {
+		return 0, err
+	}
 	if expectedCount == 0 {
 		return 0, nil
 	}

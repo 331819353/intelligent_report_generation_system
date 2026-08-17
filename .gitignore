@@ -20,6 +20,12 @@ web/vite.config.js
 web/vite.config.d.ts
 .idea/
 .vscode/
+# AI 编码助手的本地会话配置与走查产物（Claude Code / Codex），不纳入版本库。
+.claude/
+.claude*
+.codex/
+.codex*
+CLAUDE.local.md
 .venv-connector/
 __pycache__/
 .pytest_cache/

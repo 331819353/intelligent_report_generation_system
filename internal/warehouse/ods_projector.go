@@ -119,6 +119,12 @@ func (projector *ODSProjector) Project(
 	if _, err := tx.Exec(ctx, "ANALYZE "+qualified); err != nil {
 		return StageResult{}, fmt.Errorf("analyze projected ODS staging table: %w", err)
 	}
+	// The raw source stage has been consumed by the projection; it is a
+	// transient copy of source rows and must not linger in the warehouse.
+	if _, err := tx.Exec(ctx, "DROP TABLE IF EXISTS "+
+		quoteIdentifier(expectedSourceSchema)+"."+quoteIdentifier(expectedSourceTable)); err != nil {
+		return StageResult{}, fmt.Errorf("discard consumed ODS source staging table: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return StageResult{}, err
 	}

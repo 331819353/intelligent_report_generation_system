@@ -103,7 +103,7 @@ const snapshotSupportTickets: SupportTicket[] = [
 
 const snapshotObservability: OperationalSnapshot = {
   generatedAt: '2026-08-14T09:40:00+08:00', window: '24h', health: 'ATTENTION',
-  ai: { enabled: true, requestsToday: 1842, requestsDailyLimit: 3000, requestUtilization: 61.4, tokensThisMonth: 18600000, tokensMonthlyLimit: 30000000, tokenUtilization: 62, costMicrosThisMonth: 425600000, costMicrosMonthlyLimit: 800000000, costUtilization: 53.2, requestsInWindow: 1842, succeededInWindow: 1794, failedInWindow: 48, runningInWindow: 7, successRate: 97.4, averageLatencyMs: 786, p95LatencyMs: 1680 },
+  ai: { enabled: true, requestsToday: 1842, requestsDailyLimit: 0, requestUtilization: 0, tokensThisMonth: 18600000, tokensMonthlyLimit: 0, tokenUtilization: 0, costMicrosThisMonth: 425600000, costMicrosMonthlyLimit: 0, costUtilization: 0, requestsInWindow: 1842, succeededInWindow: 1794, failedInWindow: 48, runningInWindow: 7, successRate: 97.4, averageLatencyMs: 786, p95LatencyMs: 1680 },
   askData: { runsInWindow: 426, answeredInWindow: 401, blockedInWindow: 9, clarificationInWindow: 16, activeInWindow: 4, answerRate: 94.1, averageDurationMs: 2480, p95DurationMs: 5720 },
   queues: [
     { code: 'metadata', name: '元数据处理', pending: 3, running: 2, failed: 0, oldestPendingSeconds: 95, status: 'HEALTHY' },
@@ -728,11 +728,13 @@ function formatAge(value: number) {
 }
 
 function QuotaMeter({ label, used, limit, utilization, unit = '' }: { label: string; used: number; limit: number; utilization: number; unit?: string }) {
-  const level = utilization >= 90 ? 'critical' : utilization >= 75 ? 'attention' : 'healthy'
+  const unlimited = limit === 0
+  const level = unlimited ? 'healthy' : utilization >= 90 ? 'critical' : utilization >= 75 ? 'attention' : 'healthy'
+  const status = unlimited ? '不限额' : `${utilization.toFixed(1)}%`
   return <article className={`operational-quota is-${level}`}>
-    <header><span>{label}</span><strong>{utilization.toFixed(1)}%</strong></header>
-    <div aria-label={`${label}已使用 ${utilization.toFixed(1)}%`}><i style={{ width: `${Math.min(utilization, 100)}%` }} /></div>
-    <footer><span>{compactNumber(used)}{unit}</span><small>额度 {compactNumber(limit)}{unit}</small></footer>
+    <header><span>{label}</span><strong>{status}</strong></header>
+    <div aria-label={unlimited ? `${label}不限额` : `${label}已使用 ${status}`}><i style={{ width: unlimited ? '0%' : `${Math.min(utilization, 100)}%` }} /></div>
+    <footer><span>{compactNumber(used)}{unit}</span><small>{unlimited ? '仅统计用量' : `额度 ${compactNumber(limit)}${unit}`}</small></footer>
   </article>
 }
 
@@ -743,9 +745,10 @@ function OperationalObservabilityCenter({ snapshot, window, onWindowChange }: {
 }) {
   const ai = snapshot.ai
   const askData = snapshot.askData
+  const unlimitedAI = ai.requestsDailyLimit === 0 && ai.tokensMonthlyLimit === 0 && ai.costMicrosMonthlyLimit === 0
   return <div className="operational-center">
     <header className="platform-section-heading operational-heading">
-      <div><h3>运行健康与资源用量</h3><p>聚合问数链路、AI 配额和异步队列，只展示运行计数与稳定错误码。</p></div>
+      <div><h3>运行健康与资源用量</h3><p>聚合问数链路、AI 用量和异步队列，只展示运行计数与稳定错误码。</p></div>
       <div className="operational-heading-actions">
         <span className={`operational-health is-${snapshot.health.toLowerCase()}`}><Pulse size={16} weight="fill" />{operationalHealthLabel[snapshot.health]}</span>
         <label><span>观察窗口</span><select value={window} onChange={event => onWindowChange(event.target.value as OperationalWindow)}><option value="1h">最近 1 小时</option><option value="6h">最近 6 小时</option><option value="24h">最近 24 小时</option><option value="7d">最近 7 天</option></select></label>
@@ -760,7 +763,7 @@ function OperationalObservabilityCenter({ snapshot, window, onWindowChange }: {
     </section>
 
     <div className="operational-grid">
-      <section className="operational-card operational-quota-card"><header><div><strong>AI 配额水位</strong><span>{ai.enabled ? '租户 AI 能力已启用' : '租户 AI 能力当前停用'}</span></div><small>月度口径按保守计费量统计</small></header><div>
+      <section className="operational-card operational-quota-card"><header><div><strong>AI 用量</strong><span>{ai.enabled ? unlimitedAI ? '租户 AI 能力已启用 · 不限额' : '租户 AI 能力已启用' : '租户 AI 能力当前停用'}</span></div><small>{unlimitedAI ? '仅统计用量，不限制请求' : '月度口径按保守计费量统计'}</small></header><div>
         <QuotaMeter label="今日请求" used={ai.requestsToday} limit={ai.requestsDailyLimit} utilization={ai.requestUtilization} unit=" 次" />
         <QuotaMeter label="本月 Token" used={ai.tokensThisMonth} limit={ai.tokensMonthlyLimit} utilization={ai.tokenUtilization} />
         <QuotaMeter label="本月成本" used={ai.costMicrosThisMonth / 1_000_000} limit={ai.costMicrosMonthlyLimit / 1_000_000} utilization={ai.costUtilization} unit=" 元" />

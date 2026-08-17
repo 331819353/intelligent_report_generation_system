@@ -8,11 +8,13 @@ import (
 	"unicode"
 
 	"intelligent-report-generation-system/internal/semanticquality"
+	"intelligent-report-generation-system/internal/warehouselayer"
 )
 
 const (
-	SchemaVersion        = "1.1"
-	PromptVersion        = "metadata-completion-v15"
+	SchemaVersion = "1.1"
+	// v16：表级清洗必须给出恰好一个“层级:”标签（ODS/DIM/DWD/DWS/ADS）。
+	PromptVersion        = "metadata-completion-v16"
 	SourceFormatCSV      = "CSV"
 	SourceFormatExcel    = "EXCEL"
 	SourceFormatDatabase = "DATABASE"
@@ -301,6 +303,8 @@ var allowedTags = map[string]bool{
 	"粒度:日期": true, "粒度:日": true, "粒度:月": true,
 	"时间:事件时间": true, "时间:业务日期": true, "时间:快照日期": true, "时间:生效时间": true,
 	"关联:主键": true, "关联:外键": true, "关联:业务键": true, "关联:桥接键": true,
+	// 层级分面：表资产必须恰好一个，字段资产不得携带（见 warehouselayer 包）。
+	"层级:ODS": true, "层级:DIM": true, "层级:DWD": true, "层级:DWS": true, "层级:ADS": true,
 }
 
 const maxControlledTagsPerTarget = 16
@@ -406,6 +410,10 @@ func validateValue(value SuggestionValue, column, fileColumn bool) error {
 			return fmt.Errorf("tag %q is duplicated", tag)
 		}
 		seen[tag] = true
+	}
+	// 表资产必须由清洗结果给出恰好一个数仓层级标签；字段资产不携带层级。
+	if err := warehouselayer.Validate(value.Tags, column, true); err != nil {
+		return err
 	}
 	if column {
 		if !allowedSemanticTypes[value.SemanticType] {

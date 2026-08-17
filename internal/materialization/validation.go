@@ -176,11 +176,11 @@ func (plan BuildPlan) Validate() error {
 
 // isSourceBackedPlan recognizes the only direct source-to-warehouse topology:
 // one frozen source extract, one run-scoped PostgreSQL stage, then one atomic
-// materialization. It is valid only for ODS and PRE_AGGREGATED DWS requests;
-// the latter semantic condition is revalidated from the published DSL by the
-// control plane and worker resolver.
+// materialization. It serves the SOURCE lineage of every layer (a single
+// physical table declared at its existing grain); the semantic condition is
+// revalidated from the published DSL by the control plane and worker resolver.
 func isSourceBackedPlan(plan BuildPlan) bool {
-	if (plan.Layer != LayerODS && plan.Layer != LayerDWS) || len(plan.Nodes) != 3 {
+	if !validLayer(plan.Layer) || len(plan.Nodes) != 3 {
 		return false
 	}
 	var extractID, stageID string
@@ -251,7 +251,7 @@ func (request RegisterRequest) Validate() error {
 			return ErrInvalidRequest
 		}
 	}
-	if !hasRequiredWarehouseInput(request.Plan.Layer, inputs) {
+	if !sourceBacked && !hasRequiredWarehouseInput(request.Plan.Layer, inputs) {
 		return ErrInvalidRequest
 	}
 	for _, node := range request.Plan.Nodes {
@@ -276,8 +276,7 @@ func hasRequiredWarehouseInput(layer Layer, inputs []InputSnapshot) bool {
 	case LayerDWS:
 		// Factless entity-count DWS datasets aggregate a governed DIM directly;
 		// ordinary and multi-fact DWS datasets aggregate one or more DWDs.
-		return inputLayers["SOURCE"] ||
-			inputLayers[string(LayerDWD)] ||
+		return inputLayers[string(LayerDWD)] ||
 			inputLayers[string(LayerDIM)]
 	default:
 		return true
@@ -339,37 +338,42 @@ func validateInput(input InputSnapshot, target Layer) error {
 	default:
 		return ErrInvalidRequest
 	}
-	switch target {
-	case LayerODS:
-		if input.Type != InputSourceTable && input.Type != InputFileVersion {
-			return ErrInvalidRequest
-		}
-	case LayerDIM:
-		if (input.Type != InputDatasetVersion && input.Type != InputMaterialization) || input.Layer != string(LayerODS) {
-			return ErrInvalidRequest
-		}
-	case LayerDWD:
-		if (input.Type != InputDatasetVersion && input.Type != InputMaterialization) ||
-			(input.Layer != string(LayerODS) && input.Layer != string(LayerDIM)) {
-			return ErrInvalidRequest
-		}
-	case LayerDWS:
-		sourceInput := (input.Type == InputSourceTable || input.Type == InputFileVersion) &&
-			input.Layer == "SOURCE"
-		warehouseInput := (input.Type == InputDatasetVersion || input.Type == InputMaterialization) &&
-			(input.Layer == string(LayerDWD) || input.Layer == string(LayerDIM))
-		if !sourceInput && !warehouseInput {
-			return ErrInvalidRequest
-		}
-	case LayerADS:
-		if (input.Type != InputDatasetVersion && input.Type != InputMaterialization) ||
-			input.Layer != string(LayerDWS) {
-			return ErrInvalidRequest
-		}
-	default:
+	// A frozen physical source (table or file) is the SOURCE lineage input and
+	// is admissible for every layer; the request-level check ensures a
+	// source-backed plan carries exactly one such input and nothing else.
+	// Warehouse inputs follow the modeled direction ODS→DIM/DWD→DWS→ADS.
+	sourceInput := (input.Type == InputSourceTable || input.Type == InputFileVersion) &&
+		input.Layer == "SOURCE"
+	warehouseInput := input.Type == InputDatasetVersion || input.Type == InputMaterialization
+	if !validLayer(target) {
+		return ErrInvalidRequest
+	}
+	if sourceInput {
+		return nil
+	}
+	if !warehouseInput {
+		return ErrInvalidRequest
+	}
+	if !modeledUpstreamLayers(target)[Layer(input.Layer)] {
 		return ErrInvalidRequest
 	}
 	return nil
+}
+
+// modeledUpstreamLayers lists the warehouse layers a MODELED target may read.
+func modeledUpstreamLayers(target Layer) map[Layer]bool {
+	switch target {
+	case LayerDIM:
+		return map[Layer]bool{LayerODS: true}
+	case LayerDWD:
+		return map[Layer]bool{LayerODS: true, LayerDIM: true}
+	case LayerDWS:
+		return map[Layer]bool{LayerDWD: true, LayerDIM: true}
+	case LayerADS:
+		return map[Layer]bool{LayerDWS: true}
+	default:
+		return map[Layer]bool{}
+	}
 }
 
 func Prepare(request RegisterRequest) (PreparedRequest, error) {

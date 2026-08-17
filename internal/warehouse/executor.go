@@ -91,6 +91,44 @@ func newExecutor(transactions transactionFactory) *Executor {
 	return &Executor{transactions: transactions}
 }
 
+// DiscardStaging drops the run-scoped staging tables a finished build no longer
+// needs. Only relations whose schema and name equal the identifier regenerated
+// from (tenant, run, node) are dropped, so a stale or forged TableRef can never
+// reach a published warehouse relation. Staging rows are a transient copy of
+// the source; only the materialized dataset relation is meant to stay in
+// PostgreSQL.
+func (executor *Executor) DiscardStaging(
+	ctx context.Context,
+	tenantID, runID string,
+	tables map[string]querycompiler.TableRef,
+) error {
+	if executor == nil || executor.transactions == nil {
+		return fmt.Errorf("%w: executor is not configured", ErrInvalidBuild)
+	}
+	names := make([]string, 0, len(tables))
+	for _, table := range tables {
+		schema, name, err := materialization.GenerateStagingIdentifier(tenantID, runID, table.NodeID)
+		if err != nil || table.Schema != schema || table.Name != name {
+			continue
+		}
+		names = append(names, quoteIdentifier(schema)+"."+quoteIdentifier(name))
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	tx, err := executor.transactions.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, qualified := range names {
+		if _, err := tx.Exec(ctx, "DROP TABLE IF EXISTS "+qualified); err != nil {
+			return fmt.Errorf("discard warehouse staging table: %w", err)
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 // Build creates an immutable shadow table, validates its row/key contract and
 // commits it as one transaction. Publication is a separate metadata-pointer
 // transaction, so a failed build never replaces the active materialization.
@@ -301,22 +339,22 @@ func validateTenantOwnedInputs(
 		)
 		runScopedStage := stageErr == nil &&
 			table.Schema == stageSchema && table.Name == stageName
-		valid := false
+		// A run-scoped stage is the frozen physical source of a SOURCE-lineage
+		// build (any layer) or the replayed ODS input of a DIM/DWD build; the
+		// control plane and resolver already proved which one applies. Published
+		// warehouse relations follow the modeled direction ODS→DIM/DWD→DWS→ADS.
+		valid := runScopedStage
 		switch targetLayer {
-		case materialization.LayerODS:
-			valid = runScopedStage
-		case materialization.LayerDWD, materialization.LayerDIM:
-			valid = runScopedStage
-			if targetLayer == materialization.LayerDWD {
-				valid = valid ||
-					warehouseLayerInput(table, "dim", "warehouse_dim", tenantFragment)
-			}
+		case materialization.LayerDWD:
+			valid = valid ||
+				warehouseLayerInput(table, "dim", "warehouse_dim", tenantFragment)
 		case materialization.LayerDWS:
-			valid = runScopedStage ||
+			valid = valid ||
 				warehouseLayerInput(table, "dwd", "warehouse_dwd", tenantFragment) ||
 				warehouseLayerInput(table, "dim", "warehouse_dim", tenantFragment)
 		case materialization.LayerADS:
-			valid = warehouseLayerInput(table, "dws", "warehouse_dws", tenantFragment)
+			valid = valid ||
+				warehouseLayerInput(table, "dws", "warehouse_dws", tenantFragment)
 		}
 		if !valid {
 			return fmt.Errorf("%w: input relation is outside the tenant and layer boundary", ErrInvalidBuild)

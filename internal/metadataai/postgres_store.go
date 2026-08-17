@@ -548,7 +548,7 @@ func validatePartialSuggestionForTarget(
 				return ErrInvalidOutput
 			}
 		case "tags":
-			if !validControlledTags(value.Tags) {
+			if !validControlledTags(value.Tags, column) {
 				return ErrInvalidOutput
 			}
 		case "sensitivityLevel":

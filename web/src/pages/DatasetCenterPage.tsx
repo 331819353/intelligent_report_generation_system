@@ -83,6 +83,7 @@ import {
 import {
   buildComponentPreviewDSL,
   buildDatasetDSL,
+  datasetDraftLineage,
   datasetLayerChoices,
   datasetAPI,
   joinCardinalityForType,
@@ -107,6 +108,9 @@ import {
   type PublishedVersionSummary,
   type VersionUsage,
 } from '../lib/datasets'
+import { sourceLayerRequirement } from '../lib/dataset-layer'
+import { layerFromTags } from '../lib/warehouse-layer'
+import { mergeOperatingAnalysisDatasetSummaries, operatingAnalysisDatasetByID, operatingAnalysisDatasetSummaries } from '../report/templates/operating-analysis-datasets.ts'
 import {
   backgroundTaskAPI,
   rememberBackgroundTaskFocus,
@@ -212,6 +216,7 @@ const statusLabels: Record<string, string> = {
 }
 
 const snapshotDatasets: DatasetSummary[] = [
+  ...operatingAnalysisDatasetSummaries,
   {
     id: 'snapshot-orders-ods-published', code: 'ods_sales_order_source', name: '销售订单贴源数据',
     description: '保留订单头、订单行、支付与履约来源字段，已完成结构核验并可进入分层建模。', type: 'MAPPING', status: 'PUBLISHED',
@@ -524,7 +529,8 @@ const datasetAIChangeFieldLabels: Record<string, string> = {
   input: '上游输入', dimensions: '分组维度', metrics: '汇总指标', outputs: '输出字段',
 }
 const isTime = (column: AssetColumn) => ['DATE', 'DATETIME', 'TIMESTAMP'].includes(column.canonicalType.toUpperCase()) || column.semanticType.toUpperCase() === 'DATE'
-const emptyDraft = (): DatasetDraft => ({ code: '', name: '', description: '', layer: 'DWD', nodes: [], fields: [], joins: [], filters: [], parameters: [], calculations: [], sorts: [], grainDescription: '', grainKeys: [], groupingEnabled: false, finalConfigured: false, finalGroupingEnabled: false })
+// layer 不预设：保存前由画布血缘推导默认层级（单表直落默认 ODS，分层加工按上游推导），用户可在保存对话框改选。
+const emptyDraft = (): DatasetDraft => ({ code: '', name: '', description: '', nodes: [], fields: [], joins: [], filters: [], parameters: [], calculations: [], sorts: [], grainDescription: '', grainKeys: [], groupingEnabled: false, finalConfigured: false, finalGroupingEnabled: false })
 const datasetLayers: DatasetLayer[] = ['ODS', 'DIM', 'DWD', 'DWS', 'ADS']
 const datasetLayerLabels: Record<DatasetLayer, string> = {
   ODS: 'ODS · 贴源层',
@@ -733,7 +739,10 @@ async function loadAllTables(): Promise<AssetTable[]> {
   }
 }
 
-const designerAssetLayers: DatasetLayer[] = ['ODS', 'DIM', 'DWD', 'DWS']
+// 画布来源分组覆盖五层：物理表按“层级:”标签归组（可单表直落到任意层），已发布
+// 数据集按其层级归组；ADS 数据集不能再作为上游，因此只有物理表会出现在 ADS 分组。
+const designerAssetLayers: DatasetLayer[] = ['ODS', 'DIM', 'DWD', 'DWS', 'ADS']
+const designerUpstreamLayers: DatasetLayer[] = ['ODS', 'DIM', 'DWD', 'DWS']
 const designerLayerLabels: Record<DatasetLayer, { name: string; description: string }> = {
   ODS: { name: '贴源层', description: '字段结构映射 · 数据不复制入仓' },
   DIM: { name: '维度层', description: '统一业务实体说明' },
@@ -812,7 +821,7 @@ async function loadDesignerAssets(datasetItems: DatasetSummary[], excludedDatase
   const rawTablesPromise = loadAllTables()
   const published = datasetItems.filter(dataset =>
     dataset.id !== excludedDatasetID &&
-    designerAssetLayers.includes(dataset.layer) && Boolean(dataset.currentPublishedVersionId),
+    designerUpstreamLayers.includes(dataset.layer) && Boolean(dataset.currentPublishedVersionId),
   )
   const versionResults = await Promise.allSettled(published.map(async dataset => {
     const version = await datasetAPI.getVersion(dataset.id, dataset.currentPublishedVersionId!)
@@ -1361,7 +1370,7 @@ export function DatasetCenterPage() {
   )
   const selectedBusinessDomain = currentDomain()
   const selectedBusinessDomainName = selectedBusinessDomain?.name.trim() || (designSnapshot ? '企业经营' : '')
-  const [datasets, setDatasets] = useState<DatasetSummary[]>(designSnapshot ? snapshotDatasets : [])
+  const [datasets, setDatasets] = useState<DatasetSummary[]>(designSnapshot ? snapshotDatasets : operatingAnalysisDatasetSummaries)
   const [tables, setTables] = useState<AssetTable[]>(designSnapshot ? snapshotAssetTables : [])
   const [loading, setLoading] = useState(!designSnapshot)
   const [assetsLoading, setAssetsLoading] = useState(false)
@@ -1508,7 +1517,7 @@ export function DatasetCenterPage() {
       return
     }
     const next = await loadAllDatasets()
-    setDatasets(next)
+    setDatasets(mergeOperatingAnalysisDatasetSummaries(next))
     const permissions = await Promise.all(next.map(async dataset => {
       try { return [dataset.id, (await datasetAPI.evaluatePermission(dataset.id, 'MANAGE')).allowed] as const }
       catch { return [dataset.id, false] as const }
@@ -1716,7 +1725,9 @@ export function DatasetCenterPage() {
       const label = designerLayerLabels[layer]
       const layerTables = tables.filter(table => {
         if (table.sourceKind === 'DATASET') return table.datasetLayer === layer
-        return layer === 'ODS' && !publishedMappedOrigins.has(table.id)
+        // 物理表按其“层级:”标签（元数据清洗判定、人工可改）归入所在层级分组，
+        // 没有标签时视为贴源；已发布默认映射数据集的物理表由该数据集在其层级分组中代表。
+        return (layerFromTags(table.tags) ?? 'ODS') === layer && !publishedMappedOrigins.has(table.id)
       }).sort((left, right) => (left.businessName || left.tableName).localeCompare(
         right.businessName || right.tableName, 'zh-CN',
       ))
@@ -1747,7 +1758,8 @@ export function DatasetCenterPage() {
 
   const filtered = useMemo(() => {
     const query = keyword.trim().toLocaleLowerCase()
-    return datasets.filter(dataset => (!query || dataset.name.toLocaleLowerCase().includes(query) || dataset.code.toLocaleLowerCase().includes(query)) &&
+    return datasets.filter(dataset => (!query || [dataset.name, dataset.code, dataset.description, ...(dataset.tags || [])]
+      .some(value => value.toLocaleLowerCase().includes(query))) &&
       (statusFilter === 'ALL' || dataset.status === statusFilter) &&
       (layerFilter === 'ALL' || dataset.layer === layerFilter))
   }, [datasets, keyword, layerFilter, statusFilter])
@@ -1960,6 +1972,8 @@ export function DatasetCenterPage() {
       return ['DWD'] as DatasetLayer[]
     }
   }, [designSnapshot, draft])
+  const draftLineage = useMemo(() => draft.nodes.length ? datasetDraftLineage(draft) : 'MODELED', [draft])
+  const effectiveLayer = (layerChoices.includes(draft.layer as DatasetLayer) ? draft.layer : layerChoices[0]) as DatasetLayer
   const classificationSuggestions = useMemo(() => {
     const tags = [
       ...(editingRecord?.tags ?? []),
@@ -3420,13 +3434,12 @@ export function DatasetCenterPage() {
       await refreshPublication(publicationRecord.id)
       setPublicationDecisionNote('')
       setSelectedPublicationRequestID(result.request.id)
-      const sourceMappedDWS = publicationRecord.originTableId &&
-        publicationRecord.dsl.dataset.sourceMode === 'PRE_AGGREGATED'
-      const processing = sourceMappedDWS
-        ? '源端汇总映射已生效'
-        : publicationRecord.layer === 'ODS'
-          ? '指标候选提取任务已启动'
-          : `${publicationRecord.layer} PostgreSQL 物化任务已启动`
+      const nodes = Array.isArray(publicationRecord.dsl.nodes) ? publicationRecord.dsl.nodes : []
+      const joins = Array.isArray(publicationRecord.dsl.joins) ? publicationRecord.dsl.joins : []
+      const sourceLineage = nodes.length === 1 && nodes[0].type === 'TABLE' && joins.length === 0
+      const processing = sourceLineage
+        ? `源表已按 ${publicationRecord.layer} 层进入 PostgreSQL 入仓队列`
+        : `${publicationRecord.layer} PostgreSQL 物化任务已启动`
       setNotice({ tone: 'success', message: `“${publicationRecord.name}”审批通过并发布为 V${result.publishedVersion.versionNo}；${processing}` })
       removeDatasetEditorRecovery(selectedBusinessDomainID, publicationRecord.id)
     } catch (cause) {
@@ -3508,7 +3521,8 @@ export function DatasetCenterPage() {
     setDetailPreviewError('')
     setFormError('')
     setBusyAction(`view:${dataset.id}`)
-    if (designSnapshot) {
+    const operatingFixture = operatingAnalysisDatasetByID(dataset.id)
+    if (designSnapshot || operatingFixture) {
       const record = snapshotDatasetRecord(dataset)
       const asset = dataset.originTableId ? snapshotAssetTables.find(item => item.id === dataset.originTableId) ?? null : null
       const columns = (dataset.originTableId ? snapshotAssetColumns[dataset.originTableId] ?? [] : []).map(column => ({
@@ -3517,33 +3531,50 @@ export function DatasetCenterPage() {
         tags: column.semanticType ? [column.semanticType] : [],
         sensitivityLevel: column.semanticType === 'IDENTIFIER' ? '内部' : '',
       }))
-      record.dsl.nodes = asset ? [{ id: 'detail-source', name: asset.businessName || asset.tableName, type: 'TABLE' }] : []
-      record.dsl.fields = columns.map((column, index) => ({
-        id: column.id,
-        code: column.columnName,
-        name: column.businessName || column.columnName,
-        description: `${column.businessName || column.columnName}的统一业务定义与使用口径。`,
-        canonicalType: column.canonicalType,
-        semanticType: column.semanticType,
-        role: column.semanticType,
-        nullable: column.nullable,
-        visible: column.assetStatus === 'ACTIVE',
-        expression: { field: column.columnName },
+      const outputFields = operatingFixture
+        ? operatingFixture.fields.map(field => ({
+          code: field.code,
+          name: field.name,
+          description: field.description,
+          canonicalType: field.canonicalType,
+          semanticType: field.semanticType,
+          role: field.role,
+          nullable: field.nullable === true,
+        }))
+        : columns.map(column => ({
+          code: column.columnName,
+          name: column.businessName || column.columnName,
+          description: `${column.businessName || column.columnName}的统一业务定义与使用口径。`,
+          canonicalType: column.canonicalType,
+          semanticType: column.semanticType,
+          role: column.semanticType,
+          nullable: column.nullable,
+        }))
+      record.dsl.dataset.subject = operatingFixture?.subject ?? record.dsl.dataset.subject
+      if (operatingFixture) record.dsl.outputGrain = { description: operatingFixture.grain, fields: [] }
+      record.dsl.nodes = operatingFixture
+        ? operatingFixture.upstreamCodes.map((code, index) => ({ id: `upstream-${index + 1}`, name: code, code, type: 'DATASET_VERSION' }))
+        : asset ? [{ id: 'detail-source', name: asset.businessName || asset.tableName, type: 'TABLE' }] : []
+      record.dsl.fields = outputFields.map((field, index) => ({
+        id: `${dataset.id}-field-${index + 1}`,
+        ...field,
+        visible: true,
+        expression: { field: field.code },
       }))
-      const exampleValue = (column: AssetColumn, row: number) => {
-        if (column.semanticType === 'IDENTIFIER') return `${column.columnName.slice(0, 3).toUpperCase()}-${String(row + 1).padStart(4, '0')}`
-        if (column.semanticType === 'DATE') return `2026-08-${String(11 + row).padStart(2, '0')} 09:30:00`
-        if (column.semanticType === 'MEASURE') return (row + 1) * 128.6
-        if (column.semanticType === 'CATEGORY') return ['华东', '华南', '华北'][row] ?? '其他'
+      const exampleValue = (field: typeof outputFields[number], row: number) => {
+        if (field.semanticType === 'IDENTIFIER') return `${field.code.slice(0, 3).toUpperCase()}-${String(row + 1).padStart(4, '0')}`
+        if (field.semanticType === 'DATE') return `2026-0${6 + row}-01`
+        if (field.semanticType === 'MEASURE') return Number(((row + 1) * 128.6).toFixed(2))
+        if (field.semanticType === 'CATEGORY') return ['整体', '国内', '海外'][row] ?? '其他'
         return ['示例客户 A', '示例客户 B', '示例客户 C'][row] ?? `样例 ${row + 1}`
       }
       setDetail(record)
-      setDetailAsset(asset)
-      setDetailAssetColumns(columns)
+      setDetailAsset(operatingFixture ? null : asset)
+      setDetailAssetColumns(operatingFixture ? [] : columns)
       setDetailPreview({
         queryId: `snapshot-detail-${dataset.id}`,
-        columns: columns.map(column => column.columnName),
-        rows: [0, 1, 2].map(row => columns.map(column => exampleValue(column, row))),
+        columns: outputFields.map(field => field.code),
+        rows: [0, 1, 2].map(row => outputFields.map(field => exampleValue(field, row))),
         rowCount: 3,
         durationMs: 86,
       })
@@ -4770,7 +4801,7 @@ export function DatasetCenterPage() {
 
             {rowMenuID === dataset.id && <div className="dataset-asset-menu" role="menu">
               {dagRuns[dataset.id] && <button type="button" role="menuitem" disabled={actionBusy} onClick={() => { setRowMenuID(''); void openMaterialization(dataset) }}><WarningCircleIcon size={15} />运行诊断</button>}
-              {dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId && <button type="button" role="menuitem" disabled={actionBusy} onClick={() => { setRowMenuID(''); void openHistory(dataset) }}><CalendarDotsIcon size={15} />版本记录</button>}
+              {!operatingAnalysisDatasetByID(dataset.id) && dataset.status === 'PUBLISHED' && dataset.currentPublishedVersionId && <button type="button" role="menuitem" disabled={actionBusy} onClick={() => { setRowMenuID(''); void openHistory(dataset) }}><CalendarDotsIcon size={15} />版本记录</button>}
               {datasetManagePermissions[dataset.id] && dataset.status === 'DISABLED'
                 ? <button type="button" role="menuitem" disabled={actionBusy} onClick={() => { setRowMenuID(''); void openLifecycle(dataset, 'restore') }}><ArrowCounterClockwiseIcon size={15} />恢复启用</button>
                 : datasetManagePermissions[dataset.id] && ['DRAFT', 'PUBLISHED', 'STALE'].includes(dataset.status) && <button type="button" role="menuitem" disabled={actionBusy} onClick={() => { setRowMenuID(''); void openLifecycle(dataset, 'disable') }}><DropSlashIcon size={15} />停用数据集</button>}
@@ -4842,12 +4873,12 @@ export function DatasetCenterPage() {
 
     {dialog?.mode === 'metadata' && <Dialog title={editingRecord ? '保存数据集修改' : '完善数据集信息'} eyebrow="保存配置" onClose={() => { if (!busyAction) setDialog({ mode: 'create' }) }}>
       <div className="dataset-metadata-form">
-        <p>图形化配置已完成，请确认物理落层，并补充数据集的主题、名称和说明后保存。业务领域自动继承当前用户所属领域。</p>
+        <p>图形化配置已完成，请确认数据集层级（粒度合同），并补充主题、名称和说明后保存。业务领域自动继承当前用户所属领域。</p>
         <label>
           数据集层级
           <select
             aria-label="数据集层级"
-            value={layerChoices.includes(draft.layer as DatasetLayer) ? draft.layer : layerChoices[0]}
+            value={effectiveLayer}
             disabled={Boolean(editingRecord?.currentPublishedVersionId)}
             onChange={event => setDraft(current => ({ ...current, layer: event.target.value as DatasetLayer }))}
           >
@@ -4855,7 +4886,9 @@ export function DatasetCenterPage() {
               {datasetLayerLabels[layer]}{layerChoices.includes(layer) ? '' : '（当前血缘不可用）'}
             </option>)}
           </select>
-          <small>完整展示五个数仓层级；单个物理数据集选择一个落地层级，系统按当前上游血缘校验可用范围。</small>
+          <small>{draftLineage === 'SOURCE'
+            ? `源表直落：单张物理表可按其既有粒度直接声明任意层级，保存后按该层级入仓。${sourceLayerRequirement(effectiveLayer)}`
+            : '分层建模：引用已发布数据集版本，可选层级按上游层级推导（ODS→DIM/DWD→DWS→ADS）。'}</small>
         </label>
         <div className="dataset-metadata-grid">
           <label>
@@ -4915,7 +4948,7 @@ export function DatasetCenterPage() {
         </header>
         <section className="dataset-detail-overview" aria-label="数据集资产概览">
           <div className="dataset-detail-section-heading"><div><span className="dataset-detail-section-icon"><TreeStructureIcon size={17} /></span><span><strong>资产概览</strong><small>身份、范围与当前版本</small></span></div><em>{detail.code}</em></div>
-          <dl className="dataset-detail-properties"><div><dt>数据集编码</dt><dd>{detail.code}</dd></div><div><dt>数据集类型</dt><dd>{typeLabels[detail.type] ?? detail.type}</dd></div><div><dt>业务领域</dt><dd>{selectedBusinessDomainName || '未配置'}</dd></div><div><dt>共享范围</dt><dd><AssetSharingSelect resourceType="DATASET" resourceID={detail.id} value={detail.sharingScope ?? 'PRIVATE'} ownerUserID={detail.ownerUserId} assetDomainID={detail.domainId} disabled={actionBusy} onChange={sharingScope => { setDetail(current => current ? { ...current, sharingScope } : current); setDatasets(current => current.map(item => item.id === detail.id ? { ...item, sharingScope } : item)) }} /></dd></div><div><dt>业务主题</dt><dd>{detail.dsl.dataset.subject || '未配置'}</dd></div><div><dt>聚合版本</dt><dd>V{detail.version}</dd></div></dl>
+          <dl className="dataset-detail-properties"><div><dt>数据集编码</dt><dd>{detail.code}</dd></div><div><dt>数据集类型</dt><dd>{typeLabels[detail.type] ?? detail.type}</dd></div><div><dt>业务领域</dt><dd>{selectedBusinessDomainName || '未配置'}</dd></div><div><dt>共享范围</dt><dd><AssetSharingSelect resourceType="DATASET" resourceID={detail.id} value={detail.sharingScope ?? 'PRIVATE'} ownerUserID={detail.ownerUserId} assetDomainID={detail.domainId} disabled={actionBusy || Boolean(operatingAnalysisDatasetByID(detail.id))} onChange={sharingScope => { setDetail(current => current ? { ...current, sharingScope } : current); setDatasets(current => current.map(item => item.id === detail.id ? { ...item, sharingScope } : item)) }} /></dd></div><div><dt>业务主题</dt><dd>{detail.dsl.dataset.subject || '未配置'}</dd></div><div><dt>聚合版本</dt><dd>V{detail.version}</dd></div></dl>
           <div className="dataset-detail-kpis" aria-label="数据集关键指标"><article><span>草稿版本</span><strong>V{detail.draftVersionNo}</strong></article><article><span>数据节点</span><strong>{Array.isArray(detail.dsl.nodes) ? detail.dsl.nodes.length : 0}</strong></article><article><span>输出字段</span><strong>{completeDetailFields.length}</strong></article></div>
         </section>
         <section className="dataset-detail-metadata" aria-label="LLM 生成的完整元数据">
@@ -4938,7 +4971,7 @@ export function DatasetCenterPage() {
           <div className="dataset-detail-section-heading"><div><span className="dataset-detail-section-icon is-preview"><MagnifyingGlassIcon size={17} /></span><span><strong>预览结果</strong><small>当前草稿 DAG 的执行结果</small></span></div><em>前 10 行 · 仅演示，不入仓</em></div>
           <div className="dataset-detail-preview-body">{detailPreview ? <PreviewRows preview={detailPreview} /> : <div className="dataset-center-feedback error" role="alert">{detailPreviewError || '暂无可预览数据'}</div>}</div>
         </section>
-        <footer><button className="quiet-button" type="button" onClick={closeDialog}>关闭</button><button className="quiet-button" type="button" onClick={openMetadataEdit}>修改元信息</button><button className="primary-button" type="button" onClick={() => { setDialog(null); void openEdit(detail) }}>修改 DAG</button></footer>
+        <footer><button className="quiet-button" type="button" onClick={closeDialog}>关闭</button>{!operatingAnalysisDatasetByID(detail.id) && <><button className="quiet-button" type="button" onClick={openMetadataEdit}>修改元信息</button><button className="primary-button" type="button" onClick={() => { setDialog(null); void openEdit(detail) }}>修改 DAG</button></>}</footer>
       </div> : <div className="dataset-center-feedback error" role="alert">{formError}</div>}
     </Dialog>}
 

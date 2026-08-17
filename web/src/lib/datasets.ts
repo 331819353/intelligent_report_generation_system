@@ -1,6 +1,7 @@
 import { apiRequest } from './api'
 import { graphContains, graphGroupOutputKey, graphLeaves, graphProducedFields, normalizeGraphTransformComponentType, serializeDesignerGraph, type DesignerGraphV1, type GraphInput, type GraphTransform, type GraphTransformComponentType } from './dataset-graph'
 import { designerOutputRole } from './dataset-field-role'
+import { chooseDatasetLayers, datasetLineage, type DatasetLineage } from './dataset-layer'
 export type { CanvasPoint as GraphPosition, DesignerGraphV1, GraphDimension, GraphEnd, GraphEndOutput, GraphGroup, GraphGroupByMode, GraphInput, GraphJoin, GraphMetric } from './dataset-graph'
 export type DatasetLayer = 'ODS' | 'DIM' | 'DWD' | 'DWS' | 'ADS'
 
@@ -62,6 +63,7 @@ export type DatasetDraft = {
   finalConfigured?: boolean; finalGroupingEnabled?: boolean
   preAggregation?: PreAggregationDraft; preAggregations?: PreAggregationDraft[]; finalOutputKeys?: string[]
   semanticContractVersion?: string; consumerContractId?: string
+  /** 遗留标记：仅在编辑早期分类器写入 PRE_AGGREGATED 的 DWS 时原样回写，新草稿不设置。 */
   sourceMode?: 'PRE_AGGREGATED'
   factContract?: Record<string, unknown>; analysisContract?: Record<string, unknown>
   designer?: DesignerGraphV1
@@ -272,27 +274,16 @@ const executableTransformComponentType = (transform: GraphTransform): GraphTrans
   if (operation === 'CONCAT' || transform.family === 'SPLIT_MERGE') return 'TEXT_CONCAT'
   return 'TEXT_SUBSTRING'
 }
+/** 当前画布可选层级（首项为默认）；血缘由拓扑推导，见 dataset-layer.ts。 */
 export const datasetLayerChoices = (draft: DatasetDraft): DatasetLayer[] => {
-  const datasetNodes = draft.nodes.filter(node => node.table.sourceKind === 'DATASET')
-  if (datasetNodes.length !== draft.nodes.length) return draft.sourceMode === 'PRE_AGGREGATED' ? ['DWS'] : ['ODS']
-  const upstreamLayers = new Set(datasetNodes.map(node => node.table.datasetLayer).filter(Boolean))
-  if (!upstreamLayers.size) throw new Error('无法识别上游数据集层级')
-  if ([...upstreamLayers].every(layer => layer === 'ODS' || layer === 'DIM') && upstreamLayers.has('ODS')) {
-    // 保持既有 ODS 数据节点画布默认生成 DWD；用户可在保存前明确切换为 DIM。
-    // DWD 的合法输入是一张事实 ODS 加可选 DIM；DIM 仍严格限制为纯 ODS 输入。
-    return upstreamLayers.has('DIM') ? ['DWD'] : ['DWD', 'DIM']
-  }
-  if ([...upstreamLayers].every(layer => layer === 'DWD' || layer === 'DIM') && upstreamLayers.has('DWD')) return ['DWS']
-  if ([...upstreamLayers].every(layer => layer === 'DWS')) return ['ADS']
-  throw new Error('上游数据集层级不符合 ODS→DIM/DWD→DWS→ADS 合同')
+  return chooseDatasetLayers(draft)
 }
+export const datasetDraftLineage = (draft: DatasetDraft): DatasetLineage => datasetLineage(draft)
 const modeledDatasetLayer = (draft: DatasetDraft): DatasetLayer => {
   const choices = datasetLayerChoices(draft)
   return draft.layer && choices.includes(draft.layer) ? draft.layer : choices[0]
 }
-const modeledExecutionPolicy = (layer: DatasetLayer, sourceMode?: DatasetDraft['sourceMode']) => {
-  void layer
-  void sourceMode
+const modeledExecutionPolicy = () => {
   return {
     mode: 'MATERIALIZED_PREFERRED',
     timeoutMs: 30000,
@@ -710,7 +701,7 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
       ...(draft.domain?.trim() ? { domain: draft.domain.trim() } : {}),
       ...(draft.subject?.trim() ? { subject: draft.subject.trim() } : {}),
       type: sourceCount > 1 ? 'CROSS_SOURCE' : 'SINGLE_SOURCE', layer,
-      ...(draft.sourceMode ? { sourceMode: draft.sourceMode } : {}),
+      ...(draft.sourceMode && layer === 'DWS' ? { sourceMode: draft.sourceMode } : {}),
       ...(draft.semanticContractVersion ? { semanticContractVersion: draft.semanticContractVersion } : {}),
       ...(draft.consumerContractId ? { consumerContractId: draft.consumerContractId } : {}),
     },
@@ -729,7 +720,7 @@ function buildDesignerDatasetDSL(draft: DatasetDraft, designer: DesignerGraphV1)
     sorts: draft.sorts.flatMap(item => fieldIDs.get(item.fieldId) ? [{ fieldId: fieldIDs.get(item.fieldId)!, direction: item.direction }] : []),
     parameters: draft.parameters.map(item => ({ ...item, code: identifier(item.code) })),
     outputGrain: { description: grainDescription, keyFields: grainKeys },
-    executionPolicy: modeledExecutionPolicy(layer, draft.sourceMode),
+    executionPolicy: modeledExecutionPolicy(),
     designer: serializeDesignerGraph(designer),
   }
 }
@@ -831,7 +822,7 @@ export function buildDatasetDSL(draft: DatasetDraft): DatasetDSL {
       ...(draft.domain?.trim() ? { domain: draft.domain.trim() } : {}),
       ...(draft.subject?.trim() ? { subject: draft.subject.trim() } : {}),
       type: sourceCount > 1 ? 'CROSS_SOURCE' : 'SINGLE_SOURCE', layer,
-      ...(draft.sourceMode ? { sourceMode: draft.sourceMode } : {}),
+      ...(draft.sourceMode && layer === 'DWS' ? { sourceMode: draft.sourceMode } : {}),
       ...(draft.semanticContractVersion ? { semanticContractVersion: draft.semanticContractVersion } : {}),
       ...(draft.consumerContractId ? { consumerContractId: draft.consumerContractId } : {}),
     },
@@ -851,7 +842,7 @@ export function buildDatasetDSL(draft: DatasetDraft): DatasetDSL {
     sorts: draft.sorts.filter(item => item.fieldId).map(item => ({ fieldId: fieldIDs.get(item.fieldId) ?? item.fieldId, direction: item.direction })),
     parameters: draft.parameters.map(item => ({ ...item, code: identifier(item.code) })),
     outputGrain: { description: draft.grainDescription.trim(), keyFields: grainKeys },
-    executionPolicy: modeledExecutionPolicy(layer, draft.sourceMode),
+    executionPolicy: modeledExecutionPolicy(),
   }
 }
 

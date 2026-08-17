@@ -92,6 +92,14 @@ type Builder interface {
 	Build(context.Context, warehouse.BuildInput) (warehouse.BuildResult, error)
 }
 
+// StagingDiscarder is implemented by builders that can drop the run-scoped
+// staging tables once a build has reached a terminal state. Staging rows are a
+// transient copy of the source; only materialized dataset relations belong in
+// the warehouse permanently.
+type StagingDiscarder interface {
+	DiscardStaging(context.Context, string, string, map[string]querycompiler.TableRef) error
+}
+
 func validateDependencies(store Store, resolver Resolver, builder Builder) error {
 	if store == nil || resolver == nil || builder == nil {
 		return fmt.Errorf("materialization worker dependencies are not configured")

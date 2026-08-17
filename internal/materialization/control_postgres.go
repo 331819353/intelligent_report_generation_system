@@ -83,8 +83,8 @@ func (store *PostgresStore) RegisterCurrent(
 	return run, created, nil
 }
 
-// EnqueueMappedDatasetMaterializationTx registers the exact source-backed ODS
-// or PRE_AGGREGATED DWS version in the caller's publication transaction.
+// EnqueueMappedDatasetMaterializationTx registers an exact SOURCE-lineage
+// version: a single physical table declared at any warehouse layer.
 func (store *PostgresStore) EnqueueMappedDatasetMaterializationTx(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -352,6 +352,7 @@ func deriveCurrentInputsTx(
 	targetDatasetID string,
 	target publishedBuildTarget,
 ) ([]InputSnapshot, []int, error) {
+	// SOURCE lineage: the physical table is the only input for any layer.
 	if dataset.IsSourceBackedMaterialization(target.Document) {
 		input, err := deriveSourceInputTx(ctx, tx, target.Document.Nodes[0])
 		if err != nil {
@@ -359,16 +360,11 @@ func deriveCurrentInputsTx(
 		}
 		return []InputSnapshot{input}, []int{1}, nil
 	}
+	// MODELED lineage: every node is a published upstream version whose layer
+	// must satisfy the ODS→DIM/DWD→DWS→ADS direction.
 	switch target.Layer {
 	case LayerDIM, LayerDWD, LayerDWS, LayerADS:
-		allowedLayers := map[Layer]bool{LayerODS: true}
-		if target.Layer == LayerDWD {
-			allowedLayers = map[Layer]bool{LayerODS: true, LayerDIM: true}
-		} else if target.Layer == LayerDWS {
-			allowedLayers = map[Layer]bool{LayerDWD: true, LayerDIM: true}
-		} else if target.Layer == LayerADS {
-			allowedLayers = map[Layer]bool{LayerDWS: true}
-		}
+		allowedLayers := modeledUpstreamLayers(target.Layer)
 		inputs := make([]InputSnapshot, 0, len(target.Document.Nodes))
 		ordinals := make([]int, len(target.Document.Nodes))
 		byVersion := make(map[string]int, len(target.Document.Nodes))

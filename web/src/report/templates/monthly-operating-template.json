@@ -1,0 +1,2255 @@
+{
+  "schemaVersion": "1.2",
+  "id": "tpl-sales-monthly",
+  "code": "TPL-RPT-001",
+  "name": "经营分析报告模板",
+  "templateType": "REPORT",
+  "description": "按产业经营分析框架覆盖整体损益、国内与海外损益、预测、应收、库存及行动建议。",
+  "status": "ACTIVE",
+  "version": 8,
+  "owner": "王敏",
+  "updatedAt": "2026-08-17T18:00:00+08:00",
+  "usageCount": 28,
+  "tags": [
+    "月报",
+    "产业经营",
+    "损益分析"
+  ],
+  "analysisTree": [
+    {
+      "id": "tpl-sales-monthly-root",
+      "title": "产业分析报告",
+      "description": "",
+      "explanationSections": [
+        {
+          "id": "tpl-sales-monthly-root-conclusion",
+          "templateType": "CONCLUSION_OUTPUT",
+          "title": "报告总体输出",
+          "fields": {},
+          "conclusionFormat": {
+            "referenceExample": "本月产业经营总体稳中向好，收入和毛利改善；费用、应收与库存风险需落实专项行动。",
+            "style": "SUMMARY",
+            "instruction": "汇总核心结论、主要风险、次月预测与行动建议，形成完整的产业月度经营分析报告。",
+            "requiredFields": [
+              "核心结论",
+              "损益表现",
+              "风险预警",
+              "预测判断",
+              "行动建议"
+            ],
+            "maxLength": 1000
+          },
+          "items": []
+        }
+      ],
+      "children": [
+        {
+          "id": "tpl-sales-monthly-core-summary",
+          "title": "核心结论摘要",
+          "description": "",
+          "explanationSections": [
+            {
+              "id": "tpl-sales-monthly-core-summary-objective",
+              "templateType": "ANALYSIS_OBJECTIVE",
+              "title": "分析目标",
+              "fields": {
+                "objective": "形成整份产业经营报告的核心判断与风险预警。",
+                "scope": "覆盖损益、应收、库存、预测与行动建议。",
+                "audience": "经营管理层、业务负责人",
+                "successCriteria": "能够定位关键变化、解释主要动因并形成可执行建议。"
+              },
+              "items": []
+            }
+          ],
+          "children": [
+            {
+              "id": "tpl-sales-monthly-core-summary-output",
+              "title": "核心结论摘要",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-core-summary-output-summary-dimensions",
+                  "templateType": "METRIC_DISPLAY",
+                  "title": "总结指标角度",
+                  "fields": {},
+                  "itemConfig": {
+                    "metricDisplays": [
+                      {
+                        "id": "tpl-sales-monthly-core-summary-output-summary-dimensions-metric-1",
+                        "metric": "收入",
+                        "role": "CORE",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示收入当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-core-summary-output-summary-dimensions-metric-2",
+                        "metric": "销售毛利率",
+                        "role": "CORE",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示销售毛利率当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-core-summary-output-summary-dimensions-metric-3",
+                        "metric": "费用率",
+                        "role": "CORE",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示费用率当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-core-summary-output-summary-dimensions-metric-4",
+                        "metric": "管理利润",
+                        "role": "CORE",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示管理利润当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-core-summary-output-summary-dimensions-metric-5",
+                        "metric": "应收",
+                        "role": "CORE",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示应收当前值及关键对比变化。"
+                      }
+                    ],
+                    "comparisons": [
+                      "目标",
+                      "同期",
+                      "同比"
+                    ],
+                    "dimensions": [],
+                    "filters": [],
+                    "breakdownRules": [],
+                    "displayRequirements": "先给出总体判断，再围绕收入、销售毛利率、费用率、管理利润和应收形成摘要。"
+                  },
+                  "items": []
+                },
+                {
+                  "id": "tpl-sales-monthly-core-summary-output-conclusion",
+                  "templateType": "CONCLUSION_OUTPUT",
+                  "title": "核心结论摘要",
+                  "fields": {},
+                  "conclusionFormat": {
+                    "referenceExample": "本月收入保持增长、销售毛利率改善，管理利润总体达成目标；需重点关注费用率抬升和逾期应收风险。",
+                    "style": "SUMMARY",
+                    "instruction": "按照结果—原因—影响—动作的顺序形成管理层可直接阅读的核心摘要。",
+                    "requiredFields": [
+                      "总体判断",
+                      "关键亮点",
+                      "主要偏差",
+                      "管理动作"
+                    ],
+                    "maxLength": 500
+                  },
+                  "items": []
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "tpl-sales-monthly-core-risk-warning",
+              "title": "核心风险预警",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-core-risk-warning-risk-conclusion",
+                  "templateType": "CONCLUSION_OUTPUT",
+                  "title": "风险预警输出",
+                  "fields": {},
+                  "conclusionFormat": {
+                    "referenceExample": "海外费用率连续两期高于目标，逾期应收集中于重点客户，建议分别落实费用压降和回款责任。",
+                    "style": "BULLETS",
+                    "instruction": "只输出达到预警阈值且有数据证据的风险，按影响程度从高到低排列。",
+                    "requiredFields": [
+                      "风险事项",
+                      "影响程度",
+                      "数据证据",
+                      "责任动作"
+                    ],
+                    "maxLength": 400
+                  },
+                  "items": []
+                }
+              ],
+              "children": []
+            }
+          ]
+        },
+        {
+          "id": "tpl-sales-monthly-overall-profit-loss",
+          "title": "一、损益分析-整体",
+          "description": "",
+          "explanationSections": [
+            {
+              "id": "tpl-sales-monthly-overall-profit-loss-objective",
+              "templateType": "ANALYSIS_OBJECTIVE",
+              "title": "分析目标",
+              "fields": {
+                "objective": "判断产业整体损益表现并解释利润差异。",
+                "scope": "产业整体口径，覆盖收入、毛利率、费用率、管理利润和利润率。",
+                "audience": "经营管理层、业务负责人",
+                "successCriteria": "能够定位关键变化、解释主要动因并形成可执行建议。"
+              },
+              "items": []
+            }
+          ],
+          "children": [
+            {
+              "id": "tpl-sales-monthly-overall-core-metrics",
+              "title": "核心指标",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-overall-core-metrics-metrics",
+                  "templateType": "METRIC_DISPLAY",
+                  "title": "指标展示",
+                  "fields": {},
+                  "itemConfig": {
+                    "metricDisplays": [
+                      {
+                        "id": "tpl-sales-monthly-overall-core-metrics-metrics-metric-1",
+                        "metric": "收入",
+                        "role": "CORE",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示收入当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-overall-core-metrics-metrics-metric-2",
+                        "metric": "销售毛利率",
+                        "role": "CORE",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示销售毛利率当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-overall-core-metrics-metrics-metric-3",
+                        "metric": "费用率",
+                        "role": "CORE",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示费用率当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-overall-core-metrics-metrics-metric-4",
+                        "metric": "管理利润",
+                        "role": "CORE",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示管理利润当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-overall-core-metrics-metrics-metric-5",
+                        "metric": "利润率",
+                        "role": "CORE",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示利润率当前值及关键对比变化。"
+                      }
+                    ],
+                    "comparisons": [
+                      "目标",
+                      "完成率（仅收入、利润）",
+                      "目标比",
+                      "同比",
+                      "同期"
+                    ],
+                    "dimensions": [],
+                    "filters": [],
+                    "breakdownRules": [],
+                    "displayRequirements": "同屏展示实际值与对比结果；收入和利润额外展示目标完成率。"
+                  },
+                  "items": []
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "tpl-sales-monthly-overall-profit-drivers",
+              "title": "利润动因",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-overall-profit-drivers-objective",
+                  "templateType": "ANALYSIS_OBJECTIVE",
+                  "title": "分析目标",
+                  "fields": {
+                    "objective": "解释实际利润相对目标和同期的变化来源。",
+                    "scope": "覆盖国内、海外的收入、毛利率与费用影响，其他因素采用倒挤。",
+                    "audience": "经营管理层、业务负责人",
+                    "successCriteria": "能够定位关键变化、解释主要动因并形成可执行建议。"
+                  },
+                  "items": []
+                }
+              ],
+              "children": [
+                {
+                  "id": "tpl-sales-monthly-overall-profit-waterfall-target",
+                  "title": "利润瀑布图（目标→实际）",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-overall-profit-waterfall-target-metrics",
+                      "templateType": "METRIC_DISPLAY",
+                      "title": "指标展示",
+                      "fields": {},
+                      "itemConfig": {
+                        "metricDisplays": [
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-target-metrics-metric-1",
+                            "metric": "目标利润",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "作为瀑布图端点展示目标利润。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-target-metrics-metric-2",
+                            "metric": "实际利润",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "作为瀑布图端点展示实际利润。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-target-metrics-metric-3",
+                            "metric": "国内收入影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示国内收入影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-target-metrics-metric-4",
+                            "metric": "海外收入影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示海外收入影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-target-metrics-metric-5",
+                            "metric": "国内材料毛利率影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示国内材料毛利率影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-target-metrics-metric-6",
+                            "metric": "海外销售毛利率影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示海外销售毛利率影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-target-metrics-metric-7",
+                            "metric": "国内费用影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示国内费用影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-target-metrics-metric-8",
+                            "metric": "海外费用影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示海外费用影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-target-metrics-metric-9",
+                            "metric": "其他（倒挤）",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示其他（倒挤）对利润变化的正负贡献。"
+                          }
+                        ],
+                        "comparisons": [
+                          "目标",
+                          "实际"
+                        ],
+                        "dimensions": [
+                          "利润动因"
+                        ],
+                        "filters": [],
+                        "breakdownRules": [
+                          "动因按影响绝对值由高到低排列",
+                          "其他项采用倒挤口径"
+                        ],
+                        "displayRequirements": "首尾展示结果指标，中间展示各动因的正负贡献，确保贡献合计可回勾实际利润。"
+                      },
+                      "items": []
+                    },
+                    {
+                      "id": "tpl-sales-monthly-overall-profit-waterfall-target-waterfall",
+                      "templateType": "DISPLAY_STANDARD",
+                      "title": "展示规范",
+                      "fields": {
+                        "layout": "利润瀑布图",
+                        "sorting": "按业务逻辑顺序展示，动因按贡献绝对值降序",
+                        "highlight": "正向贡献、负向贡献和其他倒挤项使用明确的语义色，并标注金额。",
+                        "interaction": "支持查看指标口径、维度明细与关键动因。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": []
+                },
+                {
+                  "id": "tpl-sales-monthly-overall-profit-waterfall-period",
+                  "title": "利润瀑布图（同期→实际）",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-overall-profit-waterfall-period-metrics",
+                      "templateType": "METRIC_DISPLAY",
+                      "title": "指标展示",
+                      "fields": {},
+                      "itemConfig": {
+                        "metricDisplays": [
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-period-metrics-metric-1",
+                            "metric": "同期利润",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "作为瀑布图端点展示同期利润。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-period-metrics-metric-2",
+                            "metric": "实际利润",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "作为瀑布图端点展示实际利润。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-period-metrics-metric-3",
+                            "metric": "国内收入影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示国内收入影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-period-metrics-metric-4",
+                            "metric": "海外收入影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示海外收入影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-period-metrics-metric-5",
+                            "metric": "国内材料毛利率影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示国内材料毛利率影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-period-metrics-metric-6",
+                            "metric": "海外销售毛利率影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示海外销售毛利率影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-period-metrics-metric-7",
+                            "metric": "国内费用影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示国内费用影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-period-metrics-metric-8",
+                            "metric": "海外费用影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示海外费用影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overall-profit-waterfall-period-metrics-metric-9",
+                            "metric": "其他（倒挤）",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示其他（倒挤）对利润变化的正负贡献。"
+                          }
+                        ],
+                        "comparisons": [
+                          "同期",
+                          "实际"
+                        ],
+                        "dimensions": [
+                          "利润动因"
+                        ],
+                        "filters": [],
+                        "breakdownRules": [
+                          "动因按影响绝对值由高到低排列",
+                          "其他项采用倒挤口径"
+                        ],
+                        "displayRequirements": "首尾展示结果指标，中间展示各动因的正负贡献，确保贡献合计可回勾实际利润。"
+                      },
+                      "items": []
+                    },
+                    {
+                      "id": "tpl-sales-monthly-overall-profit-waterfall-period-waterfall",
+                      "templateType": "DISPLAY_STANDARD",
+                      "title": "展示规范",
+                      "fields": {
+                        "layout": "利润瀑布图",
+                        "sorting": "按业务逻辑顺序展示，动因按贡献绝对值降序",
+                        "highlight": "正向贡献、负向贡献和其他倒挤项使用明确的语义色，并标注金额。",
+                        "interaction": "支持查看指标口径、维度明细与关键动因。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "tpl-sales-monthly-domestic-profit-loss",
+          "title": "二、国内损益",
+          "description": "",
+          "explanationSections": [
+            {
+              "id": "tpl-sales-monthly-domestic-profit-loss-scope",
+              "templateType": "DATA_SCOPE",
+              "title": "数据口径",
+              "fields": {
+                "dataRange": "国内业务",
+                "period": "本月",
+                "definition": "筛选条件：国内；收入、毛利、费用和利润使用一致的组织与月结口径。",
+                "source": "经营分析宽表、财务月结数据及业务明细数据"
+              },
+              "items": []
+            }
+          ],
+          "children": [
+            {
+              "id": "tpl-sales-monthly-domestic-income",
+              "title": "2.1 国内收入情况",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-domestic-income-objective",
+                  "templateType": "ANALYSIS_OBJECTIVE",
+                  "title": "分析目标",
+                  "fields": {
+                    "objective": "判断国内收入增长质量并定位链群、渠道和品牌贡献。",
+                    "scope": "覆盖零售行情、链群收入、渠道收入和品牌收入。",
+                    "audience": "经营管理层、业务负责人",
+                    "successCriteria": "能够定位关键变化、解释主要动因并形成可执行建议。"
+                  },
+                  "items": []
+                }
+              ],
+              "children": [
+                {
+                  "id": "tpl-sales-monthly-domestic-retail-market",
+                  "title": "2.1.1 零售行情",
+                  "description": "",
+                  "explanationSections": [],
+                  "children": [
+                    {
+                      "id": "tpl-sales-monthly-domestic-retail-online",
+                      "title": "线上",
+                      "description": "",
+                      "explanationSections": [
+                        {
+                          "id": "tpl-sales-monthly-domestic-retail-online-metrics",
+                          "templateType": "METRIC_DISPLAY",
+                          "title": "指标展示",
+                          "fields": {},
+                          "itemConfig": {
+                            "metricDisplays": [
+                              {
+                                "id": "tpl-sales-monthly-domestic-retail-online-metrics-metric-1",
+                                "metric": "零售额同比",
+                                "role": "COMPARISON",
+                                "displayForm": "LINE_CHART",
+                                "displayRequirements": "展示零售额同比当前值及关键对比变化。"
+                              },
+                              {
+                                "id": "tpl-sales-monthly-domestic-retail-online-metrics-metric-2",
+                                "metric": "份额同比",
+                                "role": "COMPARISON",
+                                "displayForm": "LINE_CHART",
+                                "displayRequirements": "展示份额同比当前值及关键对比变化。"
+                              }
+                            ],
+                            "comparisons": [],
+                            "dimensions": [
+                              "品类 > 品牌系 > 品牌"
+                            ],
+                            "filters": [],
+                            "breakdownRules": [],
+                            "displayRequirements": "展示线上零售额和份额同比趋势，支持从品类下钻至品牌。"
+                          },
+                          "items": []
+                        }
+                      ],
+                      "children": []
+                    },
+                    {
+                      "id": "tpl-sales-monthly-domestic-retail-offline",
+                      "title": "线下",
+                      "description": "",
+                      "explanationSections": [
+                        {
+                          "id": "tpl-sales-monthly-domestic-retail-offline-metrics",
+                          "templateType": "METRIC_DISPLAY",
+                          "title": "指标展示",
+                          "fields": {},
+                          "itemConfig": {
+                            "metricDisplays": [
+                              {
+                                "id": "tpl-sales-monthly-domestic-retail-offline-metrics-metric-1",
+                                "metric": "零售额同比",
+                                "role": "COMPARISON",
+                                "displayForm": "LINE_CHART",
+                                "displayRequirements": "展示零售额同比当前值及关键对比变化。"
+                              },
+                              {
+                                "id": "tpl-sales-monthly-domestic-retail-offline-metrics-metric-2",
+                                "metric": "份额同比",
+                                "role": "COMPARISON",
+                                "displayForm": "LINE_CHART",
+                                "displayRequirements": "展示份额同比当前值及关键对比变化。"
+                              }
+                            ],
+                            "comparisons": [],
+                            "dimensions": [
+                              "品类 > 品牌系 > 品牌"
+                            ],
+                            "filters": [],
+                            "breakdownRules": [],
+                            "displayRequirements": "展示线下零售额和份额同比趋势，支持从品类下钻至品牌。"
+                          },
+                          "items": []
+                        }
+                      ],
+                      "children": []
+                    }
+                  ]
+                },
+                {
+                  "id": "tpl-sales-monthly-domestic-chain-income",
+                  "title": "2.1.2 链群收入情况",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-domestic-chain-income-metrics",
+                      "templateType": "METRIC_DISPLAY",
+                      "title": "指标展示",
+                      "fields": {},
+                      "itemConfig": {
+                        "metricDisplays": [
+                          {
+                            "id": "tpl-sales-monthly-domestic-chain-income-metrics-metric-1",
+                            "metric": "收入",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示收入当前值及关键对比变化。"
+                          }
+                        ],
+                        "comparisons": [
+                          "实际",
+                          "目标",
+                          "完成率",
+                          "同期",
+                          "同比"
+                        ],
+                        "dimensions": [
+                          "链群"
+                        ],
+                        "filters": [],
+                        "breakdownRules": [
+                          "分区逻辑：大差、小差、零差"
+                        ],
+                        "displayRequirements": "按链群展示实际收入、目标完成和同期对比，并按差异区间分区。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": []
+                },
+                {
+                  "id": "tpl-sales-monthly-domestic-channel-income",
+                  "title": "2.1.3 渠道收入情况",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-domestic-channel-income-metrics",
+                      "templateType": "METRIC_DISPLAY",
+                      "title": "指标展示",
+                      "fields": {},
+                      "itemConfig": {
+                        "metricDisplays": [
+                          {
+                            "id": "tpl-sales-monthly-domestic-channel-income-metrics-metric-1",
+                            "metric": "收入",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示收入当前值及关键对比变化。"
+                          }
+                        ],
+                        "comparisons": [
+                          "实际",
+                          "目标",
+                          "完成率",
+                          "同期",
+                          "同比"
+                        ],
+                        "dimensions": [
+                          "大渠道 > 小渠道"
+                        ],
+                        "filters": [],
+                        "breakdownRules": [
+                          "分区逻辑：大差、小差、零差"
+                        ],
+                        "displayRequirements": "从大渠道下钻至小渠道，展示目标完成情况和同比变化。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": []
+                },
+                {
+                  "id": "tpl-sales-monthly-domestic-brand-income",
+                  "title": "2.1.4 品牌收入情况",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-domestic-brand-income-metrics",
+                      "templateType": "METRIC_DISPLAY",
+                      "title": "指标展示",
+                      "fields": {},
+                      "itemConfig": {
+                        "metricDisplays": [
+                          {
+                            "id": "tpl-sales-monthly-domestic-brand-income-metrics-metric-1",
+                            "metric": "收入",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示收入当前值及关键对比变化。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-brand-income-metrics-metric-2",
+                            "metric": "收入占比",
+                            "role": "CORE",
+                            "displayForm": "PIE_CHART",
+                            "displayRequirements": "展示收入占比当前值及关键对比变化。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-brand-income-metrics-metric-3",
+                            "metric": "单价",
+                            "role": "DRIVER",
+                            "displayForm": "LINE_CHART",
+                            "displayRequirements": "展示单价当前值及关键对比变化。"
+                          }
+                        ],
+                        "comparisons": [
+                          "本期",
+                          "同期",
+                          "同比"
+                        ],
+                        "dimensions": [
+                          "品牌"
+                        ],
+                        "filters": [],
+                        "breakdownRules": [],
+                        "displayRequirements": "按品牌展示收入规模、结构占比和单价变化。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "tpl-sales-monthly-domestic-gross-margin",
+              "title": "2.2 国内销售毛利率分析",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-domestic-gross-margin-objective",
+                  "templateType": "ANALYSIS_OBJECTIVE",
+                  "title": "分析目标",
+                  "fields": {
+                    "objective": "判断国内销售毛利率变化并定位业务动因。",
+                    "scope": "覆盖材料毛利率动因、链群、渠道和品牌对比。",
+                    "audience": "经营管理层、业务负责人",
+                    "successCriteria": "能够定位关键变化、解释主要动因并形成可执行建议。"
+                  },
+                  "items": []
+                }
+              ],
+              "children": [
+                {
+                  "id": "tpl-sales-monthly-domestic-margin-drivers",
+                  "title": "2.2.1 业务动因拆解（国内材料毛利率）",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-domestic-margin-drivers-metrics",
+                      "templateType": "METRIC_DISPLAY",
+                      "title": "指标展示",
+                      "fields": {},
+                      "itemConfig": {
+                        "metricDisplays": [
+                          {
+                            "id": "tpl-sales-monthly-domestic-margin-drivers-metrics-metric-1",
+                            "metric": "当期材料毛利率",
+                            "role": "RESULT",
+                            "displayForm": "INDICATOR",
+                            "displayRequirements": "展示当期材料毛利率当前值及关键对比变化。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-margin-drivers-metrics-metric-2",
+                            "metric": "同期材料毛利率",
+                            "role": "COMPARISON",
+                            "displayForm": "INDICATOR",
+                            "displayRequirements": "展示同期材料毛利率当前值及关键对比变化。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-margin-drivers-metrics-metric-3",
+                            "metric": "成本贡献",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示成本贡献当前值及关键对比变化。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-margin-drivers-metrics-metric-4",
+                            "metric": "政策影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示政策影响当前值及关键对比变化。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-margin-drivers-metrics-metric-5",
+                            "metric": "价格影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示价格影响当前值及关键对比变化。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-margin-drivers-metrics-metric-6",
+                            "metric": "结构影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示结构影响当前值及关键对比变化。"
+                          }
+                        ],
+                        "comparisons": [
+                          "当期",
+                          "同期"
+                        ],
+                        "dimensions": [
+                          "毛利率动因"
+                        ],
+                        "filters": [],
+                        "breakdownRules": [
+                          "动因贡献需回勾当期与同期材料毛利率差异"
+                        ],
+                        "displayRequirements": "通过动因拆解展示材料毛利率变化，并区分成本、政策、价格和结构贡献。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": []
+                },
+                {
+                  "id": "tpl-sales-monthly-domestic-margin-chain",
+                  "title": "2.2.2 链群销售毛利率对比",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-domestic-margin-chain-metrics",
+                      "templateType": "METRIC_DISPLAY",
+                      "title": "指标展示",
+                      "fields": {},
+                      "itemConfig": {
+                        "metricDisplays": [
+                          {
+                            "id": "tpl-sales-monthly-domestic-margin-chain-metrics-metric-1",
+                            "metric": "销售毛利率",
+                            "role": "CORE",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示销售毛利率当前值及关键对比变化。"
+                          }
+                        ],
+                        "comparisons": [
+                          "本期",
+                          "同期",
+                          "目标"
+                        ],
+                        "dimensions": [
+                          "链群"
+                        ],
+                        "filters": [],
+                        "breakdownRules": [],
+                        "displayRequirements": "指标、对比口径与分析维度需保持同一统计周期和业务口径。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": []
+                },
+                {
+                  "id": "tpl-sales-monthly-domestic-margin-channel",
+                  "title": "2.2.3 渠道销售毛利率对比",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-domestic-margin-channel-metrics",
+                      "templateType": "METRIC_DISPLAY",
+                      "title": "指标展示",
+                      "fields": {},
+                      "itemConfig": {
+                        "metricDisplays": [
+                          {
+                            "id": "tpl-sales-monthly-domestic-margin-channel-metrics-metric-1",
+                            "metric": "销售毛利率",
+                            "role": "CORE",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示销售毛利率当前值及关键对比变化。"
+                          }
+                        ],
+                        "comparisons": [
+                          "本期",
+                          "同期",
+                          "目标"
+                        ],
+                        "dimensions": [
+                          "渠道"
+                        ],
+                        "filters": [],
+                        "breakdownRules": [],
+                        "displayRequirements": "指标、对比口径与分析维度需保持同一统计周期和业务口径。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": []
+                },
+                {
+                  "id": "tpl-sales-monthly-domestic-margin-brand",
+                  "title": "2.2.4 品牌销售毛利率对比",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-domestic-margin-brand-metrics",
+                      "templateType": "METRIC_DISPLAY",
+                      "title": "指标展示",
+                      "fields": {},
+                      "itemConfig": {
+                        "metricDisplays": [
+                          {
+                            "id": "tpl-sales-monthly-domestic-margin-brand-metrics-metric-1",
+                            "metric": "销售毛利率",
+                            "role": "CORE",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示销售毛利率当前值及关键对比变化。"
+                          }
+                        ],
+                        "comparisons": [
+                          "本期",
+                          "同期",
+                          "目标"
+                        ],
+                        "dimensions": [
+                          "品牌"
+                        ],
+                        "filters": [],
+                        "breakdownRules": [],
+                        "displayRequirements": "指标、对比口径与分析维度需保持同一统计周期和业务口径。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "tpl-sales-monthly-domestic-expense",
+              "title": "2.3 国内费用分析",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-domestic-expense-objective",
+                  "templateType": "ANALYSIS_OBJECTIVE",
+                  "title": "分析目标",
+                  "fields": {
+                    "objective": "判断国内费用率和费额表现并定位费用动因。",
+                    "scope": "覆盖费用树和物流费用专项分析。",
+                    "audience": "经营管理层、业务负责人",
+                    "successCriteria": "能够定位关键变化、解释主要动因并形成可执行建议。"
+                  },
+                  "items": []
+                }
+              ],
+              "children": [
+                {
+                  "id": "tpl-sales-monthly-domestic-expense-tree",
+                  "title": "2.3.1 国内费用树",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-domestic-expense-tree-metrics",
+                      "templateType": "METRIC_DISPLAY",
+                      "title": "指标展示",
+                      "fields": {},
+                      "itemConfig": {
+                        "metricDisplays": [
+                          {
+                            "id": "tpl-sales-monthly-domestic-expense-tree-metrics-metric-1",
+                            "metric": "费率",
+                            "role": "CORE",
+                            "displayForm": "TABLE",
+                            "displayRequirements": "展示费率当前值及关键对比变化。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-expense-tree-metrics-metric-2",
+                            "metric": "费额",
+                            "role": "RESULT",
+                            "displayForm": "TABLE",
+                            "displayRequirements": "展示费额当前值及关键对比变化。"
+                          }
+                        ],
+                        "comparisons": [
+                          "费率实际",
+                          "费率较目标（率差=实际费率-目标费率）",
+                          "费率同比（率差=实际费率-同期费率）",
+                          "费额实际",
+                          "费额较目标（额差=实际费额-目标费额）",
+                          "费额较同期（额差=实际费额-同期费额）"
+                        ],
+                        "dimensions": [
+                          "一级费用项目 > 二级费用项目 > 三级费用项目"
+                        ],
+                        "filters": [],
+                        "breakdownRules": [
+                          "单独列示票折费用"
+                        ],
+                        "displayRequirements": "费用树需同时展示费率和费额，逐级下钻并列示目标差、同期差。"
+                      },
+                      "items": []
+                    },
+                    {
+                      "id": "tpl-sales-monthly-domestic-expense-tree-ticket-discount",
+                      "templateType": "ANALYSIS_RULE",
+                      "title": "分析规则",
+                      "fields": {
+                        "question": "哪些费用项目对差异贡献最大？",
+                        "calculation": "票折费用单独列示，其余费用按三级费用项目逐级汇总。",
+                        "baseline": "目标、同期",
+                        "anomaly": "率差或额差达到预警阈值时高亮。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": []
+                },
+                {
+                  "id": "tpl-sales-monthly-domestic-logistics-analysis",
+                  "title": "2.3.2 物流费用动因解析",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-domestic-logistics-analysis-objective",
+                      "templateType": "ANALYSIS_OBJECTIVE",
+                      "title": "分析目标",
+                      "fields": {
+                        "objective": "识别物流费用变化及运输、仓储环节的改善机会。",
+                        "scope": "覆盖物流概览、反向运输、零担运输和仓储利用率。",
+                        "audience": "经营管理层、业务负责人",
+                        "successCriteria": "能够定位关键变化、解释主要动因并形成可执行建议。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": [
+                    {
+                      "id": "tpl-sales-monthly-domestic-logistics-overview",
+                      "title": "物流费用概览",
+                      "description": "",
+                      "explanationSections": [
+                        {
+                          "id": "tpl-sales-monthly-domestic-logistics-overview-metrics",
+                          "templateType": "METRIC_DISPLAY",
+                          "title": "指标展示",
+                          "fields": {},
+                          "itemConfig": {
+                            "metricDisplays": [
+                              {
+                                "id": "tpl-sales-monthly-domestic-logistics-overview-metrics-metric-1",
+                                "metric": "物流费用",
+                                "role": "RESULT",
+                                "displayForm": "BAR_CHART",
+                                "displayRequirements": "展示物流费用当前值及关键对比变化。"
+                              },
+                              {
+                                "id": "tpl-sales-monthly-domestic-logistics-overview-metrics-metric-2",
+                                "metric": "体积",
+                                "role": "DRIVER",
+                                "displayForm": "LINE_CHART",
+                                "displayRequirements": "展示体积当前值及关键对比变化。"
+                              },
+                              {
+                                "id": "tpl-sales-monthly-domestic-logistics-overview-metrics-metric-3",
+                                "metric": "面积",
+                                "role": "DRIVER",
+                                "displayForm": "LINE_CHART",
+                                "displayRequirements": "展示面积当前值及关键对比变化。"
+                              },
+                              {
+                                "id": "tpl-sales-monthly-domestic-logistics-overview-metrics-metric-4",
+                                "metric": "单价",
+                                "role": "DRIVER",
+                                "displayForm": "LINE_CHART",
+                                "displayRequirements": "展示单价当前值及关键对比变化。"
+                              }
+                            ],
+                            "comparisons": [
+                              "本期",
+                              "同比"
+                            ],
+                            "dimensions": [
+                              "费用场景",
+                              "业务场景"
+                            ],
+                            "filters": [],
+                            "breakdownRules": [],
+                            "displayRequirements": "指标、对比口径与分析维度需保持同一统计周期和业务口径。"
+                          },
+                          "items": []
+                        }
+                      ],
+                      "children": []
+                    },
+                    {
+                      "id": "tpl-sales-monthly-domestic-reverse-transport",
+                      "title": "反向运输",
+                      "description": "",
+                      "explanationSections": [
+                        {
+                          "id": "tpl-sales-monthly-domestic-reverse-transport-metrics",
+                          "templateType": "METRIC_DISPLAY",
+                          "title": "指标展示",
+                          "fields": {},
+                          "itemConfig": {
+                            "metricDisplays": [
+                              {
+                                "id": "tpl-sales-monthly-domestic-reverse-transport-metrics-metric-1",
+                                "metric": "反向运输金额",
+                                "role": "RESULT",
+                                "displayForm": "BAR_CHART",
+                                "displayRequirements": "展示反向运输金额当前值及关键对比变化。"
+                              },
+                              {
+                                "id": "tpl-sales-monthly-domestic-reverse-transport-metrics-metric-2",
+                                "metric": "潜在节约金额",
+                                "role": "DRIVER",
+                                "displayForm": "INDICATOR",
+                                "displayRequirements": "展示潜在节约金额当前值及关键对比变化。"
+                              }
+                            ],
+                            "comparisons": [],
+                            "dimensions": [
+                              "整体 > Top5 路线"
+                            ],
+                            "filters": [],
+                            "breakdownRules": [
+                              "按潜在节约金额降序展示 Top5 路线"
+                            ],
+                            "displayRequirements": "指标、对比口径与分析维度需保持同一统计周期和业务口径。"
+                          },
+                          "items": []
+                        }
+                      ],
+                      "children": []
+                    },
+                    {
+                      "id": "tpl-sales-monthly-domestic-ltl-transport",
+                      "title": "零担运输",
+                      "description": "",
+                      "explanationSections": [
+                        {
+                          "id": "tpl-sales-monthly-domestic-ltl-transport-metrics",
+                          "templateType": "METRIC_DISPLAY",
+                          "title": "指标展示",
+                          "fields": {},
+                          "itemConfig": {
+                            "metricDisplays": [
+                              {
+                                "id": "tpl-sales-monthly-domestic-ltl-transport-metrics-metric-1",
+                                "metric": "零担运费",
+                                "role": "RESULT",
+                                "displayForm": "BAR_CHART",
+                                "displayRequirements": "展示零担运费当前值及关键对比变化。"
+                              },
+                              {
+                                "id": "tpl-sales-monthly-domestic-ltl-transport-metrics-metric-2",
+                                "metric": "零担体积",
+                                "role": "DRIVER",
+                                "displayForm": "LINE_CHART",
+                                "displayRequirements": "展示零担体积当前值及关键对比变化。"
+                              },
+                              {
+                                "id": "tpl-sales-monthly-domestic-ltl-transport-metrics-metric-3",
+                                "metric": "零担单价",
+                                "role": "DRIVER",
+                                "displayForm": "LINE_CHART",
+                                "displayRequirements": "展示零担单价当前值及关键对比变化。"
+                              },
+                              {
+                                "id": "tpl-sales-monthly-domestic-ltl-transport-metrics-metric-4",
+                                "metric": "零担占比",
+                                "role": "CORE",
+                                "displayForm": "INDICATOR",
+                                "displayRequirements": "按“零担体积 ÷ 零担体积产业合计数”计算并展示。"
+                              },
+                              {
+                                "id": "tpl-sales-monthly-domestic-ltl-transport-metrics-metric-5",
+                                "metric": "占比同比差",
+                                "role": "COMPARISON",
+                                "displayForm": "INDICATOR",
+                                "displayRequirements": "展示占比同比差当前值及关键对比变化。"
+                              },
+                              {
+                                "id": "tpl-sales-monthly-domestic-ltl-transport-metrics-metric-6",
+                                "metric": "产比环比差",
+                                "role": "COMPARISON",
+                                "displayForm": "INDICATOR",
+                                "displayRequirements": "展示产比环比差当前值及关键对比变化。"
+                              },
+                              {
+                                "id": "tpl-sales-monthly-domestic-ltl-transport-metrics-metric-7",
+                                "metric": "单价差",
+                                "role": "COMPARISON",
+                                "displayForm": "INDICATOR",
+                                "displayRequirements": "按“（零担单价-整车单价）÷ 整车单价”计算并展示。"
+                              }
+                            ],
+                            "comparisons": [],
+                            "dimensions": [
+                              "产业 > 子产业",
+                              "路线"
+                            ],
+                            "filters": [],
+                            "breakdownRules": [
+                              "按照零担占比从高到低取 Top5 路线"
+                            ],
+                            "displayRequirements": "展示零担运费、体积、单价、占比及差异，重点突出高占比路线。"
+                          },
+                          "items": []
+                        }
+                      ],
+                      "children": []
+                    },
+                    {
+                      "id": "tpl-sales-monthly-domestic-storage-utilization",
+                      "title": "仓储利用率",
+                      "description": "",
+                      "explanationSections": [
+                        {
+                          "id": "tpl-sales-monthly-domestic-storage-utilization-metrics",
+                          "templateType": "METRIC_DISPLAY",
+                          "title": "指标展示",
+                          "fields": {},
+                          "itemConfig": {
+                            "metricDisplays": [
+                              {
+                                "id": "tpl-sales-monthly-domestic-storage-utilization-metrics-metric-1",
+                                "metric": "仓储利用率",
+                                "role": "CORE",
+                                "displayForm": "BAR_CHART",
+                                "displayRequirements": "展示仓储利用率当前值及关键对比变化。"
+                              }
+                            ],
+                            "comparisons": [
+                              "整体利用率",
+                              "整体利用率同比变动"
+                            ],
+                            "dimensions": [
+                              "仓库"
+                            ],
+                            "filters": [],
+                            "breakdownRules": [
+                              "列示仓储利用率从低到高的 Top5 及同比情况"
+                            ],
+                            "displayRequirements": "按利用率从低到高展示 Top5 仓库，并同时展示同比变化。"
+                          },
+                          "items": []
+                        }
+                      ],
+                      "children": []
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "tpl-sales-monthly-domestic-profit",
+              "title": "2.4 国内利润分析",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-domestic-profit-objective",
+                  "templateType": "ANALYSIS_OBJECTIVE",
+                  "title": "分析目标",
+                  "fields": {
+                    "objective": "解释国内实际利润相对目标和同期的差异。",
+                    "scope": "覆盖收入、毛利率及各类费用影响，其他因素采用倒挤。",
+                    "audience": "经营管理层、业务负责人",
+                    "successCriteria": "能够定位关键变化、解释主要动因并形成可执行建议。"
+                  },
+                  "items": []
+                }
+              ],
+              "children": [
+                {
+                  "id": "tpl-sales-monthly-domestic-profit-target",
+                  "title": "国内利润瀑布图（目标→实际）",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-domestic-profit-target-metrics",
+                      "templateType": "METRIC_DISPLAY",
+                      "title": "指标展示",
+                      "fields": {},
+                      "itemConfig": {
+                        "metricDisplays": [
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-target-metrics-metric-1",
+                            "metric": "目标利润",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "作为瀑布图端点展示目标利润。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-target-metrics-metric-2",
+                            "metric": "实际利润",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "作为瀑布图端点展示实际利润。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-target-metrics-metric-3",
+                            "metric": "收入影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示收入影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-target-metrics-metric-4",
+                            "metric": "毛利率影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示毛利率影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-target-metrics-metric-5",
+                            "metric": "销售费用影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示销售费用影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-target-metrics-metric-6",
+                            "metric": "管理费用影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示管理费用影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-target-metrics-metric-7",
+                            "metric": "研发费用影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示研发费用影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-target-metrics-metric-8",
+                            "metric": "财务费用影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示财务费用影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-target-metrics-metric-9",
+                            "metric": "制造费用影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示制造费用影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-target-metrics-metric-10",
+                            "metric": "其他（倒挤）",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示其他（倒挤）对利润变化的正负贡献。"
+                          }
+                        ],
+                        "comparisons": [
+                          "目标",
+                          "实际"
+                        ],
+                        "dimensions": [
+                          "利润动因"
+                        ],
+                        "filters": [],
+                        "breakdownRules": [
+                          "动因按影响绝对值由高到低排列",
+                          "其他项采用倒挤口径"
+                        ],
+                        "displayRequirements": "首尾展示结果指标，中间展示各动因的正负贡献，确保贡献合计可回勾实际利润。"
+                      },
+                      "items": []
+                    },
+                    {
+                      "id": "tpl-sales-monthly-domestic-profit-target-waterfall",
+                      "templateType": "DISPLAY_STANDARD",
+                      "title": "展示规范",
+                      "fields": {
+                        "layout": "利润瀑布图",
+                        "sorting": "按业务逻辑顺序展示，动因按贡献绝对值降序",
+                        "highlight": "正向贡献、负向贡献和其他倒挤项使用明确的语义色，并标注金额。",
+                        "interaction": "支持查看指标口径、维度明细与关键动因。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": []
+                },
+                {
+                  "id": "tpl-sales-monthly-domestic-profit-period",
+                  "title": "国内利润瀑布图（同期→实际）",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-domestic-profit-period-metrics",
+                      "templateType": "METRIC_DISPLAY",
+                      "title": "指标展示",
+                      "fields": {},
+                      "itemConfig": {
+                        "metricDisplays": [
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-period-metrics-metric-1",
+                            "metric": "同期利润",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "作为瀑布图端点展示同期利润。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-period-metrics-metric-2",
+                            "metric": "实际利润",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "作为瀑布图端点展示实际利润。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-period-metrics-metric-3",
+                            "metric": "收入影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示收入影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-period-metrics-metric-4",
+                            "metric": "毛利率影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示毛利率影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-period-metrics-metric-5",
+                            "metric": "销售费用影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示销售费用影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-period-metrics-metric-6",
+                            "metric": "管理费用影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示管理费用影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-period-metrics-metric-7",
+                            "metric": "研发费用影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示研发费用影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-period-metrics-metric-8",
+                            "metric": "财务费用影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示财务费用影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-period-metrics-metric-9",
+                            "metric": "制造费用影响",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示制造费用影响对利润变化的正负贡献。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-domestic-profit-period-metrics-metric-10",
+                            "metric": "其他（倒挤）",
+                            "role": "DRIVER",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示其他（倒挤）对利润变化的正负贡献。"
+                          }
+                        ],
+                        "comparisons": [
+                          "同期",
+                          "实际"
+                        ],
+                        "dimensions": [
+                          "利润动因"
+                        ],
+                        "filters": [],
+                        "breakdownRules": [
+                          "动因按影响绝对值由高到低排列",
+                          "其他项采用倒挤口径"
+                        ],
+                        "displayRequirements": "首尾展示结果指标，中间展示各动因的正负贡献，确保贡献合计可回勾实际利润。"
+                      },
+                      "items": []
+                    },
+                    {
+                      "id": "tpl-sales-monthly-domestic-profit-period-waterfall",
+                      "templateType": "DISPLAY_STANDARD",
+                      "title": "展示规范",
+                      "fields": {
+                        "layout": "利润瀑布图",
+                        "sorting": "按业务逻辑顺序展示，动因按贡献绝对值降序",
+                        "highlight": "正向贡献、负向贡献和其他倒挤项使用明确的语义色，并标注金额。",
+                        "interaction": "支持查看指标口径、维度明细与关键动因。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "tpl-sales-monthly-overseas-profit-loss",
+          "title": "三、海外损益",
+          "description": "",
+          "explanationSections": [
+            {
+              "id": "tpl-sales-monthly-overseas-profit-loss-scope",
+              "templateType": "DATA_SCOPE",
+              "title": "数据口径",
+              "fields": {
+                "dataRange": "海外业务",
+                "period": "本月",
+                "definition": "筛选条件：海外；收入、费用和利润按海外区域统一统计。",
+                "source": "经营分析宽表、财务月结数据及业务明细数据"
+              },
+              "items": []
+            }
+          ],
+          "children": [
+            {
+              "id": "tpl-sales-monthly-overseas-income",
+              "title": "3.1 海外收入",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-overseas-income-metrics",
+                  "templateType": "METRIC_DISPLAY",
+                  "title": "指标展示",
+                  "fields": {},
+                  "itemConfig": {
+                    "metricDisplays": [
+                      {
+                        "id": "tpl-sales-monthly-overseas-income-metrics-metric-1",
+                        "metric": "收入",
+                        "role": "RESULT",
+                        "displayForm": "BAR_CHART",
+                        "displayRequirements": "展示收入当前值及关键对比变化。"
+                      }
+                    ],
+                    "comparisons": [
+                      "实际",
+                      "目标",
+                      "完成率",
+                      "同期",
+                      "同比"
+                    ],
+                    "dimensions": [
+                      "海外区域"
+                    ],
+                    "filters": [],
+                    "breakdownRules": [
+                      "分区：大差、小差、零差"
+                    ],
+                    "displayRequirements": "指标、对比口径与分析维度需保持同一统计周期和业务口径。"
+                  },
+                  "items": []
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "tpl-sales-monthly-overseas-expense",
+              "title": "3.2 海外费用",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-overseas-expense-metrics",
+                  "templateType": "METRIC_DISPLAY",
+                  "title": "指标展示",
+                  "fields": {},
+                  "itemConfig": {
+                    "metricDisplays": [
+                      {
+                        "id": "tpl-sales-monthly-overseas-expense-metrics-metric-1",
+                        "metric": "费额",
+                        "role": "RESULT",
+                        "displayForm": "TABLE",
+                        "displayRequirements": "展示费额当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-overseas-expense-metrics-metric-2",
+                        "metric": "费率",
+                        "role": "CORE",
+                        "displayForm": "TABLE",
+                        "displayRequirements": "展示费率当前值及关键对比变化。"
+                      }
+                    ],
+                    "comparisons": [
+                      "费率实际",
+                      "费率较目标（率差=实际费率-目标费率）",
+                      "费率同比（率差=实际费率-同期费率）",
+                      "费额实际",
+                      "费额较目标（额差=实际费额-目标费额）",
+                      "费额较同期（额差=实际费额-同期费额）"
+                    ],
+                    "dimensions": [
+                      "海外区域",
+                      "费用项目"
+                    ],
+                    "filters": [],
+                    "breakdownRules": [],
+                    "displayRequirements": "指标、对比口径与分析维度需保持同一统计周期和业务口径。"
+                  },
+                  "items": []
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "tpl-sales-monthly-overseas-profit",
+              "title": "3.3 海外利润",
+              "description": "",
+              "explanationSections": [],
+              "children": [
+                {
+                  "id": "tpl-sales-monthly-overseas-profit-target",
+                  "title": "海外利润瀑布图（目标→实际）",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-overseas-profit-target-metrics",
+                      "templateType": "METRIC_DISPLAY",
+                      "title": "指标展示",
+                      "fields": {},
+                      "itemConfig": {
+                        "metricDisplays": [
+                          {
+                            "id": "tpl-sales-monthly-overseas-profit-target-metrics-metric-1",
+                            "metric": "目标利润",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示目标利润当前值及关键对比变化。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overseas-profit-target-metrics-metric-2",
+                            "metric": "实际利润",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示实际利润当前值及关键对比变化。"
+                          }
+                        ],
+                        "comparisons": [
+                          "目标",
+                          "实际"
+                        ],
+                        "dimensions": [
+                          "区域"
+                        ],
+                        "filters": [],
+                        "breakdownRules": [
+                          "动因拆解：按区域维度拆解"
+                        ],
+                        "displayRequirements": "按区域拆解目标利润到实际利润的差异贡献。"
+                      },
+                      "items": []
+                    },
+                    {
+                      "id": "tpl-sales-monthly-overseas-profit-target-waterfall",
+                      "templateType": "DISPLAY_STANDARD",
+                      "title": "展示规范",
+                      "fields": {
+                        "layout": "海外利润瀑布图",
+                        "sorting": "按业务逻辑顺序展示，动因按贡献绝对值降序",
+                        "highlight": "正负区域贡献分别标识，首尾利润值必须可回勾。",
+                        "interaction": "支持查看指标口径、维度明细与关键动因。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": []
+                },
+                {
+                  "id": "tpl-sales-monthly-overseas-profit-period",
+                  "title": "海外利润瀑布图（同期→实际）",
+                  "description": "",
+                  "explanationSections": [
+                    {
+                      "id": "tpl-sales-monthly-overseas-profit-period-metrics",
+                      "templateType": "METRIC_DISPLAY",
+                      "title": "指标展示",
+                      "fields": {},
+                      "itemConfig": {
+                        "metricDisplays": [
+                          {
+                            "id": "tpl-sales-monthly-overseas-profit-period-metrics-metric-1",
+                            "metric": "同期利润",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示同期利润当前值及关键对比变化。"
+                          },
+                          {
+                            "id": "tpl-sales-monthly-overseas-profit-period-metrics-metric-2",
+                            "metric": "实际利润",
+                            "role": "RESULT",
+                            "displayForm": "BAR_CHART",
+                            "displayRequirements": "展示实际利润当前值及关键对比变化。"
+                          }
+                        ],
+                        "comparisons": [
+                          "同期",
+                          "实际"
+                        ],
+                        "dimensions": [
+                          "区域"
+                        ],
+                        "filters": [],
+                        "breakdownRules": [
+                          "动因拆解：按区域维度拆解"
+                        ],
+                        "displayRequirements": "按区域拆解同期利润到实际利润的差异贡献。"
+                      },
+                      "items": []
+                    },
+                    {
+                      "id": "tpl-sales-monthly-overseas-profit-period-waterfall",
+                      "templateType": "DISPLAY_STANDARD",
+                      "title": "展示规范",
+                      "fields": {
+                        "layout": "海外利润瀑布图",
+                        "sorting": "按业务逻辑顺序展示，动因按贡献绝对值降序",
+                        "highlight": "正负区域贡献分别标识，首尾利润值必须可回勾。",
+                        "interaction": "支持查看指标口径、维度明细与关键动因。"
+                      },
+                      "items": []
+                    }
+                  ],
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "tpl-sales-monthly-forecast",
+          "title": "四、损益预测",
+          "description": "",
+          "explanationSections": [
+            {
+              "id": "tpl-sales-monthly-forecast-objective",
+              "templateType": "ANALYSIS_OBJECTIVE",
+              "title": "分析目标",
+              "fields": {
+                "objective": "预测次月收入和利润表现，提前识别目标风险。",
+                "scope": "产业整体收入与利润。",
+                "audience": "经营管理层、业务负责人",
+                "successCriteria": "能够定位关键变化、解释主要动因并形成可执行建议。"
+              },
+              "items": []
+            }
+          ],
+          "children": [
+            {
+              "id": "tpl-sales-monthly-forecast-overall",
+              "title": "损益整体预测",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-forecast-overall-metrics",
+                  "templateType": "METRIC_DISPLAY",
+                  "title": "指标展示",
+                  "fields": {},
+                  "itemConfig": {
+                    "metricDisplays": [
+                      {
+                        "id": "tpl-sales-monthly-forecast-overall-metrics-metric-1",
+                        "metric": "收入",
+                        "role": "RESULT",
+                        "displayForm": "LINE_CHART",
+                        "displayRequirements": "展示收入当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-forecast-overall-metrics-metric-2",
+                        "metric": "利润",
+                        "role": "RESULT",
+                        "displayForm": "LINE_CHART",
+                        "displayRequirements": "展示利润当前值及关键对比变化。"
+                      }
+                    ],
+                    "comparisons": [
+                      "目标",
+                      "预测",
+                      "同期",
+                      "完成率",
+                      "同比"
+                    ],
+                    "dimensions": [
+                      "月份"
+                    ],
+                    "filters": [],
+                    "breakdownRules": [],
+                    "displayRequirements": "展示次月收入与利润预测，并与目标、同期对比。"
+                  },
+                  "items": []
+                },
+                {
+                  "id": "tpl-sales-monthly-forecast-overall-forecast-period",
+                  "templateType": "DATA_SCOPE",
+                  "title": "数据口径",
+                  "fields": {
+                    "dataRange": "产业整体损益",
+                    "period": "预测时点：次月",
+                    "definition": "预测口径与实际损益口径保持一致。",
+                    "source": "经营分析宽表、财务月结数据及业务明细数据"
+                  },
+                  "items": []
+                }
+              ],
+              "children": []
+            }
+          ]
+        },
+        {
+          "id": "tpl-sales-monthly-receivables",
+          "title": "五、应收分析",
+          "description": "",
+          "explanationSections": [
+            {
+              "id": "tpl-sales-monthly-receivables-objective",
+              "templateType": "ANALYSIS_OBJECTIVE",
+              "title": "分析目标",
+              "fields": {
+                "objective": "原生分析应收规模、逾期风险和回款进展。",
+                "scope": "覆盖应收整体、账龄结构和重点客户回款。",
+                "audience": "经营管理层、业务负责人",
+                "successCriteria": "能够定位关键变化、解释主要动因并形成可执行建议。"
+              },
+              "items": []
+            }
+          ],
+          "children": [
+            {
+              "id": "tpl-sales-monthly-receivable-overview",
+              "title": "应收整体情况",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-receivable-overview-metrics",
+                  "templateType": "METRIC_DISPLAY",
+                  "title": "指标展示",
+                  "fields": {},
+                  "itemConfig": {
+                    "metricDisplays": [
+                      {
+                        "id": "tpl-sales-monthly-receivable-overview-metrics-metric-1",
+                        "metric": "应收余额",
+                        "role": "RESULT",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示应收余额当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-receivable-overview-metrics-metric-2",
+                        "metric": "逾期应收",
+                        "role": "RESULT",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示逾期应收当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-receivable-overview-metrics-metric-3",
+                        "metric": "逾期率",
+                        "role": "CORE",
+                        "displayForm": "LINE_CHART",
+                        "displayRequirements": "展示逾期率当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-receivable-overview-metrics-metric-4",
+                        "metric": "回款完成率",
+                        "role": "CORE",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示回款完成率当前值及关键对比变化。"
+                      }
+                    ],
+                    "comparisons": [
+                      "本期",
+                      "同期",
+                      "目标"
+                    ],
+                    "dimensions": [
+                      "业务单元",
+                      "客户"
+                    ],
+                    "filters": [],
+                    "breakdownRules": [],
+                    "displayRequirements": "指标、对比口径与分析维度需保持同一统计周期和业务口径。"
+                  },
+                  "items": []
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "tpl-sales-monthly-receivable-aging-risk",
+              "title": "账龄与风险结构",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-receivable-aging-risk-metrics",
+                  "templateType": "METRIC_DISPLAY",
+                  "title": "指标展示",
+                  "fields": {},
+                  "itemConfig": {
+                    "metricDisplays": [
+                      {
+                        "id": "tpl-sales-monthly-receivable-aging-risk-metrics-metric-1",
+                        "metric": "0-30 天应收",
+                        "role": "CORE",
+                        "displayForm": "BAR_CHART",
+                        "displayRequirements": "展示0-30 天应收当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-receivable-aging-risk-metrics-metric-2",
+                        "metric": "31-60 天应收",
+                        "role": "DRIVER",
+                        "displayForm": "BAR_CHART",
+                        "displayRequirements": "展示31-60 天应收当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-receivable-aging-risk-metrics-metric-3",
+                        "metric": "61-90 天应收",
+                        "role": "DRIVER",
+                        "displayForm": "BAR_CHART",
+                        "displayRequirements": "展示61-90 天应收当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-receivable-aging-risk-metrics-metric-4",
+                        "metric": "90 天以上应收",
+                        "role": "DRIVER",
+                        "displayForm": "BAR_CHART",
+                        "displayRequirements": "展示90 天以上应收当前值及关键对比变化。"
+                      }
+                    ],
+                    "comparisons": [
+                      "本期",
+                      "同期"
+                    ],
+                    "dimensions": [
+                      "账龄区间",
+                      "客户"
+                    ],
+                    "filters": [],
+                    "breakdownRules": [
+                      "按逾期金额降序展示 Top10 客户"
+                    ],
+                    "displayRequirements": "指标、对比口径与分析维度需保持同一统计周期和业务口径。"
+                  },
+                  "items": []
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "tpl-sales-monthly-receivable-collection-action",
+              "title": "回款与重点客户",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-receivable-collection-action-metrics",
+                  "templateType": "METRIC_DISPLAY",
+                  "title": "指标展示",
+                  "fields": {},
+                  "itemConfig": {
+                    "metricDisplays": [
+                      {
+                        "id": "tpl-sales-monthly-receivable-collection-action-metrics-metric-1",
+                        "metric": "计划回款额",
+                        "role": "COMPARISON",
+                        "displayForm": "TABLE",
+                        "displayRequirements": "展示计划回款额当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-receivable-collection-action-metrics-metric-2",
+                        "metric": "实际回款额",
+                        "role": "RESULT",
+                        "displayForm": "TABLE",
+                        "displayRequirements": "展示实际回款额当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-receivable-collection-action-metrics-metric-3",
+                        "metric": "回款缺口",
+                        "role": "DRIVER",
+                        "displayForm": "TABLE",
+                        "displayRequirements": "展示回款缺口当前值及关键对比变化。"
+                      }
+                    ],
+                    "comparisons": [
+                      "计划",
+                      "实际",
+                      "完成率"
+                    ],
+                    "dimensions": [
+                      "责任组织",
+                      "责任人",
+                      "客户"
+                    ],
+                    "filters": [],
+                    "breakdownRules": [
+                      "按回款缺口降序展示重点客户"
+                    ],
+                    "displayRequirements": "指标、对比口径与分析维度需保持同一统计周期和业务口径。"
+                  },
+                  "items": []
+                }
+              ],
+              "children": []
+            }
+          ]
+        },
+        {
+          "id": "tpl-sales-monthly-inventory",
+          "title": "六、库存",
+          "description": "",
+          "explanationSections": [
+            {
+              "id": "tpl-sales-monthly-inventory-objective",
+              "templateType": "ANALYSIS_OBJECTIVE",
+              "title": "分析目标",
+              "fields": {
+                "objective": "原生分析库存规模、周转、呆滞和缺货风险。",
+                "scope": "覆盖库存整体、风险库存和供应保障。",
+                "audience": "经营管理层、业务负责人",
+                "successCriteria": "能够定位关键变化、解释主要动因并形成可执行建议。"
+              },
+              "items": []
+            }
+          ],
+          "children": [
+            {
+              "id": "tpl-sales-monthly-inventory-overview",
+              "title": "库存整体与周转",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-inventory-overview-metrics",
+                  "templateType": "METRIC_DISPLAY",
+                  "title": "指标展示",
+                  "fields": {},
+                  "itemConfig": {
+                    "metricDisplays": [
+                      {
+                        "id": "tpl-sales-monthly-inventory-overview-metrics-metric-1",
+                        "metric": "库存金额",
+                        "role": "RESULT",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示库存金额当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-inventory-overview-metrics-metric-2",
+                        "metric": "库存周转天数",
+                        "role": "CORE",
+                        "displayForm": "LINE_CHART",
+                        "displayRequirements": "展示库存周转天数当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-inventory-overview-metrics-metric-3",
+                        "metric": "库存周转率",
+                        "role": "CORE",
+                        "displayForm": "LINE_CHART",
+                        "displayRequirements": "展示库存周转率当前值及关键对比变化。"
+                      }
+                    ],
+                    "comparisons": [
+                      "本期",
+                      "同期",
+                      "目标"
+                    ],
+                    "dimensions": [
+                      "组织",
+                      "仓库",
+                      "物料"
+                    ],
+                    "filters": [],
+                    "breakdownRules": [],
+                    "displayRequirements": "指标、对比口径与分析维度需保持同一统计周期和业务口径。"
+                  },
+                  "items": []
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "tpl-sales-monthly-inventory-risk",
+              "title": "高库存与呆滞风险",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-inventory-risk-metrics",
+                  "templateType": "METRIC_DISPLAY",
+                  "title": "指标展示",
+                  "fields": {},
+                  "itemConfig": {
+                    "metricDisplays": [
+                      {
+                        "id": "tpl-sales-monthly-inventory-risk-metrics-metric-1",
+                        "metric": "高库存金额",
+                        "role": "RESULT",
+                        "displayForm": "TABLE",
+                        "displayRequirements": "展示高库存金额当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-inventory-risk-metrics-metric-2",
+                        "metric": "呆滞库存金额",
+                        "role": "RESULT",
+                        "displayForm": "TABLE",
+                        "displayRequirements": "展示呆滞库存金额当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-inventory-risk-metrics-metric-3",
+                        "metric": "呆滞天数",
+                        "role": "DRIVER",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示呆滞天数当前值及关键对比变化。"
+                      }
+                    ],
+                    "comparisons": [
+                      "本期",
+                      "同期",
+                      "风险阈值"
+                    ],
+                    "dimensions": [
+                      "组织",
+                      "仓库",
+                      "物料"
+                    ],
+                    "filters": [],
+                    "breakdownRules": [
+                      "按风险金额降序展示 Top20"
+                    ],
+                    "displayRequirements": "指标、对比口径与分析维度需保持同一统计周期和业务口径。"
+                  },
+                  "items": []
+                }
+              ],
+              "children": []
+            },
+            {
+              "id": "tpl-sales-monthly-inventory-supply",
+              "title": "缺货与供应保障",
+              "description": "",
+              "explanationSections": [
+                {
+                  "id": "tpl-sales-monthly-inventory-supply-metrics",
+                  "templateType": "METRIC_DISPLAY",
+                  "title": "指标展示",
+                  "fields": {},
+                  "itemConfig": {
+                    "metricDisplays": [
+                      {
+                        "id": "tpl-sales-monthly-inventory-supply-metrics-metric-1",
+                        "metric": "缺货率",
+                        "role": "RESULT",
+                        "displayForm": "LINE_CHART",
+                        "displayRequirements": "展示缺货率当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-inventory-supply-metrics-metric-2",
+                        "metric": "缺货物料数",
+                        "role": "DRIVER",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示缺货物料数当前值及关键对比变化。"
+                      },
+                      {
+                        "id": "tpl-sales-monthly-inventory-supply-metrics-metric-3",
+                        "metric": "补货及时率",
+                        "role": "CORE",
+                        "displayForm": "INDICATOR",
+                        "displayRequirements": "展示补货及时率当前值及关键对比变化。"
+                      }
+                    ],
+                    "comparisons": [
+                      "本期",
+                      "同期",
+                      "目标"
+                    ],
+                    "dimensions": [
+                      "组织",
+                      "仓库",
+                      "物料"
+                    ],
+                    "filters": [],
+                    "breakdownRules": [
+                      "列示缺货影响最大的 Top20 物料"
+                    ],
+                    "displayRequirements": "指标、对比口径与分析维度需保持同一统计周期和业务口径。"
+                  },
+                  "items": []
+                }
+              ],
+              "children": []
+            }
+          ]
+        },
+        {
+          "id": "tpl-sales-monthly-actions",
+          "title": "七、行动建议",
+          "description": "",
+          "explanationSections": [
+            {
+              "id": "tpl-sales-monthly-actions-action-output",
+              "templateType": "CONCLUSION_OUTPUT",
+              "title": "行动建议输出",
+              "fields": {},
+              "conclusionFormat": {
+                "referenceExample": "针对费用率超目标、逾期应收和高库存分别明确压降、回款和去库存动作，指定责任人及完成时点。",
+                "style": "TABLE",
+                "instruction": "建议必须可执行、可追踪，并与前文已识别的损益、应收和库存问题一一对应。",
+                "requiredFields": [
+                  "问题或机会",
+                  "数据证据",
+                  "行动建议",
+                  "责任人",
+                  "完成时点",
+                  "预期影响"
+                ],
+                "maxLength": 800
+              },
+              "items": []
+            }
+          ],
+          "children": []
+        }
+      ]
+    }
+  ]
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"intelligent-report-generation-system/internal/platform/database"
 	"intelligent-report-generation-system/internal/semanticquality"
+	"intelligent-report-generation-system/internal/warehouselayer"
 )
 
 type manualCompletionSink interface {
@@ -89,6 +90,7 @@ func scanTable(row interface{ Scan(...any) error }, item *Table) error {
 	if len(live) == 3 {
 		item.RefreshState, item.RefreshStage, item.RefreshNote = live[0], live[1], live[2]
 	}
+	item.WarehouseLayer = warehouselayer.FromTags(item.Tags)
 	item.PrimaryKeyColumns, item.ForeignKeys = parseDeclaredKeys(primaryKeyColumns, constraints)
 	return nil
 }
@@ -163,12 +165,25 @@ func (r *Repository) UpdateTable(ctx context.Context, tenantID, actorID, id stri
 		return Table{}, err
 	}
 	err := database.WithTenantTx(ctx, r.pool, tenantID, func(tx pgx.Tx) error {
+		var previousTags []string
+		if err := tx.QueryRow(ctx, `SELECT tags FROM platform.metadata_tables
+			WHERE id=$1 AND business_version=$2 FOR UPDATE`, id, m.ExpectedVersion).Scan(&previousTags); err != nil {
+			return errors.New("asset version conflict or asset not found")
+		}
 		tag, err := tx.Exec(ctx, `UPDATE platform.metadata_tables SET business_name=$1,business_description=$2,tags=$3,sensitivity_level=$4,visibility=$5,manual_locked=false,business_version=business_version+1 WHERE id=$6 AND business_version=$7`, strings.TrimSpace(m.BusinessName), strings.TrimSpace(m.BusinessDescription), m.Tags, m.SensitivityLevel, m.Visibility, id, m.ExpectedVersion)
 		if err != nil {
 			return err
 		}
 		if tag.RowsAffected() != 1 {
 			return errors.New("asset version conflict or asset not found")
+		}
+		// 人工改写层级标签后，在同一事务内重新对齐该表的默认映射数据集：尚未被
+		// 人工修改或发布的映射数据集会按新层级重建；已发布或已人工编辑的保持不变。
+		if r.manualCompletionSink != nil &&
+			warehouselayer.FromTags(previousTags) != warehouselayer.FromTags(m.Tags) {
+			if err := r.manualCompletionSink.EnsureMappedDatasetTx(ctx, tx, tenantID, actorID, id); err != nil {
+				return err
+			}
 		}
 		return audit(ctx, tx, tenantID, actorID, "UPDATE_BUSINESS_METADATA", "TABLE_ASSET", id, m)
 	})
@@ -249,6 +264,10 @@ func (r *Repository) CompleteTableManually(
 		}
 		if len(tags) == 0 {
 			missing = append(missing, "表标签")
+		} else if warehouselayer.FromTags(tags) == "" {
+			// 手工完善与 AI 清洗遵守同一合同：表资产必须声明所处数仓层级，
+			// 它决定默认映射数据集进入数仓的层级。
+			missing = append(missing, "表的数仓层级（层级:ODS/DIM/DWD/DWS/ADS）")
 		}
 		type columnCompletion struct {
 			ID, Name, BusinessName, BusinessDescription, SemanticType, StructureHash string

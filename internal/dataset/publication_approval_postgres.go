@@ -62,15 +62,14 @@ func validateDWDPublicationDependenciesTx(
 			Reason: "发布数据集必须填写业务领域",
 		}}}
 	}
-	preAggregatedSource := false
-	if layer == string(LayerDWS) {
-		document, decodeErr := DecodeAndNormalize(dslJSON)
-		if decodeErr != nil {
-			return decodeErr
-		}
-		preAggregatedSource = IsPreAggregatedSourceMapping(document)
+	// SOURCE 血缘（任意层级的单表直落）直接继承物理资产的领域，没有上游数据集
+	// 可比对；MODELED 血缘必须与所有已发布上游领域一致。
+	document, decodeErr := DecodeAndNormalize(dslJSON)
+	if decodeErr != nil {
+		return decodeErr
 	}
-	if layer != string(LayerODS) && !preAggregatedSource {
+	sourceLineage := document.Lineage() == LineageSource
+	if !sourceLineage {
 		var dependencyCount, mismatchedCount int
 		err = tx.QueryRow(ctx, `SELECT count(*)::integer,
 				count(*) FILTER(
@@ -105,7 +104,7 @@ func validateDWDPublicationDependenciesTx(
 			}}}
 		}
 	}
-	if layer != string(LayerDWD) || preAggregatedSource {
+	if layer != string(LayerDWD) || sourceLineage {
 		return nil
 	}
 

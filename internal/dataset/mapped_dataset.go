@@ -12,6 +12,7 @@ import (
 	"intelligent-report-generation-system/internal/fieldtype"
 	"intelligent-report-generation-system/internal/physicalname"
 	"intelligent-report-generation-system/internal/platform/database"
+	"intelligent-report-generation-system/internal/warehouselayer"
 )
 
 // ErrMappedDatasetUnsupportedColumn identifies a deterministic downstream mapped-dataset
@@ -43,8 +44,11 @@ type MappedDatasetTable struct {
 	TableName           string
 	BusinessName        string
 	BusinessDescription string
-	DomainID            string
-	Domain              string
+	// Tags 是表资产的受控标签；其中的“层级:”标签（元数据清洗判定、人工可改）
+	// 决定默认映射数据集的层级。
+	Tags     []string
+	DomainID string
+	Domain   string
 }
 
 // MappedDatasetColumn 保留真实物理字段名作为 projection/FIELD_REF，
@@ -79,11 +83,9 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 		return Document{}, errors.New("mapped dataset table name is required")
 	}
 	code := "mapped_" + strings.ReplaceAll(tableUUID.String(), "-", "")
+	// 分类器只决定物理表默认直落的层级；血缘方式由单表拓扑本身表达，
+	// 不再需要 sourceMode 标记。
 	layer := ClassifyMappedDatasetLayer(table, columns)
-	sourceMode := SourceMode("")
-	if layer == LayerDWS {
-		sourceMode = SourceModePreAggregated
-	}
 	projection := make([]string, 0, len(columns))
 	fields := make([]Field, 0, len(columns))
 	endOutputs := make([]map[string]any, 0, len(columns))
@@ -131,20 +133,24 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 			"name": fieldName,
 			"code": fieldCode,
 		})
-		if column.PrimaryKey || layer == LayerDWS && (role == "IDENTIFIER" || role == "TIME") {
+		// DIM/DWS/ADS 直落必须声明粒度键：优先源表主键，否则用标识/时间字段。
+		keyedLayer := layer == LayerDIM || layer == LayerDWS || layer == LayerADS
+		if column.PrimaryKey || keyedLayer && (role == "IDENTIFIER" || role == "TIME") {
 			grainCodes = append(grainCodes, fieldCode)
 		}
 		if role == "TIME" && defaultTimeField == "" {
 			defaultTimeField = fieldCode
 		}
 	}
-	grainDescription := "每行代表" + name + "中的一条记录"
-	if layer == LayerDWS {
-		grainDescription = "每行代表" + name + "中一个源端既有的汇总统计粒度"
+	if len(grainCodes) == 0 && (layer == LayerDIM || layer == LayerDWS || layer == LayerADS) {
+		// 没有任何键证据时无法满足该层的粒度合同；保守回落到 ODS 直落，
+		// 由用户在数据集中心补齐粒度键后再声明目标层级。
+		layer = LayerODS
 	}
+	grainDescription := mappedDatasetGrainDescription(layer, name)
 	if len(grainCodes) == 0 {
-		// ODS must preserve source rows even when the source does not declare a
-		// business key. The first column is not evidence of uniqueness.
+		// ODS/DWD must preserve source rows even when the source does not declare
+		// a business key. The first column is not evidence of uniqueness.
 		grainDescription += "（源表未声明业务主键）"
 	}
 
@@ -157,7 +163,6 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 			Domain:      mappedDatasetDomain(table.Domain),
 			Type:        "SINGLE_SOURCE",
 			Layer:       layer,
-			SourceMode:  sourceMode,
 		},
 		Nodes: []Node{{
 			ID:            "node_1",
@@ -216,12 +221,45 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 	}, nil
 }
 
-// ClassifyMappedDatasetLayer classifies only high-confidence source-side
-// aggregates as DWS. Ambiguous tables fail conservatively to ODS so event,
-// transaction, and snapshot detail is never promoted merely because it has
-// numeric fields. The business name/description are supplied by metadata AI,
-// while field semantics and keys come from the trusted technical snapshot.
+func mappedColumnsCarryMeasure(columns []MappedDatasetColumn) bool {
+	for _, column := range columns {
+		if mappedDatasetFieldRole(column) == "MEASURE" {
+			return true
+		}
+	}
+	return false
+}
+
+func mappedDatasetGrainDescription(layer Layer, name string) string {
+	switch layer {
+	case LayerDIM:
+		return "每行代表" + name + "中的一个业务实体"
+	case LayerDWD:
+		return "每行代表" + name + "中的一条业务事实明细"
+	case LayerDWS:
+		return "每行代表" + name + "中一个源端既有的汇总统计粒度"
+	case LayerADS:
+		return "每行代表" + name + "中一条面向消费场景的结果记录"
+	default:
+		return "每行代表" + name + "中的一条记录"
+	}
+}
+
+// ClassifyMappedDatasetLayer picks the layer a physical table enters the
+// warehouse at. The governed “层级:” tag written by metadata cleaning (and
+// editable by humans) is authoritative for every layer; without it the
+// classifier only promotes high-confidence source-side aggregates to DWS.
+// Ambiguous tables fail conservatively to ODS so event, transaction, and
+// snapshot detail is never promoted merely because it has numeric fields.
 func ClassifyMappedDatasetLayer(table MappedDatasetTable, columns []MappedDatasetColumn) Layer {
+	if tagged := warehouselayer.FromTags(table.Tags); tagged != "" {
+		layer := Layer(tagged)
+		if layer.Valid() && (layer != LayerDWS || mappedColumnsCarryMeasure(columns)) {
+			return layer
+		}
+		// A DWS declaration without any measure column cannot satisfy the DWS
+		// grain contract; fall through to the conservative heuristics.
+	}
 	measureCount := 0
 	grainEvidence := 0
 	for _, column := range columns {
@@ -362,7 +400,7 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 	err = tx.QueryRow(ctx, `SELECT t.id::text,t.data_source_id::text,source.name,
 		COALESCE(published_source.file_version_id::text,''),
 		t.table_name,t.metadata_version,t.structure_hash,t.business_name,t.business_description,
-		business_domain.id::text,business_domain.name
+		t.tags,business_domain.id::text,business_domain.name
 		FROM platform.metadata_tables t
 		JOIN platform.data_sources source ON source.id=t.data_source_id AND source.tenant_id=t.tenant_id
 		JOIN platform.business_domains business_domain
@@ -388,7 +426,7 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 		FOR SHARE OF t,source,published_source`, tableID, tenantID).Scan(
 		&table.ID, &table.DataSourceID, &table.DataSourceName, &table.FileVersionID, &table.TableName,
 		&table.MetadataVersion, &table.StructureHash,
-		&table.BusinessName, &table.BusinessDescription, &table.DomainID, &table.Domain,
+		&table.BusinessName, &table.BusinessDescription, &table.Tags, &table.DomainID, &table.Domain,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
@@ -441,7 +479,11 @@ func (s *PostgresStore) ensureMappedDatasetTx(ctx context.Context, tx pgx.Tx, te
 	if err != nil {
 		return false, err
 	}
-	if exists && !state.Deleted && state.Layer != prepared.Document.Dataset.Layer {
+	// 层级变化（分类器或人工改写“层级:”标签）：已发布的系统映射数据集不能原地改层，
+	// 只能退役后重建；尚未发布的系统草稿由下方 refreshSystemMappedDraftTx 直接改写
+	// 层级与 DSL，不需要退役。
+	if exists && !state.Deleted && state.PublishedCount > 0 &&
+		state.Layer != prepared.Document.Dataset.Layer {
 		retired, retireErr := s.retireReclassifiedMappedDatasetTx(
 			ctx, tx, tenantID, actorID, table, state, prepared.Document.Dataset.Layer,
 		)
@@ -674,7 +716,7 @@ func loadMappedDatasetInputTx(
 	query := `SELECT t.id::text,t.data_source_id::text,source.name,
 		COALESCE(published_source.file_version_id::text,''),
 		t.table_name,t.metadata_version,t.structure_hash,t.business_name,t.business_description,
-		business_domain.id::text,business_domain.name
+		t.tags,business_domain.id::text,business_domain.name
 		FROM platform.metadata_tables t
 		JOIN platform.data_sources source ON source.id=t.data_source_id AND source.tenant_id=t.tenant_id
 		JOIN platform.business_domains business_domain
@@ -696,7 +738,7 @@ func loadMappedDatasetInputTx(
 	err := tx.QueryRow(ctx, query, tableID, tenantID).Scan(
 		&table.ID, &table.DataSourceID, &table.DataSourceName, &table.FileVersionID,
 		&table.TableName, &table.MetadataVersion, &table.StructureHash,
-		&table.BusinessName, &table.BusinessDescription, &table.DomainID, &table.Domain,
+		&table.BusinessName, &table.BusinessDescription, &table.Tags, &table.DomainID, &table.Domain,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MappedDatasetTable{}, nil, false, nil

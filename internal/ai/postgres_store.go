@@ -85,7 +85,7 @@ func (s *PostgresStore) Start(ctx context.Context, input StartRequest) (record R
 			Scan(&requestsToday, &tokensThisMonth, &costThisMonth); err != nil {
 			return err
 		}
-		if requestsToday >= maxRequestsPerDay || exceedsQuota(tokensThisMonth, int64(input.ReservedTokens), maxTokensPerMonth) || exceedsQuota(costThisMonth, input.ReservedCostMicros, maxCostMicrosPerMonth) {
+		if exceedsRequestQuota(requestsToday, maxRequestsPerDay) || exceedsQuota(tokensThisMonth, int64(input.ReservedTokens), maxTokensPerMonth) || exceedsQuota(costThisMonth, input.ReservedCostMicros, maxCostMicrosPerMonth) {
 			return ErrQuotaExceeded
 		}
 
@@ -266,8 +266,21 @@ func tenantPolicyAllowsPurpose(enabled bool, allowedPurposes []string, purpose s
 		containsPurpose(allowedPurposes, purpose)
 }
 
+// A zero policy limit explicitly means unlimited. Positive limits keep the
+// governed admission path available for deployments that choose to enable it.
+func exceedsRequestQuota(used, limit int64) bool {
+	if limit == 0 {
+		return false
+	}
+	return used < 0 || limit < 0 || used >= limit
+}
+
 // exceedsQuota 使用减法比较避免 used+reserved 在极端输入下发生整数溢出。
+// limit=0 表示不限额，仍保留请求审计与供应商实际用量记录。
 func exceedsQuota(used, reserved, limit int64) bool {
+	if limit == 0 {
+		return false
+	}
 	return used < 0 || reserved < 0 || limit < 0 || reserved > limit || used > limit-reserved
 }
 

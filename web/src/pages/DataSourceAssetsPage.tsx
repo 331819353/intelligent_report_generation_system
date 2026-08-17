@@ -24,6 +24,7 @@ import {
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppButton } from '../components/AppButton'
 import { AppShell } from '../components/AppShell'
+import { layerFromTags, replaceLayerTag, warehouseLayerLabels, warehouseLayers, type WarehouseLayer } from '../lib/warehouse-layer'
 import '../styles/data-source-assets.css'
 import {
   dataSourceAPI,
@@ -648,7 +649,7 @@ export function DataSourceAssetsPage() {
                   return <article className="asset-table-row" role="row" key={item.id}>
                     <AppButton className="asset-table-row-open" aria-label={`${canManage ? '完善' : '查看'}${item.businessName || item.tableName}`} onClick={() => goDetail(item.id)}>
                       <span className="asset-table-name" role="cell"><span className="asset-table-icon"><Table size={19} weight="duotone" /></span><span className="asset-table-copy"><strong title={item.businessName || item.tableName}>{item.businessName || '待补充业务名称'}</strong><small title={item.businessDescription}>{item.businessDescription || '尚未填写业务说明'}</small></span></span>
-                      <span role="cell"><strong title={`${item.schemaName}.${item.tableName}`}>{item.tableName}</strong><small title={`${item.catalogName}.${item.schemaName}`}>{[item.catalogName, item.schemaName].filter(Boolean).join('.') || '默认目录'} · {item.tableType}</small></span>
+                      <span role="cell"><strong title={`${item.schemaName}.${item.tableName}`}>{item.tableName}</strong><small title={`${item.catalogName}.${item.schemaName}`}>{[item.catalogName, item.schemaName].filter(Boolean).join('.') || '默认目录'} · {item.tableType}{(item.warehouseLayer ?? layerFromTags(item.tags)) ? ` · ${item.warehouseLayer ?? layerFromTags(item.tags)}` : ''}</small></span>
                       <span role="cell"><strong>{item.columnCount}</strong><small>个字段</small></span>
                       <span role="cell">
                         <span className="asset-status-line">
@@ -752,6 +753,18 @@ export function DataSourceAssetsPage() {
           <div className="asset-table-form-fields">
             <label>业务名称<input disabled={!canManage} value={tableForm.businessName} onChange={event => setTableForm(current => ({ ...current, businessName: event.target.value }))} /></label>
             <label>业务说明<textarea disabled={!canManage} rows={4} value={tableForm.businessDescription} onChange={event => setTableForm(current => ({ ...current, businessDescription: event.target.value }))} placeholder="说明业务范围、粒度和使用边界" /></label>
+            <label>数仓层级<select
+              aria-label="数仓层级"
+              disabled={!canManage}
+              value={layerFromTags(tagsFromText(tableForm.tags)) ?? ''}
+              onChange={event => setTableForm(current => ({
+                ...current,
+                tags: replaceLayerTag(tagsFromText(current.tags), event.target.value as WarehouseLayer | '').join(', '),
+              }))}
+            >
+              <option value="">未判定</option>
+              {warehouseLayers.map(layer => <option key={layer} value={layer}>{warehouseLayerLabels[layer]}</option>)}
+            </select><small title="元数据清洗时判定该表当前所处的数仓层级（写入“层级:”标签），可在此改写；它决定该表默认映射数据集与画布直落的层级。">标记该表当前所处的数仓层级，并决定数据集与画布的默认落层。</small></label>
             <label>标签<input disabled={!canManage} value={tableForm.tags} onChange={event => setTableForm(current => ({ ...current, tags: event.target.value }))} placeholder="使用英文逗号分隔" /></label>
             <div className="asset-form-grid"><label>敏感级<select disabled={!canManage} value={tableForm.sensitivityLevel} onChange={event => setTableForm(current => ({ ...current, sensitivityLevel: event.target.value as DataSourceTableRecord['sensitivityLevel'] }))}>{Object.entries(sensitivityLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>可见范围<select disabled={!canManage} value={tableForm.visibility} onChange={event => setTableForm(current => ({ ...current, visibility: event.target.value as DataSourceTableRecord['visibility'] }))}><option value="PRIVATE">仅自己</option><option value="TENANT_PUBLIC">领域内共享</option></select></label></div>
           </div>

@@ -55,11 +55,12 @@
         },
         "type": { "enum": ["SINGLE_SOURCE", "CROSS_SOURCE"] },
         "layer": {
-          "description": "数仓加工层级；历史 DSL 可省略并由服务端确定性推断",
+          "description": "数据集的粒度合同（ODS 贴源 / DIM 实体 / DWD 明细 / DWS 汇总 / ADS 应用）。血缘方式由拓扑推导：恰好一个物理 TABLE 节点且无 Join 为源表直落，可声明任意层级并保持源表既有粒度；全部引用已发布数据集版本为分层加工，上游层级须满足 ODS→DIM/DWD→DWS→ADS。历史 DSL 可省略并由服务端确定性推断",
           "enum": ["ODS", "DIM", "DWD", "DWS", "ADS"]
         },
         "sourceMode": {
-          "description": "仅由服务端来源分类器写入；表示物理源表已具备可信汇总粒度",
+          "description": "遗留字段：早期分类器为源端已汇总的单表 DWS 写入 PRE_AGGREGATED；语义等价于源表直落的 DWS，新文档不再写入",
+          "deprecated": true,
           "const": "PRE_AGGREGATED"
         },
         "semanticContractVersion": { "const": "1.0" },
