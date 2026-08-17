@@ -14,7 +14,8 @@ import (
 const (
 	SchemaVersion = "1.1"
 	// v16：表级清洗必须给出恰好一个“层级:”标签（ODS/DIM/DWD/DWS/ADS）。
-	PromptVersion        = "metadata-completion-v16"
+	// v17：ODS/DWD 只按“是否补充高频维度信息、是否默认值填充”区分，不看表名前缀。
+	PromptVersion        = "metadata-completion-v17"
 	SourceFormatCSV      = "CSV"
 	SourceFormatExcel    = "EXCEL"
 	SourceFormatDatabase = "DATABASE"

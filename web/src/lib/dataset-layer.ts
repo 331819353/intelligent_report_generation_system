@@ -54,9 +54,9 @@ export function chooseDatasetLayers(draft: LayerChoiceDraft): LayerChoice[] {
 /** 各层级在源表直落时对输出合同的要求，用于保存前提示。 */
 export function sourceLayerRequirement(layer: LayerChoice): string {
   switch (layer) {
-    case 'ODS': return '逐行贴源：保持源表行粒度，不需要声明粒度键。'
+    case 'ODS': return '逐行贴源：原始数据，只有业务字段与维度 ID、未补充高频维度信息、未做默认值填充；保持源表行粒度，不需要声明粒度键。'
     case 'DIM': return '实体粒度：需要声明实体粒度说明与业务键，源表每行应是一个业务实体。'
-    case 'DWD': return '明细粒度：源表每行应是一条业务事实/事件；可不声明粒度键。'
+    case 'DWD': return '明细粒度：源表每行应是一条已清洗的业务事实/事件——已冗余高频维度属性、空值已按默认值填充；可不声明粒度键。'
     case 'DWS': return '汇总粒度：需要声明粒度说明与粒度键，且至少一个度量字段；源表应已完成汇总。'
     case 'ADS': return '应用粒度：需要声明面向消费场景的粒度说明与粒度键；源表应是可直接消费的结果表。'
   }

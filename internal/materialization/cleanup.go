@@ -92,12 +92,22 @@ func (store *PostgresStore) EnqueueDatasetMaterializationCleanupTx(
 	if expectedCount == 0 {
 		return 0, nil
 	}
+	// A dataset identity can be soft-deleted more than once (mapped datasets are
+	// regenerated under the same ID and later retired again), so a terminal job
+	// row is re-armed instead of silently ignored; only a RUNNING lease is left
+	// untouched because its holder already loaded the targets it will drop.
 	if _, err := tx.Exec(ctx, `INSERT INTO platform.dataset_materialization_cleanup_jobs(
 		tenant_id,dataset_id,layer,requested_by,expected_count
 	) VALUES($1,$2,$3,$4,$5)
 	ON CONFLICT(tenant_id,dataset_id) DO UPDATE SET
-		expected_count=EXCLUDED.expected_count
-	WHERE platform.dataset_materialization_cleanup_jobs.status='QUEUED'`,
+		layer=EXCLUDED.layer,
+		requested_by=EXCLUDED.requested_by,
+		expected_count=EXCLUDED.expected_count,
+		status='QUEUED',deleted_count=0,attempt=0,
+		next_attempt_at=now(),started_at=NULL,completed_at=NULL,
+		lease_owner='',lease_token=NULL,lease_expires_at=NULL,
+		error_code='',error_message='',updated_at=now()
+	WHERE platform.dataset_materialization_cleanup_jobs.status IN ('QUEUED','SUCCEEDED','FAILED')`,
 		tenantID, datasetID, layer, actorID, expectedCount); err != nil {
 		return 0, err
 	}

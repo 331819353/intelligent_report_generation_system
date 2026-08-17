@@ -605,6 +605,16 @@ func (s *PostgresStore) retireReclassifiedMappedDatasetTx(
 	} else if tag.RowsAffected() != 1 {
 		return false, nil
 	}
+	// The retired identity is soft-deleted below; its warehouse relations must
+	// follow the same leased cleanup outbox as a user deletion, otherwise the
+	// old layer's physical table and published view outlive the dataset.
+	if s.materializationDeletionSink != nil {
+		if _, err := s.materializationDeletionSink.EnqueueDatasetMaterializationCleanupTx(
+			ctx, tx, tenantID, actorID, state.ID, string(state.Layer),
+		); err != nil {
+			return false, err
+		}
+	}
 	if _, err := tx.Exec(ctx, `UPDATE platform.dataset_versions
 		SET status='DEPRECATED',updated_by=$1
 		WHERE dataset_id=$2 AND tenant_id=$3 AND status IN ('PUBLISHED','STALE')`,

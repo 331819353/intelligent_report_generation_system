@@ -764,7 +764,7 @@ export function DataSourceAssetsPage() {
             >
               <option value="">未判定</option>
               {warehouseLayers.map(layer => <option key={layer} value={layer}>{warehouseLayerLabels[layer]}</option>)}
-            </select><small title="元数据清洗时判定该表当前所处的数仓层级（写入“层级:”标签），可在此改写；它决定该表默认映射数据集与画布直落的层级。">标记该表当前所处的数仓层级，并决定数据集与画布的默认落层。</small></label>
+            </select><small title="元数据清洗时判定该表当前所处的数仓层级（写入“层级:”标签），可在此改写；它决定该表默认映射数据集与画布直落的层级。ODS=原始数据（仅业务字段与维度 ID、未补充高频维度信息、未做默认值填充）；DWD=已清洗明细（冗余高频维度属性、空值已按默认值填充）。">标记该表当前所处的数仓层级，并决定数据集与画布的默认落层。</small></label>
             <label>标签<input disabled={!canManage} value={tableForm.tags} onChange={event => setTableForm(current => ({ ...current, tags: event.target.value }))} placeholder="使用英文逗号分隔" /></label>
             <div className="asset-form-grid"><label>敏感级<select disabled={!canManage} value={tableForm.sensitivityLevel} onChange={event => setTableForm(current => ({ ...current, sensitivityLevel: event.target.value as DataSourceTableRecord['sensitivityLevel'] }))}>{Object.entries(sensitivityLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label>可见范围<select disabled={!canManage} value={tableForm.visibility} onChange={event => setTableForm(current => ({ ...current, visibility: event.target.value as DataSourceTableRecord['visibility'] }))}><option value="PRIVATE">仅自己</option><option value="TENANT_PUBLIC">领域内共享</option></select></label></div>
           </div>
