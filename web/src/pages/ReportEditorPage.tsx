@@ -1,6 +1,6 @@
 import {
   ArrowDown, ArrowLeft, ArrowUp, ArrowUDownLeft, ArrowUDownRight, BracketsCurly, CaretDown, CaretRight, Check,
-  CheckCircle, CirclesFour, DotsThreeVertical, Eye, Info, MagicWand,
+  CheckCircle, CirclesFour, Database, DotsThreeVertical, Eye, Funnel, Info, MagicWand,
   NotePencil, PencilSimple, Plus, ShieldCheck, Sparkle, SpinnerGap, Trash, WarningCircle, X,
 } from '@phosphor-icons/react'
 import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from 'react'
@@ -313,12 +313,14 @@ function pruneOptions(options: ComponentOptions, manifest: ComponentManifest): C
  * 卡片配置面板（右侧内联）：数据集 → 展示类型 → 指标（度量）与维度 → 过滤字段 → 样式。
  * 保存走 COMPONENT_REPLACE / COMPONENT_UPDATE / DATA_BINDING_UPDATE 受控 Operation。
  */
-function CardInspector({ mode, component, manifest: currentManifest, manifests, reportContexts, contextNameOf, fieldsOf, defaultContextId, canAI, onSuggest, busy, error, onClose, onSave, filterPanel }: {
+function CardInspector({ mode, component, manifest: currentManifest, manifests, reportContexts, contextNameOf, fieldsOf, defaultContextId, canAI, onSuggest, busy, error, onClose, onSave, filterPanel, filterCount }: {
   mode: 'data' | 'appearance'
   component?: EditorComponent
   manifest?: ComponentManifest
   /** 作用于该卡片的过滤字段面板（由页面注入，避免面板自持草稿状态）。 */
   filterPanel: ReactNode
+  /** 当前卡片可见的报告级与卡片级过滤字段数量。 */
+  filterCount: number
   /** 可切换的展示类型（组件清单）。 */
   manifests: ComponentManifest[]
   /** 报告内已声明的数据集。 */
@@ -433,10 +435,20 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
     </div>)}
   </div>
 
+  const save = () => onSave({
+    options: { ...(manifest ? pruneOptions(options, manifest) : options), title: options.title?.trim(), subtitle: options.subtitle?.trim() },
+    binding: bindable ? { dimensions, measures } : undefined,
+    dataContextId: bindable ? dataContextId : undefined,
+    replaceWith: replacing ? manifest : undefined,
+  })
+
   return <section className="report-card-inspector" aria-labelledby="manual-editor-title">
       <header>
-        <div><h2 id="manual-editor-title">{mode === 'data' ? '数据绑定' : '外观设置'}</h2><span>{component?.options.title || component?.templateRef.type || '画布元素'}</span></div>
-        <button type="button" aria-label="取消选中" onClick={onClose}><X size={18} /></button>
+        <div className="report-card-inspector-title"><h2 id="manual-editor-title">{mode === 'data' ? '数据绑定' : '外观设置'}</h2><span>{component?.options.title || component?.templateRef.type || '画布元素'}</span></div>
+        <div className="report-card-inspector-actions">
+          <button className="report-inspector-apply" type="button" disabled={busy || !options.title?.trim() || !bindingValid} onClick={save}>{busy ? '应用中…' : '应用'}</button>
+          <button type="button" aria-label="取消选中" onClick={onClose}><X size={18} /></button>
+        </div>
       </header>
       <div className="report-editor-manual-form">
         {mode === 'data' && <>
@@ -464,10 +476,10 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
         </p>}
 
         {bindable && contract && <div className="report-editor-binding">
-          <p className="report-editor-binding-contract">
-            这类卡片需要 {contract.measures.min === contract.measures.max ? contract.measures.min : `${contract.measures.min}～${contract.measures.max}`} 个指标
-            {contract.dimensions.max > 0 ? `、${contract.dimensions.min === contract.dimensions.max ? contract.dimensions.min : `${contract.dimensions.min}～${contract.dimensions.max}`} 个维度` : '，不需要维度'}
-          </p>
+          <div className="report-editor-binding-summary" aria-label="当前字段选择">
+            <span><strong>{measures.length}</strong> / {contract.measures.max} 指标</span>
+            {contract.dimensions.max > 0 && <span><strong>{dimensions.length}</strong> / {contract.dimensions.max} 维度</span>}
+          </div>
           <div className="report-editor-binding-assist">
             <button type="button" disabled={busy || suggesting || !manifest} title="按数据集里字段的角色（度量/维度/时间）自动填入" onClick={() => manifest && applyBinding(defaultBinding(manifest, fields))}>自动填充</button>
             <button type="button" disabled={busy || suggesting || !canAI || !onSuggest || !manifest} title={canAI ? '让模型按卡片标题在数据集里挑选指标与维度' : '当前不可用：需要模型提供方与 AI 编辑权限'} onClick={() => void suggest()}>
@@ -522,18 +534,16 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
           })}
         </div>}
         </>}
+        {mode === 'data' && filterPanel && <details className="report-inspector-disclosure">
+          <summary>
+            <span className="report-inspector-disclosure-icon"><Funnel size={16} /></span>
+            <span><strong>过滤字段</strong><small>{filterCount > 0 ? `${filterCount} 个已配置` : '按需添加，不占用首屏'}</small></span>
+            <CaretDown className="report-inspector-disclosure-caret" size={15} />
+          </summary>
+          <div className="report-inspector-disclosure-content">{filterPanel}</div>
+        </details>}
         {error && <div className="report-editor-inline-error"><WarningCircle size={15} />{error}</div>}
       </div>
-      <footer>
-        <button className="primary-button" type="button" disabled={busy || !options.title?.trim() || !bindingValid}
-          onClick={() => onSave({
-            options: { ...(manifest ? pruneOptions(options, manifest) : options), title: options.title?.trim(), subtitle: options.subtitle?.trim() },
-            binding: bindable ? { dimensions, measures } : undefined,
-            dataContextId: bindable ? dataContextId : undefined,
-            replaceWith: replacing ? manifest : undefined,
-          })}>{busy ? '正在应用…' : '应用'}</button>
-      </footer>
-      {mode === 'data' && filterPanel}
     </section>
 }
 
@@ -666,6 +676,7 @@ export function ReportEditorPage() {
   const [filterError, setFilterError] = useState('')
   const [jsonOpen, setJsonOpen] = useState(false)
   const [sidePanel, setSidePanel] = useState<'ai' | 'data' | 'appearance' | 'interaction'>('data')
+  const [reportInspectorView, setReportInspectorView] = useState<'overview' | 'datasets' | 'filters'>('overview')
   const [editorView, setEditorView] = useState<'edit' | 'preview'>('edit')
   const [lastReceipt, setLastReceipt] = useState<{ from: number; to: number; count: number; source: string } | null>(null)
   const [renamingSectionId, setRenamingSectionId] = useState('')
@@ -803,12 +814,20 @@ export function ReportEditorPage() {
   )
   const fieldsOf = (dataContextId: string): DataContextField[] => fieldsByContext.get(dataContextId) ?? []
   const reportContexts = draft?.definition.dataContexts ?? []
+  const reportFilterCount = draft?.definition.globalFilters?.length ?? 0
+  const selectedFilterCount = draft?.definition.globalFilters?.filter(filter =>
+    filter.scope.type === 'REPORT' || (filter.scope.type === 'BLOCK' && filter.scope.targetIds.includes(selectedCardId)),
+  ).length ?? 0
   const contextNameOf = (dataContextId: string) =>
     reportContexts.find(context => context.id === dataContextId)?.alias ||
     contexts.find(item => item.dataContext.id === dataContextId)?.name || dataContextId
   const selectedManifest = selectedComponent
     ? manifests.get(selectedComponent.templateRef.type, selectedComponent.templateRef.version)
     : undefined
+
+  useEffect(() => {
+    if (selectedComponentId) setReportInspectorView('overview')
+  }, [selectedComponentId])
   const canAIEdit = Boolean(asset?.allowedActions.includes('AI_EDIT'))
   const canEdit = Boolean(asset?.allowedActions.includes('EDIT'))
   const canPublish = Boolean(asset?.allowedActions.includes('PUBLISH'))
@@ -1460,7 +1479,7 @@ export function ReportEditorPage() {
                 component={selectedComponent} manifest={selectedManifest} manifests={manifests.list()}
                 reportContexts={reportContexts} contextNameOf={contextNameOf} fieldsOf={fieldsOf} defaultContextId={currentDataContextId}
                 canAI={canAIEdit} onSuggest={suggestBinding}
-                busy={manualBusy || !canEdit} error={manualError}
+                busy={manualBusy || !canEdit} error={manualError} filterCount={selectedFilterCount}
                 onClose={() => setSelectedComponentId('')} onSave={result => void saveManual(result)}
                 filterPanel={sidePanel === 'data' ? <FilterPanel definition={draft.definition} candidates={contexts} fieldsOf={fieldsOf} selectedBlockId={selectedCardId}
                   onlyBlock defaultContextId={selectedComponent.dataBinding?.dataContextId ?? currentDataContextId}
@@ -1469,13 +1488,43 @@ export function ReportEditorPage() {
                   onDelete={filterId => void deleteFilter(filterId)} /> : null}
               />
             </> : sidePanel === 'data' ? <>
-              <p className="report-editor-binding-note report-editor-panel-intro"><Info size={15} />点击画布上的卡片可配置它的数据集、指标与过滤字段；下面是报告级的数据集与筛选器。</p>
-              <DataContextPanel definition={draft.definition} candidates={contexts} busy={dataBusy || !canEdit} error={dataError}
-                onAdd={candidate => void addDataContext(candidate)} onRemove={dataContextId => void removeDataContext(dataContextId)} />
-              <FilterPanel definition={draft.definition} candidates={contexts} fieldsOf={fieldsOf} selectedBlockId={selectedCardId}
-                busy={filterBusy || !canEdit} error={filterError}
-                onCreate={filterDraft => void createFilter(filterDraft)} onUpdate={(filter, filterDraft) => void updateFilter(filter, filterDraft)}
-                onDelete={filterId => void deleteFilter(filterId)} />
+              {reportInspectorView === 'overview' && <section className="report-inspector-overview" aria-labelledby="report-settings-title">
+                <header>
+                  <div><span>报告级设置</span><h2 id="report-settings-title">数据与筛选</h2></div>
+                  <em>r{draft.revisionNo}</em>
+                </header>
+                <div className="report-inspector-overview-list">
+                  <button type="button" onClick={() => setReportInspectorView('datasets')}>
+                    <span className="report-inspector-overview-icon"><Database size={18} /></span>
+                    <span><strong>数据源</strong><small>{reportContexts.length > 0 ? `${reportContexts.length} 个已关联` : '尚未关联'}</small></span>
+                    <CaretRight size={16} />
+                  </button>
+                  <button type="button" onClick={() => setReportInspectorView('filters')}>
+                    <span className="report-inspector-overview-icon"><Funnel size={18} /></span>
+                    <span><strong>画布筛选</strong><small>{reportFilterCount > 0 ? `${reportFilterCount} 个已配置` : '尚未配置'}</small></span>
+                    <CaretRight size={16} />
+                  </button>
+                </div>
+                <p className="report-inspector-overview-tip"><CirclesFour size={16} />选择画布中的卡片，可继续设置它的指标、维度与样式。</p>
+              </section>}
+              {reportInspectorView === 'datasets' && <section className="report-inspector-detail" aria-label="数据源配置">
+                <header>
+                  <button type="button" aria-label="返回报告配置" onClick={() => setReportInspectorView('overview')}><ArrowLeft size={17} /></button>
+                  <div><h2>数据源</h2><span>{reportContexts.length} 个已关联</span></div>
+                </header>
+                <DataContextPanel definition={draft.definition} candidates={contexts} busy={dataBusy || !canEdit} error={dataError}
+                  onAdd={candidate => void addDataContext(candidate)} onRemove={dataContextId => void removeDataContext(dataContextId)} />
+              </section>}
+              {reportInspectorView === 'filters' && <section className="report-inspector-detail" aria-label="画布筛选配置">
+                <header>
+                  <button type="button" aria-label="返回报告配置" onClick={() => setReportInspectorView('overview')}><ArrowLeft size={17} /></button>
+                  <div><h2>画布筛选</h2><span>{reportFilterCount} 个已配置</span></div>
+                </header>
+                <FilterPanel definition={draft.definition} candidates={contexts} fieldsOf={fieldsOf} selectedBlockId={selectedCardId}
+                  busy={filterBusy || !canEdit} error={filterError}
+                  onCreate={filterDraft => void createFilter(filterDraft)} onUpdate={(filter, filterDraft) => void updateFilter(filter, filterDraft)}
+                  onDelete={filterId => void deleteFilter(filterId)} />
+              </section>}
             </> : <div className="report-editor-panel-empty"><Sparkle size={20} /><strong>选择一个画布元素</strong><p>选中后可调整标题、说明和图表表现。</p></div>}
           </div>}
           {sidePanel === 'interaction' && <div className="report-editor-panel-body is-data is-interaction">
