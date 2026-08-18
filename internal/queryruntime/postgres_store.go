@@ -242,6 +242,9 @@ func resolveDatasetNodesTx(
 				resolvedNode.Table = table
 				result.Nodes[nodeID] = resolvedNode
 			}
+			if dataset.IsRuntimeRollupExecution(document) {
+				expanded = dataset.AsRuntimeRollupExecution(expanded)
+			}
 			result.ExecutionDocument = &expanded
 			result.SourceSampleLimit = odsSourcePreviewRows
 			return result, nil

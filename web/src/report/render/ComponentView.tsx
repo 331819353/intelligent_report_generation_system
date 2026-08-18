@@ -5,7 +5,7 @@ import { init, use as registerEChartsComponents } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { CaretLeft, CaretRight, Image as ImageIcon, Info } from '@phosphor-icons/react'
 import { ComponentStateView } from '../runtime/ComponentStateView.tsx'
-import type { ReportComponentState } from '../runtime/state.ts'
+import { componentPresentation, type ReportComponentState } from '../runtime/state.ts'
 import { buildChartOption, formatNumber, resolveColumns, singleMetric, type QueryResult } from './chart-option.ts'
 import type { ComponentManifest, ManifestIndex } from './manifests.ts'
 import type { ReportComponent } from './schema.ts'
@@ -210,7 +210,7 @@ export function ComponentView({
         <h3>{state === 'NO_PERMISSION' ? '受限组件' : component.options.title || manifest?.displayName || component.templateRef.type}</h3>
         {state !== 'NO_PERMISSION' && component.options.subtitle && <p>{component.options.subtitle}</p>}
       </div>
-      {item && <span className={`report-state-chip is-${String(state).toLocaleLowerCase()}`}>{state}</span>}
+      {item && state !== 'READY' && <span className={`report-state-chip is-${String(state).toLocaleLowerCase()}`}>{componentPresentation(String(state)).label}</span>}
     </header>
     <div className="report-render-component-body">{failed
       ? <ComponentStateView state={state} boundTitle={state === 'NO_PERMISSION' ? undefined : component.options.title} errorCode={item?.errorCode} onAction={onRetry} />

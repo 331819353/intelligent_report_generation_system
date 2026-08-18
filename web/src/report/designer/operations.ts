@@ -139,12 +139,27 @@ export function addToCardOperations(input: AddToCardInput): { operations: Editor
 export function defaultBinding(
   manifest: ComponentManifest, fields: DataContextField[],
 ): { dimensions: FieldBinding[]; measures: FieldBinding[] } {
-  const rank = (field: DataContextField) =>
-    field.role === 'TIME' || field.semanticType === 'DATE' || field.semanticType === 'DATETIME' ? 0
-      : field.role === 'DIMENSION' || field.semanticType === 'CATEGORY' || field.semanticType === 'REGION' ? 1
-        : field.role === 'IDENTIFIER' ? 3 : 2
+  const identifierLike = (field: DataContextField) =>
+    field.role === 'IDENTIFIER' || /(^|_)(id|no|code|uuid|key)$/i.test(field.code)
+  const timeLike = (field: DataContextField) =>
+    field.role === 'TIME' || field.semanticType === 'DATE' || field.semanticType === 'DATETIME' ||
+    field.canonicalType === 'DATE' || field.canonicalType === 'DATETIME'
+  // 折线/面积图天然沿时间展开；饼图/漏斗/柱状图/表格更适合先按类目分组。
+  const timeFirst = /^(line|area)/.test(manifest.type) || (manifest.dataContract.roles.includes('TIME') && !manifest.dataContract.roles.includes('CATEGORY'))
+  const rank = (field: DataContextField) => {
+    if (identifierLike(field)) return 4
+    if (timeLike(field)) return timeFirst ? 0 : 2
+    if (field.role === 'DIMENSION' || field.semanticType === 'CATEGORY' || field.semanticType === 'REGION') return timeFirst ? 1 : 0
+    return timeFirst ? 2 : 1
+  }
+  const measureRank = (field: DataContextField) => {
+    if (/(amount|revenue|sales|gmv|profit|income|金额|销售额|收入)/i.test(`${field.code} ${field.name}`)) return 0
+    if (/(quantity|qty|count|volume|数量|件数)/i.test(`${field.code} ${field.name}`)) return 1
+    if ((field.aggregation || '').toUpperCase() === 'SUM') return 2
+    return 3
+  }
   const dimensionFields = fields.filter(field => field.role !== 'MEASURE').sort((left, right) => rank(left) - rank(right))
-  const measureFields = fields.filter(field => field.role === 'MEASURE')
+  const measureFields = fields.filter(field => field.role === 'MEASURE').sort((left, right) => measureRank(left) - measureRank(right))
   const dimensions: FieldBinding[] = Array.from({ length: manifest.dataContract.dimensions.min }, (_, index) => ({
     role: preferredRole(manifest, true), field: dimensionFields[index]?.code ?? '',
   }))
@@ -182,6 +197,8 @@ export type AddComponentInput = {
   newId: () => string
   /** 拖放落点（网格坐标）；给定时卡片放在落点，与之重叠的卡片按碰撞规则下移。 */
   preferredRect?: { x: number; y: number }
+  /** 报告还没有分区时自动创建的分区名；默认沿用卡片标题。 */
+  sectionName?: string
 }
 
 /**
@@ -246,7 +263,7 @@ export function addComponentOperations(input: AddComponentInput): { operations: 
   const sectionId = newId()
   operations.push({
     op: 'SECTION_CREATE', targetId: page.id,
-    payload: { section: { id: sectionId, name: title, order: 1, blocks: [block] } },
+    payload: { section: { id: sectionId, name: input.sectionName || title, order: 1, blocks: [block] } },
   })
   return { operations, sectionId, componentId }
 }
@@ -508,4 +525,79 @@ export function updateFilterOperations(filter: GlobalFilter, draft: FilterDraft)
 
 export function deleteFilterOperations(filterId: string): EditorOperation[] {
   return [{ op: 'FILTER_DELETE', targetId: filterId, payload: {} }]
+}
+
+/** 复制一张卡片：组件与卡片都拿新 ID，落在分区内第一块空位；同一条修订提交。 */
+export function duplicateBlockOperations(input: {
+  definition: ReportDefinition
+  page: Page
+  blockId: string
+  newId: () => string
+}): { operations: EditorOperation[]; componentId: string } | null {
+  const located = findBlock(input.page, input.blockId)
+  if (!located) return null
+  const { section, block } = located
+  const columns = canvasOf(input.definition).desktop.columns
+  const operations: EditorOperation[] = []
+  const componentIds = new Map<string, string>()
+  let firstComponentId = ''
+  for (const zone of block.zones) {
+    for (const slot of zone.slots) {
+      if (!slot.componentId) continue
+      const component = input.definition.components.find(item => item.id === slot.componentId)
+      if (!component) continue
+      const nextId = input.newId()
+      componentIds.set(slot.componentId, nextId)
+      if (!firstComponentId) firstComponentId = nextId
+      operations.push({ op: 'COMPONENT_CREATE', targetId: nextId, payload: { component: { ...component, id: nextId } } })
+    }
+  }
+  const rect = findFreeRect(section.blocks, { w: block.layout.desktop.w, h: block.layout.desktop.h }, columns)
+  const copy: Block = {
+    ...block,
+    id: input.newId(),
+    layout: { ...block.layout, desktop: rect, mobile: { ...block.layout.mobile, order: section.blocks.length + 1 } },
+    zones: block.zones.map(zone => ({
+      ...zone, id: input.newId(),
+      slots: zone.slots.map(slot => ({ ...slot, id: input.newId(), componentId: slot.componentId ? componentIds.get(slot.componentId) : slot.componentId })),
+    })),
+  }
+  operations.push({ op: 'BLOCK_CREATE', targetId: section.id, payload: { block: copy } })
+  return { operations, componentId: firstComponentId }
+}
+
+/** 删除一张卡片及其全部组件。 */
+export function removeBlockOperations(page: Page, blockId: string): EditorOperation[] {
+  const located = findBlock(page, blockId)
+  if (!located) return []
+  const componentIds = located.block.zones.flatMap(zone => zone.slots.map(slot => slot.componentId).filter((id): id is string => Boolean(id)))
+  return [
+    { op: 'BLOCK_DELETE', targetId: blockId, payload: {} },
+    ...componentIds.map(id => ({ op: 'COMPONENT_DELETE' as const, targetId: id, payload: {} })),
+  ]
+}
+
+/** 新建一个空分区，排在最后。 */
+export function createSectionOperations(page: Page, name: string, newId: () => string): { operations: EditorOperation[]; sectionId: string } {
+  const sectionId = newId()
+  const order = Math.max(0, ...page.sections.map(section => section.order)) + 1
+  return {
+    sectionId,
+    operations: [{ op: 'SECTION_CREATE', targetId: page.id, payload: { section: { id: sectionId, name, order, blocks: [] } } }],
+  }
+}
+
+export function renameSectionOperations(sectionId: string, name: string): EditorOperation[] {
+  return [{ op: 'SECTION_UPDATE', targetId: sectionId, payload: { name } }]
+}
+
+/** 改报告名称/描述：REPORT_SETTINGS_UPDATE 需要整份 metadata 与 runtimePolicy。 */
+export function updateReportSettingsOperations(definition: ReportDefinition, patch: { name?: string; description?: string }): EditorOperation[] {
+  return [{
+    op: 'REPORT_SETTINGS_UPDATE', targetId: definition.metadata.id,
+    payload: {
+      metadata: { ...definition.metadata, ...(patch.name !== undefined ? { name: patch.name } : {}), ...(patch.description !== undefined ? { description: patch.description } : {}) },
+      runtimePolicy: definition.runtimePolicy,
+    },
+  }]
 }

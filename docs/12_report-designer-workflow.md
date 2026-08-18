@@ -39,6 +39,22 @@
 前端入口：`web/src/report/designer/{NewReportDialog,ComponentPalette,DataPanels,operations}.tsx|ts`，
 `web/src/pages/ReportEditorPage.tsx`（`CardInspector`、`dropFromPalette`）。
 
+### 2.1 编辑器操作页约定（2026-08 收敛）
+
+- 进入编辑器时全局导航默认收起（`AppShell defaultSidebarCollapsed`），纸张随宽度铺开（上限 1240px），
+  卡片按 24 列画布的真实比例呈现；顶部只保留 返回 / 可点击重命名的标题（`REPORT_SETTINGS_UPDATE`）/
+  定义 JSON / 撤销重做 / 添加组件 / 预览与发布；底部是一条状态条（修订号、卡片/绑定/筛选器计数、快捷键提示）。
+- 左侧：组件面板 + **分区/章节列表**（新建 `SECTION_CREATE`、双击或铅笔重命名 `SECTION_UPDATE`、上下移、删除）。
+  空报告拖入第一张卡片自动创建「分区 1 / 章节 1」，不再用卡片标题命名分区。
+- 画布：点击卡片任意位置即选中（蓝色描边）；悬停显示工具条 **复制 / 删除**（复制 = `COMPONENT_CREATE` + `BLOCK_CREATE`
+  落到分区第一块空位；删除 = `BLOCK_DELETE` + `COMPONENT_DELETE`）；`Delete/Backspace` 删除选中卡片、`Esc` 取消选中、
+  `⌘/Ctrl+Z`、`⇧⌘Z` 撤销重做；点击纸张空白处取消选中。卡片状态角标只在非 READY 时出现且为中文（加载失败 / 暂无数据…）。
+- 右侧卡片配置按 **数据（数据集 → 展示类型 → 指标 → 维度）/ 内容 / 外观** 分组；绑定角色与表现属性使用中文标签
+  （横轴、数值、系列、配色方案、空值处理…），单一角色时不再出现角色下拉；「保存」栏吸底。过滤字段面板已有筛选器时
+  只展示列表，点「添加」再展开表单。
+- 默认绑定启发式（`defaultBinding`）：折线/面积优先时间字段作横轴，饼/漏斗/柱状优先类目维度，ID/编号类字段最后；
+  指标优先金额/销售额类，其次数量类，再看是否声明 SUM。
+
 ## 3. LLM 在卡片上的角色
 
 - **识别度量与维度**（⑤）：`POST .../ai/card-binding`（`reportai.SuggestCardBinding`，提示词 `report-card-binding-v1`）。
@@ -58,6 +74,20 @@
 | 定义 | 同一份 Report Definition，`metadata.reportType` 区分；默认页名 `报告正文` / `看板` | 同上 |
 | 编辑/发布 | 同一个编辑器与发布链 | 同上 |
 | 资产库 | 按类型分类展示（图标 报告 / 看板） | 同上 |
+
+## 4.1 明细数据集上的汇总：下推到数据库
+
+`DATASET_FIELD` 绑定的维度没有覆盖数据集版本的粒度键时需要汇总。此前运行时把明细行全部读入内存再汇总，
+任何真实事实表都会先撞上 5,000 行上限而报 `REPORT_ROLLUP_SOURCE_TRUNCATED`。现在：
+
+- `queryruntime.PreviewVersionQueryWithRollup` 接受 `VersionQueryInput.Rollup{Dimensions, Measures}`；当版本正文本身
+  不聚合、不去重、且每个度量都有受治理的聚合方式（SUM/AVG/MIN/MAX/COUNT/COUNT_DISTINCT，非半可加）时，
+  用 `dataset.BuildRuntimeRollup` 把正文改写为「维度原样输出 + 度量 `AGGREGATE(...)` + `groupBy` 维度 + 按维度排序」的
+  一次性执行文档，由源库/仓库 GROUP BY 返回已汇总的行（`VersionRollupContract.Applied = true`）。
+- 该执行文档带私有 `runtimeRollup` 标记（不序列化，`dataset.PrepareDocument` 就地校验并规划；`runtimeSnapshot.Document`
+  直传解码值），层级合同对存储正文的“ODS/DIM/DWD 不允许聚合”不作用于它；同一份 JSON 往返后失去标记，会照旧被拒绝，
+  客户端无法借此把聚合写进 ODS/DWD 存储正文。
+- 版本正文已经聚合（DWS/ADS）或下推被源拒绝时，回退到原有的“按版本粒度读取 + 内存汇总（截断则失败关闭）”。
 
 ## 5. 明细表与指标（与 docs/11 呼应）
 

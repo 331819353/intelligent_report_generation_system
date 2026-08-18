@@ -137,6 +137,8 @@ type Document struct {
 	layerSpecified bool
 	inferredLayer  Layer
 	sourcePreview  bool
+	// runtimeRollup 标记服务端派生的一次性汇总执行文档（见 BuildRuntimeRollup），不进入 JSON。
+	runtimeRollup bool
 }
 
 // MarshalJSON 保留历史 DSL 的“未声明 layer”形状。旧调用方常见的

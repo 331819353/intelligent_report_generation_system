@@ -2223,3 +2223,97 @@
 .report-card-inspector > footer { display: flex; justify-content: space-between; gap: 8px; padding: 10px 0 12px; border-bottom: 1px solid var(--line); }
 .report-card-inspector > footer .primary-button, .report-card-inspector > footer .quiet-button { min-height: 34px; }
 .report-editor-panel-intro { padding: 12px 0 0; }
+
+/* ===== 报告编辑器 · 视觉收敛（2026-08 操作页优化） ===== */
+/* 工作区：去掉章节操作行与空的进度行，画布拿回纵向空间；底部改为状态条。 */
+.report-editor-workspace:not(.report-editor-new-workspace) { grid-template-rows: 60px auto minmax(0, 1fr) 36px; }
+.report-editor-workspace:not(.report-editor-new-workspace) > .report-editor-header { grid-row: 1; padding-block: 6px; }
+.report-editor-workspace:not(.report-editor-new-workspace) > .report-editor-action-error { grid-row: 2; }
+.report-editor-workspace:not(.report-editor-new-workspace) > .report-editor-body { grid-row: 3; }
+.report-editor-workspace:not(.report-editor-new-workspace) > .report-editor-statusbar { grid-row: 4; }
+.report-editor-header > div:first-child { gap: 3px; }
+.report-editor-title h1 { display: inline-flex; align-items: center; gap: 6px; font-size: 20px; cursor: text; }
+.report-editor-title h1 svg { flex: none; color: #b0b9c6; opacity: 0; transition: opacity .12s; }
+.report-editor-title h1:hover svg { opacity: 1; }
+.report-editor-title-input { min-width: 240px; border: 1px solid #9ebbe8; border-radius: 6px; padding: 4px 8px; color: #182230; font-size: 18px; font-weight: 720; outline: none; }
+.report-editor-statusbar { display: flex; align-items: center; gap: 18px; border-top: 1px solid #e4e8ee; padding: 0 22px; background: #fbfcfe; color: #7b8798; font-size: 12px; white-space: nowrap; overflow: hidden; }
+.report-editor-statusbar strong { color: #344054; }
+.report-editor-statusbar-hint { margin-left: auto; color: #94a0b0; }
+
+/* 画布：纸张随宽度铺开（上限 1240px），卡片有真实比例。 */
+.report-editor-paper { width: min(1240px, calc(100% - 26px)); }
+.report-editor-paper > header small { max-width: 60%; text-align: right; }
+.report-editor-body { grid-template-columns: minmax(0, 1fr) 372px; }
+
+/* 卡片：选中态、悬停工具条、更明显的把手。 */
+.report-render-page.is-editing .report-render-block { transition: box-shadow .12s, border-color .12s; cursor: default; }
+.report-render-page.is-editing .report-render-block:hover { border-color: #b8cdee; box-shadow: 0 4px 14px #0872d312; }
+.report-render-page.is-editing .report-render-block.is-selected { border-color: #0872d3; box-shadow: 0 0 0 2px #0872d326, 0 6px 18px #0872d31a; }
+.report-render-page.is-editing .report-render-slot.is-selected { outline: none; }
+.report-block-move-handle { height: 20px; }
+.report-block-move-handle span { width: 34px; }
+.report-block-toolbar { position: absolute; top: 4px; right: 6px; z-index: 4; display: flex; gap: 3px; opacity: 0; transition: opacity .12s; }
+.report-render-block:hover .report-block-toolbar, .report-render-block.is-selected .report-block-toolbar, .report-block-toolbar:focus-within { opacity: 1; }
+.report-block-toolbar button { width: 20px; height: 18px; display: grid; place-items: center; border: 1px solid #d5dde8; border-radius: 4px; padding: 0; background: #fff; color: #5b6b80; font-size: 11px; line-height: 1; cursor: pointer; }
+.report-block-toolbar button:hover { border-color: #9ebbe8; color: #0872d3; }
+.report-block-toolbar button.is-danger:hover { border-color: #f0c5c2; color: #c2413b; background: #fff5f4; }
+.report-block-resize-handle { width: 18px; height: 18px; }
+.report-block-resize-handle::after { width: 8px; height: 8px; }
+.report-render-placeholder.is-page.is-editing { min-height: 300px; border: 2px dashed #c9d6e8; background: #fbfcfe; gap: 8px; }
+.report-render-placeholder.is-page.is-editing strong { font-size: 16px; color: #253143; }
+.report-render-placeholder-steps { display: flex; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; counter-reset: step; }
+.report-render-placeholder-steps li { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #dfe6ef; border-radius: 999px; padding: 4px 10px 4px 5px; background: #fff; color: #5b6b80; font-size: 12px; counter-increment: step; }
+.report-render-placeholder-steps li::before { content: counter(step); display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: #0872d3; color: #fff; font-size: 11px; font-weight: 700; }
+.report-render-placeholder.is-section { border-style: dashed; background: #fbfcfe; }
+
+/* 左侧：分区列表（重命名 / 上下移 / 删除 / 新建）。 */
+.report-editor-sidebar > header { display: flex; align-items: center; justify-content: space-between; padding: 12px 12px 6px; }
+.report-editor-sidebar > header strong { color: #263244; font-size: 13px; }
+.report-outline-add { display: inline-flex; align-items: center; gap: 2px; border: 0; padding: 2px 4px; background: transparent; color: #0872d3; font-size: 12px; font-weight: 650; cursor: pointer; }
+.report-outline-list { margin: 0 8px; padding: 0; list-style: none; display: grid; gap: 2px; }
+.report-outline-item { position: relative; display: flex; align-items: center; min-height: 32px; border-radius: 6px; padding-right: 4px; }
+.report-outline-item:hover, .report-outline-item.is-active { background: #f1f5fb; }
+.report-outline-item.is-active .report-outline-name span { color: #0872d3; font-weight: 700; }
+.report-outline-name { min-width: 0; flex: 1; display: flex; align-items: center; gap: 6px; border: 0; padding: 6px 8px; background: transparent; color: #3a4658; font-size: 13px; text-align: left; cursor: pointer; }
+.report-outline-name span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.report-outline-name em { flex: none; color: #9aa5b5; font-size: 11px; font-style: normal; }
+.report-outline-item input { flex: 1; min-width: 0; margin: 3px 4px; border: 1px solid #9ebbe8; border-radius: 5px; padding: 4px 6px; font-size: 13px; outline: none; }
+.report-outline-actions { display: none; flex: none; gap: 1px; }
+.report-outline-item:hover .report-outline-actions, .report-outline-item.is-active .report-outline-actions { display: inline-flex; }
+.report-outline-actions button { width: 20px; height: 20px; display: grid; place-items: center; border: 0; border-radius: 4px; padding: 0; background: transparent; color: #7c8798; cursor: pointer; }
+.report-outline-actions button:hover:not(:disabled) { background: #e3ecf8; color: #0872d3; }
+.report-outline-actions button.is-danger:hover:not(:disabled) { background: #fdecea; color: #c2413b; }
+.report-outline-actions button:disabled { opacity: .35; cursor: default; }
+.report-editor-sidebar > p { margin: 6px 12px; color: #8b97a7; font-size: 12px; }
+
+/* 右侧卡片配置：分组标题、单角色行、吸底保存栏。 */
+.report-inspector-group { margin: 6px 0 -2px; color: #8b96a5; font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.report-editor-binding-row.is-single-role { grid-template-columns: auto minmax(0, 1fr) auto; }
+.report-editor-binding-role { flex: none; border-radius: 4px; padding: 3px 7px; background: #f1f4f8; color: #5f6b7b; font-size: 12px; white-space: nowrap; }
+.report-card-inspector > footer { position: sticky; bottom: 0; z-index: 2; background: #fff; box-shadow: 0 -6px 12px #ffffffe6; }
+.report-editor-binding-contract { margin: 0; color: #66758a; font-size: 12px; }
+.report-filter-add { width: 100%; justify-content: center; margin-top: 6px; }
+.report-filter-form-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.report-filter-form-actions .primary-button { flex: 1; }
+@media (max-width: 1280px) {
+  .report-editor-body { grid-template-columns: minmax(0, 1fr) 336px; }
+}
+/* 指标 / 维度绑定行 */
+.report-editor-binding { display: grid; gap: 8px; }
+.report-editor-binding-group { display: grid; gap: 5px; border: 1px solid #e6ebf2; border-radius: 8px; padding: 8px 10px; background: #fbfcfe; }
+.report-editor-binding-head { display: flex; align-items: center; justify-content: space-between; }
+.report-editor-binding-head strong { color: #35445a; font-size: 12px; }
+.report-editor-binding-head button { display: inline-flex; align-items: center; gap: 3px; border: 1px dashed #b9c9df; border-radius: 5px; padding: 2px 8px; background: #fff; color: #0872d3; font-size: 12px; cursor: pointer; }
+.report-editor-binding-head button:disabled { color: #a3adbb; border-color: #dfe4eb; cursor: not-allowed; }
+.report-editor-binding-row { display: grid; grid-template-columns: 78px minmax(0, 1fr) 24px; align-items: center; gap: 6px; }
+.report-editor-binding-row select { min-width: 0; width: 100%; min-height: 30px; border: 1px solid #dfe4eb; border-radius: 6px; padding: 3px 6px; background: #fff; font-size: 12px; }
+.report-editor-binding-row > button { width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: 4px; padding: 0; background: transparent; color: #8b96a5; cursor: pointer; }
+.report-editor-binding-row > button:hover { background: #fdecea; color: #c2413b; }
+.report-editor-binding-empty { margin: 0; color: #9aa5b5; font-size: 12px; }
+.report-editor-style-toggle { grid-template-columns: auto minmax(0, 1fr) !important; }
+.report-editor-style-toggle input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: #0872d3; }
+.report-card-inspector .report-editor-manual-form { overflow: visible; }
+.report-editor-shell.app-shell.app-shell-v2.is-sidebar-collapsed { grid-template-columns: 78px minmax(0, 1fr); }
+/* sticky 在 grid 子项上被限制在自己的网格区域内，无法吸底：改为块布局。 */
+.report-card-inspector { display: block; }
+.report-editor-panel-tabs button small { margin-left: 4px; border-radius: 3px; padding: 1px 4px; background: #f1f4f8; color: #8b96a5; font-size: 10px; font-weight: 600; }

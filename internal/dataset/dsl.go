@@ -585,7 +585,8 @@ func Validate(document Document) error {
 	// a governed grain.
 	if len(document.OutputGrain.KeyFields) == 0 &&
 		document.Dataset.Layer != LayerODS &&
-		document.Dataset.Layer != LayerDWD {
+		document.Dataset.Layer != LayerDWD &&
+		!document.runtimeRollup {
 		add("outputGrain.keyFields", "至少需要一个粒度键字段")
 	}
 	grainKeys := map[string]bool{}
@@ -644,6 +645,11 @@ func validateLayerContract(issues *[]ValidationIssue, document Document) {
 	hasGrouping := len(document.GroupBy) > 0 || len(document.Having) > 0 || len(document.PreAggregations) > 0
 	source := document.Lineage() == LineageSource
 	layer := document.Dataset.Layer
+	// 运行时汇总执行文档（BuildRuntimeRollup）只在这一次执行里按绑定维度分组，
+	// 存储的版本正文未变；层级对“存储正文粒度”的约束不适用于它。
+	if document.runtimeRollup {
+		hasAggregation, hasGrouping = false, false
+	}
 
 	// 未声明 layer 的历史单表聚合正文按 DWS 推断并继续 grandfather；显式声明层级的
 	// 新文档必须遵守直落粒度合同。

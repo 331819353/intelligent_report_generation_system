@@ -102,6 +102,9 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
   const effectiveType = type || suggestedFilterType(fieldMeta)
   const [scopeMode, setScopeMode] = useState<'REPORT' | 'BLOCK'>(onlyBlock && selectedBlockId ? 'BLOCK' : 'REPORT')
   const [targets, setTargets] = useState<string[]>([])
+  // 新增表单默认收起：已有筛选器时面板先展示现状，点“添加”再展开表单。
+  const [adding, setAdding] = useState(false)
+  const formOpen = adding || filters.length === 0
 
   const blocks = useMemo(() => orderedPages(definition).flatMap(page => orderedSections(page).flatMap(section => section.blocks.map(block => {
     const componentId = block.zones.flatMap(zone => zone.slots.map(slot => slot.componentId)).find(Boolean)
@@ -112,10 +115,13 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
   const chosenTargets = scopeMode === 'BLOCK' ? (targets.length ? targets : selectedBlockId ? [selectedBlockId] : []) : []
   const ready = Boolean(contextId && effectiveField) && (scopeMode === 'REPORT' || chosenTargets.length > 0)
 
-  const submit = () => onCreate({
-    dataContextId: contextId, field: effectiveField, type: effectiveType,
-    scope: scopeMode === 'REPORT' ? { type: 'REPORT' } : { type: 'BLOCK', targetIds: chosenTargets },
-  })
+  const submit = () => {
+    onCreate({
+      dataContextId: contextId, field: effectiveField, type: effectiveType,
+      scope: scopeMode === 'REPORT' ? { type: 'REPORT' } : { type: 'BLOCK', targetIds: chosenTargets },
+    })
+    setAdding(false)
+  }
 
   return <section className="report-interaction-panel report-filter-panel" aria-label="报告筛选器">
     <header><strong><Funnel size={15} /> {onlyBlock ? '过滤字段' : '筛选器'}</strong><small>{onlyBlock ? '作用于这张卡片的过滤字段；取值由使用者在运行页填写，服务端解析' : '取值由使用者在运行页顶部填写，服务端解析后作用于绑定卡片'}</small></header>
@@ -139,7 +145,10 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
       </li>)}
     </ul>}
     {contexts.length === 0 && <p className="report-interaction-note"><Info size={15} />先为报告添加数据集，再配置筛选器。</p>}
-    {contexts.length > 0 && <div className="report-interaction-form">
+    {contexts.length > 0 && !formOpen && <button className="quiet-button report-filter-add" type="button" disabled={busy} onClick={() => setAdding(true)}>
+      <Plus size={15} />{onlyBlock ? '为此卡片添加过滤字段' : '添加筛选器'}
+    </button>}
+    {contexts.length > 0 && formOpen && <div className="report-interaction-form">
       {contexts.length > 1 && <label>数据集
         <select value={contextId} onChange={event => { setContextId(event.target.value); setField(''); setType('') }}>
           {contexts.map(context => <option key={context.id} value={context.id}>{contextName(context.id)}</option>)}
@@ -174,9 +183,12 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
         {blocks.length === 0 && <p className="report-interaction-note"><Info size={15} />画布上还没有卡片。</p>}
       </div>}
       {error && <p className="report-interaction-note is-error"><WarningCircle size={15} />{error}</p>}
-      <button className="primary-button" type="button" disabled={busy || !ready} onClick={submit}>
-        <Plus size={15} />{busy ? '正在保存…' : onlyBlock ? '为此卡片添加过滤字段' : '添加筛选器'}
-      </button>
+      <div className="report-filter-form-actions">
+        {filters.length > 0 && <button className="quiet-button" type="button" disabled={busy} onClick={() => setAdding(false)}>取消</button>}
+        <button className="primary-button" type="button" disabled={busy || !ready} onClick={submit}>
+          <Plus size={15} />{busy ? '正在保存…' : onlyBlock ? '为此卡片添加过滤字段' : '添加筛选器'}
+        </button>
+      </div>
     </div>}
   </section>
 }

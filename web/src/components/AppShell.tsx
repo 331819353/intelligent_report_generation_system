@@ -64,6 +64,8 @@ type AppShellProps = {
   lockBusinessDomain?: boolean
   controlPlane?: boolean
   hidePageHeader?: boolean
+  /** 进入页面时先收起导航（画布类页面需要横向空间）；用户仍可随时展开。 */
+  defaultSidebarCollapsed?: boolean
 }
 
 type NavItem = {
@@ -180,7 +182,7 @@ const snapshotNotifications: NotificationItem[] = [
 ]
 
 /** 为业务、协同和治理页面提供统一的全局框架。 */
-export function AppShell({ title = '智能分析决策平台', titleMeta, eyebrow = '工作台', leading, children, actions, className = '', controlPlane = false, hidePageHeader = false }: AppShellProps) {
+export function AppShell({ title = '智能分析决策平台', titleMeta, eyebrow = '工作台', leading, children, actions, className = '', controlPlane = false, hidePageHeader = false, defaultSidebarCollapsed = false }: AppShellProps) {
   const navigate = useNavigate()
   const location = useLocation()
   const domainSwitcherRef = useRef<HTMLDivElement>(null)
@@ -196,7 +198,7 @@ export function AppShell({ title = '智能分析决策平台', titleMeta, eyebro
   const [switchingDomainID, setSwitchingDomainID] = useState('')
   const [domainSwitchFeedback, setDomainSwitchFeedback] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
   const [canManage, setCanManage] = useState<boolean | null>(designSnapshot ? true : hasRealAccessToken ? null : false)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(Boolean(defaultSidebarCollapsed))
   const [openNavigationBranches, setOpenNavigationBranches] = useState<Record<string, boolean>>(() => ({
     智能报告: navigationItemIsActive(location.pathname, '/reports') || navigationItemIsActive(location.pathname, '/report-templates'),
     数据资产: navigationItemIsActive(location.pathname, '/data-sources') || navigationItemIsActive(location.pathname, '/datasets'),

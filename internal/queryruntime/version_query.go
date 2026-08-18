@@ -34,6 +34,20 @@ type VersionQueryInput struct {
 	Predicates []VersionPredicate
 	Parameters map[string]any
 	MaxRows    int
+	// Rollup asks the runtime to return rows grouped to Dimensions with Measures
+	// aggregated by their governed function, when the version's grain is finer
+	// than Dimensions and its DSL does not already aggregate. The database then
+	// does the roll-up instead of the caller reading every source row. When it
+	// cannot be pushed down the query runs at the version's grain and
+	// VersionRollupContract.Applied stays false.
+	Rollup *VersionRollupRequest
+}
+
+// VersionRollupRequest splits the requested fields into the dimensions to
+// group by and the measures to aggregate. Fields must list the same codes.
+type VersionRollupRequest struct {
+	Dimensions []string
+	Measures   []string
 }
 
 // PreviewVersionQuery executes a logical query derived from one exact
@@ -116,24 +130,85 @@ func (s *Service) PreviewVersionQueryWithRollup(
 	if document.ExecutionPolicy.PreviewLimit < effectiveMaxRows {
 		document.ExecutionPolicy.PreviewLimit = effectiveMaxRows
 	}
-	raw, err := json.Marshal(document)
-	if err != nil {
-		return dataset.PreviewResult{}, VersionRollupContract{}, fmt.Errorf("encode version query document: %w", dataset.ErrInvalidDocument)
+	contract := rollupContractOf(document)
+	snapshot := runtimeSnapshot{DatasetID: datasetID, VersionID: version.ID, ExactVersion: true}
+	if grouped, ok := runtimeRollupDocument(document, contract, input.Rollup); ok {
+		// The roll-up is pushed into the query: the private execution document
+		// is validated and planned in memory so its runtime marker survives.
+		prepared, err := dataset.PrepareDocument(grouped)
+		if err != nil {
+			return dataset.PreviewResult{}, VersionRollupContract{}, fmt.Errorf("normalize version roll-up document: %w: %v", dataset.ErrInvalidDocument, err)
+		}
+		contract.Applied = true
+		snapshot.PlanHash, snapshot.DSL, snapshot.Document = prepared.PlanHash, prepared.DSLJSON, &prepared.Document
+	} else {
+		raw, err := json.Marshal(document)
+		if err != nil {
+			return dataset.PreviewResult{}, VersionRollupContract{}, fmt.Errorf("encode version query document: %w", dataset.ErrInvalidDocument)
+		}
+		prepared, err := dataset.Prepare(raw)
+		if err != nil {
+			return dataset.PreviewResult{}, VersionRollupContract{}, fmt.Errorf("normalize version query document: %w", dataset.ErrInvalidDocument)
+		}
+		snapshot.PlanHash, snapshot.DSL = prepared.PlanHash, prepared.DSLJSON
 	}
-	prepared, err := dataset.Prepare(raw)
-	if err != nil {
-		return dataset.PreviewResult{}, VersionRollupContract{}, fmt.Errorf("normalize version query document: %w", dataset.ErrInvalidDocument)
-	}
-	result, err := s.previewSnapshot(ctx, tenantID, actorID, runtimeSnapshot{
-		DatasetID: datasetID, VersionID: version.ID, PlanHash: prepared.PlanHash,
-		DSL: prepared.DSLJSON, ExactVersion: true,
-	}, dataset.PreviewInput{
+	result, err := s.previewSnapshot(ctx, tenantID, actorID, snapshot, dataset.PreviewInput{
 		QueryID: input.QueryID, Parameters: input.Parameters, MaxRows: effectiveMaxRows,
 	}, "ONLINE")
 	if err != nil {
 		return dataset.PreviewResult{}, VersionRollupContract{}, fmt.Errorf("execute version query snapshot: %w", err)
 	}
-	return result, rollupContractOf(document), nil
+	return result, contract, nil
+}
+
+// runtimeRollupDocument decides whether a requested roll-up can be pushed into
+// the query and, if so, builds the grouped execution document. It declines —
+// leaving the caller on the read-at-grain path — when the request already
+// covers the version's grain, when a measure has no governed aggregation or is
+// semi-additive, or when the DSL already changes its source grain.
+func runtimeRollupDocument(document dataset.Document, contract VersionRollupContract, request *VersionRollupRequest) (dataset.Document, bool) {
+	if request == nil || len(request.Measures) == 0 || len(contract.GrainKeyFields) == 0 {
+		return dataset.Document{}, false
+	}
+	bound := make(map[string]bool, len(request.Dimensions))
+	for _, dimension := range request.Dimensions {
+		bound[strings.TrimSpace(dimension)] = true
+	}
+	covered := true
+	for _, key := range contract.GrainKeyFields {
+		if !bound[strings.TrimSpace(key)] {
+			covered = false
+			break
+		}
+	}
+	if covered {
+		return dataset.Document{}, false
+	}
+	measures := make([]dataset.RuntimeRollupMeasure, 0, len(request.Measures))
+	for _, code := range request.Measures {
+		measure := contract.Measures[strings.TrimSpace(code)]
+		if !measure.Declared && measure.Aggregation == "" {
+			return dataset.Document{}, false
+		}
+		function := strings.ToUpper(measure.Aggregation)
+		switch strings.ToUpper(measure.Additivity) {
+		case "", "ADDITIVE", "FULLY_ADDITIVE":
+		case "NON_ADDITIVE":
+			// A non-additive measure is defined by its own function over the
+			// rows (AVG, COUNT_DISTINCT); summing it would change its meaning.
+			if function == "SUM" || function == "COUNT" {
+				return dataset.Document{}, false
+			}
+		default:
+			return dataset.Document{}, false
+		}
+		measures = append(measures, dataset.RuntimeRollupMeasure{Field: code, Function: function})
+	}
+	grouped, err := dataset.BuildRuntimeRollup(document, request.Dimensions, measures)
+	if err != nil {
+		return dataset.Document{}, false
+	}
+	return grouped, true
 }
 
 // VersionMeasure describes how one logical measure of a dataset version may be
@@ -171,6 +246,9 @@ type VersionRollupContract struct {
 	Measures       map[string]VersionMeasure
 	// Fields is every visible output field, keyed by code.
 	Fields map[string]VersionField
+	// Applied reports that the query returned rows already grouped to the
+	// requested VersionRollupRequest; the caller must not roll them up again.
+	Applied bool
 }
 
 // VersionRollupContract reads one PUBLISHED version's grain and measure

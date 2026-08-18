@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"intelligent-report-generation-system/internal/askdata"
+	"intelligent-report-generation-system/internal/dataset"
 	"intelligent-report-generation-system/internal/queryruntime"
 	"intelligent-report-generation-system/internal/report"
 	"intelligent-report-generation-system/internal/report/store"
@@ -52,12 +53,30 @@ func (runner *DatasetVersionRunner) ExecuteDatasetFields(ctx context.Context, re
 		return QueryResult{}, err
 	}
 	effectiveLimit := min(request.Limit, queryruntime.MaxVersionQueryRows)
+	// Ask the runtime to group in the database when the binding drops part of
+	// the version's grain: reading every detail row into memory and rolling it
+	// up here hits the row ceiling on any real fact table. If the grouped plan
+	// cannot execute on this source, fall back to reading at the version's grain
+	// and rolling up in memory (which still fails closed on truncation).
+	rollup := &queryruntime.VersionRollupRequest{
+		Dimensions: bindingFields(request.Dimensions), Measures: bindingFields(request.Measures),
+	}
 	preview, contract, err := runner.service.PreviewVersionQueryWithRollup(
 		ctx, string(identity.TenantID), string(identity.ActorID), string(request.DatasetID),
 		string(request.DatasetVersionID), queryruntime.VersionQueryInput{
-			Fields: fields, Predicates: predicates, Parameters: parameters, MaxRows: effectiveLimit,
+			Fields: fields, Predicates: predicates, Parameters: parameters, MaxRows: effectiveLimit, Rollup: rollup,
 		},
 	)
+	if err != nil && (errors.Is(err, dataset.ErrPreviewInvalid) || errors.Is(err, dataset.ErrPreviewUnsupported) || errors.Is(err, dataset.ErrInvalidDocument)) {
+		slog.Warn("report dataset roll-up push-down declined, reading at version grain",
+			"dataset_version_id", request.DatasetVersionID, "error", err)
+		preview, contract, err = runner.service.PreviewVersionQueryWithRollup(
+			ctx, string(identity.TenantID), string(identity.ActorID), string(request.DatasetID),
+			string(request.DatasetVersionID), queryruntime.VersionQueryInput{
+				Fields: fields, Predicates: predicates, Parameters: parameters, MaxRows: effectiveLimit,
+			},
+		)
+	}
 	if err != nil {
 		slog.Warn("report dataset query failed", "dataset_id", request.DatasetID, "dataset_version_id", request.DatasetVersionID, "error", err)
 		return QueryResult{}, err
@@ -92,7 +111,7 @@ func (runner *DatasetVersionRunner) ExecuteDatasetFields(ctx context.Context, re
 	// are finer-grained than the component asks for and must be rolled up —
 	// otherwise a chart bound to (channel, revenue) plots one mark per source
 	// row instead of one per channel.
-	if !NeedsRollup(request.Dimensions, contract.GrainKeyFields) {
+	if contract.Applied || !NeedsRollup(request.Dimensions, contract.GrainKeyFields) {
 		return projected, nil
 	}
 	rolled, err := RollUp(projected, request.Dimensions, request.Measures, contract)
@@ -102,6 +121,14 @@ func (runner *DatasetVersionRunner) ExecuteDatasetFields(ctx context.Context, re
 		return QueryResult{}, err
 	}
 	return rolled, nil
+}
+
+func bindingFields(bindings []report.FieldBinding) []string {
+	result := make([]string, 0, len(bindings))
+	for _, binding := range bindings {
+		result = append(result, strings.TrimSpace(binding.Field))
+	}
+	return result
 }
 
 func requestedDatasetFields(dimensions, measures []report.FieldBinding) ([]string, error) {

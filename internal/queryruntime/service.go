@@ -254,13 +254,24 @@ type runtimeSnapshot struct {
 	PlanHash      string
 	DSL           json.RawMessage
 	ExactVersion  bool
+	// Document, when set, is the already-decoded execution document. Private
+	// server-side markers (runtime roll-up) live only on the decoded value, so a
+	// caller that derived one passes it here instead of re-decoding DSL.
+	Document *dataset.Document
 }
 
 func (s *Service) previewSnapshot(ctx context.Context, tenantID, actorID string, snapshot runtimeSnapshot, input dataset.PreviewInput, runType string) (dataset.PreviewResult, error) {
-	document, err := dataset.DecodeAndNormalize(snapshot.DSL)
-	if err != nil {
-		return dataset.PreviewResult{}, fmt.Errorf("decode runtime snapshot: %w", dataset.ErrInvalidDocument)
+	var document dataset.Document
+	if snapshot.Document != nil {
+		document = *snapshot.Document
+	} else {
+		decoded, err := dataset.DecodeAndNormalize(snapshot.DSL)
+		if err != nil {
+			return dataset.PreviewResult{}, fmt.Errorf("decode runtime snapshot: %w", dataset.ErrInvalidDocument)
+		}
+		document = decoded
 	}
+	var err error
 	// GetVersion above is the asset-access boundary: it proves that the current
 	// viewer may read the published root dataset. Resolving and revalidating that
 	// immutable version can legitimately touch private upstream datasets and
