@@ -74,12 +74,128 @@ export const zoneKindLabels: Record<ZoneKind, string> = {
   FOOTER: '卡片页脚',
 }
 
+/** 分块槽位只接收符合语义角色的组件，避免把筛选控件误放到图表区。 */
+export function zoneKindForManifest(manifest: ComponentManifest): ZoneKind {
+  if (manifest.category === 'CONTROL' || manifest.renderer === 'CONTROL') return 'FILTER'
+  if (manifest.type === 'insight-text' || manifest.type === 'rich-text') return 'INSIGHT'
+  return 'CONTENT'
+}
+
+export function manifestFitsZone(manifest: ComponentManifest, kind: ZoneKind): boolean {
+  if (kind === 'FILTER') return zoneKindForManifest(manifest) === 'FILTER'
+  if (kind === 'INSIGHT') return zoneKindForManifest(manifest) === 'INSIGHT'
+  if (kind === 'CONTENT') return zoneKindForManifest(manifest) === 'CONTENT'
+  return manifest.category === 'CONTENT'
+}
+
 /** 结论与页眉页脚按内容高度自适应，内容区占据卡片剩余空间。 */
 function zoneLayoutFor(kind: ZoneKind, columns: number, rows: number): Zone['layout'] {
   if (kind === 'CONTENT') {
     return { heightMode: 'FR', minHeight: 1, fr: 1, columns, rows, overflow: 'EXPAND', emptyPriority: 1 }
   }
   return { heightMode: 'AUTO', minHeight: 1, columns, rows, overflow: 'EXPAND', emptyPriority: 0 }
+}
+
+export type PlaceComponentInSlotInput = {
+  page: Page
+  blockId: string
+  zoneId: string
+  slotId: string
+  manifest: ComponentManifest
+  title: string
+  dataContextId: string
+  fields: DataContextField[]
+  newId: () => string
+}
+
+/**
+ * 将组件填入分块已经声明好的空槽位。分块、区域和槽位 ID 都保持不变，因此
+ * 拖放只改变槽位绑定，不会再隐式制造一个新的页面站位。
+ */
+export function placeComponentInSlotOperations(input: PlaceComponentInSlotInput): {
+  operations: EditorOperation[]; componentId: string; error?: string
+} {
+  const located = findBlock(input.page, input.blockId)
+  const zone = located?.block.zones.find(item => item.id === input.zoneId)
+  const slot = zone?.slots.find(item => item.id === input.slotId)
+  if (!located || !zone || !slot) return { operations: [], componentId: '', error: '目标槽位不存在' }
+  if (slot.componentId) return { operations: [], componentId: '', error: '这个槽位已经有组件' }
+  if (!manifestFitsZone(input.manifest, zone.type)) {
+    return { operations: [], componentId: '', error: `${input.manifest.displayName}不能放入${zoneKindLabels[zone.type]}` }
+  }
+  const minimum = minimumSize(input.manifest)
+  if (slot.grid.w < minimum.w || slot.grid.h < minimum.h) {
+    return { operations: [], componentId: '', error: `槽位至少需要 ${minimum.w}×${minimum.h}` }
+  }
+  const componentId = input.newId()
+  const component = buildComponent(componentId, input.manifest, input.title, input.dataContextId, input.fields)
+  return {
+    componentId,
+    operations: [
+      { op: 'COMPONENT_CREATE', targetId: componentId, payload: { component } },
+      { op: 'SLOT_UPDATE', targetId: slot.id, payload: { grid: slot.grid, componentId } },
+    ],
+  }
+}
+
+/** 一个分块默认自带筛选、结论和图表三个空槽位，标题属于分块本身。 */
+function structuredBlock(title: string, rect: GridRect, order: number, newId: () => string): Block {
+  const zone = (type: ZoneKind, zoneOrder: number, rows: number, slotCount: number): Zone => {
+    const slotWidth = Math.floor(rect.w / slotCount)
+    return {
+      id: newId(), order: zoneOrder, type,
+      layout: zoneLayoutFor(type, rect.w, rows),
+      slots: Array.from({ length: slotCount }, (_, index) => ({
+        id: newId(),
+        grid: { x: index * slotWidth, y: 0, w: index === slotCount - 1 ? rect.w - index * slotWidth : slotWidth, h: rows },
+      })),
+    }
+  }
+  return {
+    id: newId(), type: 'ANALYSIS_CARD', title,
+    layout: {
+      desktop: rect,
+      mobile: { order, visible: true, heightMode: 'AUTO', slotMode: 'STACK' },
+    },
+    zones: [zone('FILTER', 1, 2, 2), zone('INSIGHT', 2, 3, 1), zone('CONTENT', 3, 6, 2)],
+  }
+}
+
+export function createStructuredBlockOperations(input: {
+  definition: ReportDefinition
+  page: Page
+  sectionId?: string
+  title: string
+  sectionName: string
+  newId: () => string
+}): { operations: EditorOperation[]; sectionId: string; blockId: string } {
+  const columns = canvasOf(input.definition).desktop.columns
+  const sections = orderedSections(input.page)
+  const target = sections.find(section => section.id === input.sectionId) ?? sections.at(-1)
+  const rect = target
+    ? findFreeRect(target.blocks, { w: columns, h: 12 }, columns)
+    : { x: 0, y: 0, w: columns, h: 12 }
+  const block = structuredBlock(input.title.trim() || '未命名分块', rect, (target?.blocks.length ?? 0) + 1, input.newId)
+  if (target) {
+    return {
+      sectionId: target.id, blockId: block.id,
+      operations: [{ op: 'BLOCK_CREATE', targetId: target.id, payload: { block } }],
+    }
+  }
+  const sectionId = input.newId()
+  return {
+    sectionId, blockId: block.id,
+    operations: [{
+      op: 'SECTION_CREATE', targetId: input.page.id,
+      payload: { section: { id: sectionId, name: input.sectionName, order: 1, blocks: [block] } },
+    }],
+  }
+}
+
+export function renameBlockOperations(block: Block, title: string): EditorOperation[] {
+  const next = title.trim()
+  if (!next || next === block.title) return []
+  return [{ op: 'BLOCK_UPDATE', targetId: block.id, payload: { type: block.type, title: next } }]
 }
 
 export type AddToCardInput = {
@@ -278,7 +394,12 @@ export function removeComponentOperations(page: Page, componentId: string): Edit
   if (located) {
     const { block } = located
     const zone = block.zones.find(item => item.slots.some(slot => slot.componentId === componentId))
-    if (!zone || block.zones.length <= 1) {
+    const slot = zone?.slots.find(item => item.componentId === componentId)
+    const structured = Boolean(block.title) && (['FILTER', 'INSIGHT', 'CONTENT'] as ZoneKind[])
+      .every(kind => block.zones.some(item => item.type === kind))
+    if (structured && slot) {
+      operations.push({ op: 'SLOT_UPDATE', targetId: slot.id, payload: { grid: slot.grid, componentId: '' } })
+    } else if (!zone || block.zones.length <= 1) {
       operations.push({ op: 'BLOCK_DELETE', targetId: block.id, payload: {} })
     } else if (zone.slots.length > 1) {
       const slot = zone.slots.find(item => item.componentId === componentId)

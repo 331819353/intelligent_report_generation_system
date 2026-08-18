@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.intelligent-report.local/report-blueprint-v1.schema.json",
+  "title": "Report Blueprint v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "title", "reportType", "audience", "locale", "theme", "datasets", "sections", "summary", "recommend", "style"],
+  "properties": {
+    "schemaVersion": { "const": "report-blueprint/1.0" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "reportType": { "enum": ["REPORT", "DASHBOARD"] },
+    "audience": { "enum": ["EXECUTIVE", "BUSINESS", "ANALYST"] },
+    "locale": { "const": "zh-CN" },
+    "theme": { "const": "corporate-light" },
+    "datasets": { "type": "array", "minItems": 1, "maxItems": 30, "items": { "$ref": "#/$defs/dataset" } },
+    "sections": { "type": "array", "minItems": 1, "maxItems": 30, "items": { "$ref": "#/$defs/section" } },
+    "summary": { "$ref": "#/$defs/switch" },
+    "recommend": { "$ref": "#/$defs/switch" },
+    "style": { "$ref": "#/$defs/style" }
+  },
+  "$defs": {
+    "dataset": {
+      "type": "object", "additionalProperties": false, "required": ["ref", "alias"],
+      "properties": {
+        "ref": { "type": "string", "pattern": "^d[1-9][0-9]{0,2}$" },
+        "alias": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "section": {
+      "type": "object", "additionalProperties": false, "required": ["ref", "title", "question", "leadIn", "layout", "rows"],
+      "properties": {
+        "ref": { "type": "string", "pattern": "^s[1-9][0-9]{0,2}$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "question": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "leadIn": { "type": "boolean" },
+        "layout": { "const": "FLOW" },
+        "rows": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/$defs/row" } }
+      }
+    },
+    "row": {
+      "type": "object", "additionalProperties": false, "required": ["cards"],
+      "properties": { "cards": { "type": "array", "minItems": 1, "maxItems": 4, "items": { "$ref": "#/$defs/card" } } }
+    },
+    "card": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ref", "kind", "dataset", "metrics", "dimensions", "methods", "narrative", "weight", "title", "topN"],
+      "properties": {
+        "ref": { "type": "string", "pattern": "^s[1-9][0-9]{0,2}c[1-9][0-9]{0,2}$" },
+        "kind": { "enum": ["KPI", "TREND", "COMPARE", "RANK", "COMPOSITION", "DISTRIBUTION", "FUNNEL", "TARGET", "DETAIL", "INSIGHT", "SUMMARY", "RECOMMEND", "TEXT", "IMAGE", "DIVIDER", "FILTER"] },
+        "dataset": { "type": "string", "maxLength": 16 },
+        "metrics": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "type": "string", "pattern": "^m[1-9][0-9]{0,3}$" } },
+        "dimensions": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "type": "string", "pattern": "^x[1-9][0-9]{0,3}$" } },
+        "methods": { "type": "array", "maxItems": 11, "uniqueItems": true, "items": { "enum": ["CURRENT_VALUE", "PERIOD_COMPARISON", "TREND", "ANOMALY_POINT", "TOP_N", "CONTRIBUTION", "MAX_CHANGE", "TARGET_ACHIEVEMENT", "GROUP_DIFFERENCE", "SHARE_OF_TOTAL", "DATA_COMPLETENESS"] } },
+        "narrative": { "type": "boolean" },
+        "weight": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "title": { "anyOf": [{ "type": "string", "minLength": 1, "maxLength": 200 }, { "type": "null" }] },
+        "topN": { "anyOf": [{ "type": "integer", "minimum": 1, "maximum": 50 }, { "type": "null" }] }
+      }
+    },
+    "switch": {
+      "type": "object", "additionalProperties": false, "required": ["enabled"],
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "style": {
+      "type": "object", "additionalProperties": false, "required": ["tone", "length"],
+      "properties": {
+        "tone": { "enum": ["REPORTING", "CONCISE", "FORMAL"] },
+        "length": { "enum": ["SHORT", "MEDIUM", "LONG"] }
+      }
+    }
+  }
+}

@@ -86,7 +86,8 @@ func Invert(operation Operation, beforeDefinition report.ReportDefinition) (Oper
 		if findErr != nil {
 			return Operation{}, findErr
 		}
-		result = Operation{Op: BlockUpdate, TargetID: block.ID, Payload: &BlockUpdatePayload{Type: block.Type}}
+		title := block.Title
+		result = Operation{Op: BlockUpdate, TargetID: block.ID, Payload: &BlockUpdatePayload{Type: block.Type, Title: &title}}
 	case BlockCopy:
 		result = Operation{Op: BlockDelete, TargetID: operation.Payload.(*BlockCopyPayload).NewID, Payload: &BlockDeletePayload{}}
 	case BlockDelete:

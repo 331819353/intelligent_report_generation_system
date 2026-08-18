@@ -156,7 +156,11 @@ func applyOne(definition *report.ReportDefinition, operation Operation) error {
 		if err != nil {
 			return err
 		}
-		block.Type = operation.Payload.(*BlockUpdatePayload).Type
+		payload := operation.Payload.(*BlockUpdatePayload)
+		block.Type = payload.Type
+		if payload.Title != nil {
+			block.Title = strings.TrimSpace(*payload.Title)
+		}
 	case BlockCopy:
 		_, section, block, err := blockByID(definition, operation.TargetID)
 		if err != nil {

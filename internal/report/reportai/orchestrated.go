@@ -11,6 +11,7 @@ import (
 
 	aiplatform "intelligent-report-generation-system/internal/ai"
 	"intelligent-report-generation-system/internal/askdata"
+	"intelligent-report-generation-system/internal/report/blueprint"
 	"intelligent-report-generation-system/internal/report/operation"
 )
 
@@ -29,6 +30,9 @@ var reportPublishReviewSchema json.RawMessage
 //go:embed schemas/report-card-binding-v1.schema.json
 var reportCardBindingSchema json.RawMessage
 
+//go:embed schemas/report-blueprint-v1.schema.json
+var reportBlueprintSchema json.RawMessage
+
 // The embedded schema files double as public API documents and therefore carry
 // "$schema"/"$id" metadata. The AI platform's strict structured-output contract
 // rejects unknown top-level keywords, so the model-facing copies are stripped
@@ -39,6 +43,7 @@ func init() {
 	reportOperationSchema = aiFacingSchema(reportOperationSchema)
 	reportPublishReviewSchema = aiFacingSchema(reportPublishReviewSchema)
 	reportCardBindingSchema = aiFacingSchema(reportCardBindingSchema)
+	reportBlueprintSchema = aiFacingSchema(reportBlueprintSchema)
 }
 
 func aiFacingSchema(raw json.RawMessage) json.RawMessage {
@@ -109,6 +114,37 @@ func (generator *OrchestratedGenerator) GenerateReportPlan(ctx context.Context, 
 		return Plan{}, fmt.Errorf("decode report AI plan: %w", err)
 	}
 	return plan, nil
+}
+
+// GenerateReportBlueprint is the L3 planning boundary. The model sees only the
+// supplied Context Pack and may return semantic short references; Definition
+// IDs, field names, coordinates and SQL are absent from its output contract.
+func (generator *OrchestratedGenerator) GenerateReportBlueprint(ctx context.Context, request blueprint.Request) (blueprint.Blueprint, error) {
+	identity, err := invocationIdentity(ctx)
+	if err != nil || generator == nil || generator.AI == nil || strings.TrimSpace(request.Intent) == "" || request.Intent != request.Context.Intent {
+		return blueprint.Blueprint{}, errors.New("report AI blueprint generator is unavailable")
+	}
+	payload, err := json.Marshal(request)
+	if err != nil || len(payload) > 512<<10 {
+		return blueprint.Blueprint{}, errors.New("report AI blueprint request exceeds safe bounds")
+	}
+	result, err := generator.AI.Invoke(ctx, aiplatform.Invocation{
+		TenantID: string(identity.TenantID), ActorID: string(identity.ActorID),
+		Purpose: aiplatform.PurposeReportGeneration, PromptVersion: "report-blueprint-v1",
+		ResourceType: "REPORT", ResourceID: string(identity.ReportID),
+		Request: structuredRequest(
+			"Create one report blueprint from the supplied context pack. Use only listed dataset, metric, dimension, card-kind and method short references. Never emit SQL, database IDs, field names, data values, layout coordinates or CSS. Keep every row's total weight at most 4. A RANK card requires topN; all other kinds require topN null. Unbound content cards use an empty dataset and empty metric/dimension arrays.",
+			payload, "report_blueprint_v1", reportBlueprintSchema,
+		),
+	})
+	if err != nil {
+		return blueprint.Blueprint{}, err
+	}
+	var resultBlueprint blueprint.Blueprint
+	if err := json.Unmarshal(result.ProviderResult.Content, &resultBlueprint); err != nil {
+		return blueprint.Blueprint{}, fmt.Errorf("decode report AI blueprint: %w", err)
+	}
+	return resultBlueprint, nil
 }
 
 func (generator *OrchestratedGenerator) SelectDataContext(ctx context.Context, request DataContextSelectionRequest) (DataContextSelection, error) {
@@ -269,6 +305,7 @@ func normalizedStrings(values []string) []string {
 }
 
 var _ PlanGenerator = (*OrchestratedGenerator)(nil)
+var _ blueprint.Generator = (*OrchestratedGenerator)(nil)
 var _ ScopedEditGenerator = (*OrchestratedGenerator)(nil)
 var _ DataContextSelector = (*OrchestratedGenerator)(nil)
 var _ PublishReviewGenerator = (*OrchestratedGenerator)(nil)

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { addToCardOperations, removeComponentOperations } from './operations.ts'
-import type { Block, Page, ZoneType } from '../render/schema.ts'
+import { addToCardOperations, createStructuredBlockOperations, placeComponentInSlotOperations, removeComponentOperations } from './operations.ts'
+import type { Block, Page, ReportDefinition, ZoneType } from '../render/schema.ts'
 import type { ComponentManifest } from '../render/manifests.ts'
 
 const manifest: ComponentManifest = {
@@ -24,7 +24,7 @@ function zone(id: string, type: ZoneType, componentIds: string[], order = 1) {
   }
 }
 
-function card(id: string, zones: ReturnType<typeof zone>[]): Block {
+function card(id: string, zones: Block['zones']): Block {
   return {
     id, type: 'ANALYSIS_CARD',
     layout: {
@@ -103,4 +103,43 @@ test('removing the last component of a card deletes the whole card', () => {
   // Leaving an empty card behind would render as a blank frame nobody can remove.
   assert.deepEqual(operations.map(operation => operation.op), ['BLOCK_DELETE', 'COMPONENT_DELETE'])
   assert.equal(operations[0].targetId, 'block-1')
+})
+
+test('a structured block starts with filter, insight and content slots', () => {
+  const page = pageWith([])
+  const definition = { canvas: { desktop: { columns: 24 } } } as ReportDefinition
+  const result = createStructuredBlockOperations({
+    definition, page, sectionId: 'section-1', title: '经营概览', sectionName: '章节 1', newId,
+  })
+  const payload = result.operations[0].payload as { block: Block }
+  assert.equal(payload.block.title, '经营概览')
+  assert.equal(payload.block.layout.desktop.w, 24)
+  assert.deepEqual(payload.block.zones.map(item => item.type), ['FILTER', 'INSIGHT', 'CONTENT'])
+  assert.deepEqual(payload.block.zones.map(item => item.slots.length), [2, 1, 2])
+  assert.equal(payload.block.zones.every(item => item.slots.every(slot => !slot.componentId)), true)
+})
+
+test('dropping a component fills an existing slot without creating another block', () => {
+  const emptyInsight: Block['zones'][number] = zone('zone-insight', 'INSIGHT', [])
+  emptyInsight.slots = [{ id: 'slot-empty', grid: { x: 0, y: 0, w: 8, h: 4 } }]
+  const page = pageWith([card('block-1', [emptyInsight])])
+  const result = placeComponentInSlotOperations({
+    page, blockId: 'block-1', zoneId: 'zone-insight', slotId: 'slot-empty', manifest,
+    title: '结论', dataContextId: 'ctx', fields: [], newId,
+  })
+  assert.equal(result.error, undefined)
+  assert.deepEqual(result.operations.map(item => item.op), ['COMPONENT_CREATE', 'SLOT_UPDATE'])
+  assert.equal(result.operations.some(item => item.op === 'BLOCK_CREATE'), false)
+})
+
+test('removing a component from a structured block restores its empty slot', () => {
+  const block = card('block-1', [
+    zone('zone-filter', 'FILTER', [], 1),
+    zone('zone-insight', 'INSIGHT', ['conclusion'], 2),
+    zone('zone-content', 'CONTENT', [], 3),
+  ])
+  block.title = '经营概览'
+  const operations = removeComponentOperations(pageWith([block]), 'conclusion')
+  assert.deepEqual(operations.map(item => item.op), ['SLOT_UPDATE', 'COMPONENT_DELETE'])
+  assert.equal((operations[0].payload as { componentId: string }).componentId, '')
 })

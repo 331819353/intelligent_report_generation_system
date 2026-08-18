@@ -21,8 +21,8 @@ function paletteIcon(manifest: ComponentManifest) {
 }
 
 /**
- * 组件面板：把组件清单按类别列出，拖到画布落成一张卡片；点击则加到当前章节的
- * 空位。两条路径都走同一份 addComponentOperations，只是落点不同。
+ * 组件面板：组件应当被拖进分块预先准备的语义槽位；点击时由编辑器选择当前
+ * 分块中第一个兼容空槽位。组件本身不再隐式占用页面级站位。
  */
 export function ComponentPalette({ manifests, disabled, onPick }: {
   manifests: ComponentManifest[]
@@ -33,7 +33,7 @@ export function ComponentPalette({ manifests, disabled, onPick }: {
     .map(category => ({ category, items: manifests.filter(item => item.category === category) }))
     .filter(group => group.items.length > 0)
   return <div className="report-palette" aria-label="组件面板">
-    <header><strong>组件面板</strong><small>拖到画布，或点击加入当前章节</small></header>
+    <header><strong>组件面板</strong><small>拖入分块槽位，或点击填入可用槽位</small></header>
     {groups.map(group => <section key={group.category}>
       <h3>{categoryLabels[group.category]}</h3>
       <div className="report-palette-grid">

@@ -20,6 +20,8 @@ import (
 	platformidempotency "intelligent-report-generation-system/internal/platform/idempotency"
 	reportmodel "intelligent-report-generation-system/internal/report"
 	reportasset "intelligent-report-generation-system/internal/report/asset"
+	"intelligent-report-generation-system/internal/report/blueprint"
+	"intelligent-report-generation-system/internal/report/cardkind"
 	"intelligent-report-generation-system/internal/report/compiler"
 	"intelligent-report-generation-system/internal/report/insight"
 	"intelligent-report-generation-system/internal/report/operation"
@@ -33,19 +35,21 @@ import (
 )
 
 type AIOptions struct {
-	PlanGenerator reportai.PlanGenerator
-	EditGenerator reportai.ScopedEditGenerator
+	PlanGenerator      reportai.PlanGenerator
+	BlueprintGenerator blueprint.Generator
+	EditGenerator      reportai.ScopedEditGenerator
 	// BindingSuggester identifies a card's measures/dimensions from the governed
 	// field catalog of one dataset; optional — without it the editor keeps the
 	// deterministic role-based fill only.
 	BindingSuggester reportai.CardBindingSuggester
-	Reviewer      reportai.PublishReviewGenerator
-	Selector      reportai.DataContextSelector
-	Contexts      reportai.DataContextCatalog
-	Fields        reportai.FieldCatalog
-	Components    *template.Registry
-	Methods       *insight.Registry
-	Runtime       runtime.QueryExecutor
+	Reviewer         reportai.PublishReviewGenerator
+	Selector         reportai.DataContextSelector
+	Contexts         reportai.DataContextCatalog
+	Fields           reportai.FieldCatalog
+	Components       *template.Registry
+	Kinds            *cardkind.Registry
+	Methods          *insight.Registry
+	Runtime          runtime.QueryExecutor
 	// Measures supplies governed dataset metadata (declared units) that a
 	// derived Evidence Bundle must carry.
 	Measures reportinsight.MeasureContract
@@ -103,6 +107,8 @@ func NewHandler(
 	mux.HandleFunc("POST /api/v1/report-templates/{templateId}/instantiate", handler.instantiateTemplate)
 	mux.HandleFunc("GET /api/v1/report-data-contexts", handler.dataContexts)
 	mux.HandleFunc("GET /api/v1/report-component-manifests", handler.componentManifests)
+	mux.HandleFunc("GET /api/v1/report-card-kinds", handler.cardKinds)
+	mux.HandleFunc("POST /api/v1/report-blueprints/expand", handler.expandBlueprint)
 	mux.HandleFunc("POST /api/v1/reports/ai/create", handler.createAI)
 	mux.HandleFunc("GET /api/v1/reports/{id}", handler.get)
 	mux.HandleFunc("GET /api/v1/reports/{id}/draft", handler.getDraft)
@@ -216,14 +222,22 @@ func (handler *Handler) createAI(writer http.ResponseWriter, request *http.Reque
 	if !ok {
 		return
 	}
+	// The production path uses the intent-layer Blueprint contract. Keeping the
+	// legacy plan path below for one compatibility window lets older injected
+	// generators and stored integration fixtures continue to operate.
+	if handler.ai.BlueprintGenerator != nil && handler.ai.Kinds != nil {
+		handler.createAIFromBlueprint(writer, request, identity)
+		return
+	}
 	if handler.repository == nil || handler.aiAudit == nil || handler.ai.Selector == nil || handler.ai.Contexts == nil ||
 		handler.ai.PlanGenerator == nil || handler.ai.Components == nil || handler.ai.Methods == nil {
 		writeError(writer, http.StatusServiceUnavailable, "REPORT_AI_UNAVAILABLE", "report AI creation is unavailable")
 		return
 	}
 	var body struct {
-		Intent     string `json:"intent"`
-		ReportType string `json:"reportType"`
+		Intent        string     `json:"intent"`
+		ReportType    string     `json:"reportType"`
+		DataContextID askdata.ID `json:"dataContextId"`
 	}
 	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.Intent) == "" {
 		writeError(writer, http.StatusBadRequest, "REPORT_AI_REQUEST_INVALID", "report AI creation request is invalid")
@@ -328,6 +342,143 @@ func (handler *Handler) createAI(writer http.ResponseWriter, request *http.Reque
 	})
 }
 
+func (handler *Handler) createAIFromBlueprint(writer http.ResponseWriter, request *http.Request, identity store.Identity) {
+	if handler.repository == nil || handler.aiAudit == nil || handler.ai.Selector == nil || handler.ai.Contexts == nil ||
+		handler.ai.Components == nil || handler.ai.Methods == nil {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_AI_UNAVAILABLE", "report AI blueprint creation is unavailable")
+		return
+	}
+	var body struct {
+		Intent        string     `json:"intent"`
+		ReportType    string     `json:"reportType"`
+		DataContextID askdata.ID `json:"dataContextId"`
+	}
+	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.Intent) == "" {
+		writeError(writer, http.StatusBadRequest, "REPORT_AI_REQUEST_INVALID", "report AI creation request is invalid")
+		return
+	}
+	reportType, typeOK := resolveReportType(body.ReportType)
+	if !typeOK {
+		writeError(writer, http.StatusBadRequest, "REPORT_AI_REQUEST_INVALID", "reportType must be REPORT or DASHBOARD")
+		return
+	}
+	body.Intent = strings.TrimSpace(body.Intent)
+	reportID := askdata.ID(uuid.NewString())
+	ctx := reportai.WithInvocationIdentity(request.Context(), reportai.InvocationIdentity{TenantID: identity.TenantID, ActorID: identity.ActorID, ReportID: reportID})
+	candidates, err := handler.ai.Contexts.Candidates(ctx, identity, 24)
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	if len(candidates) == 0 {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_CONTEXT_UNAVAILABLE", "no governed semantic asset is available for report AI")
+		return
+	}
+	selection := reportai.DataContextSelection{}
+	if body.DataContextID != "" {
+		for _, candidate := range candidates {
+			if candidate.DataContext.ID == body.DataContextID {
+				selection = reportai.DataContextSelection{DataContextID: candidate.DataContext.ID, ReportName: candidate.Name, Rationale: "用户在生成向导中指定数据来源", Confidence: "HIGH"}
+				break
+			}
+		}
+		if selection.DataContextID == "" {
+			writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_CONTEXT_REJECTED", "the requested data context is not available to this actor")
+			return
+		}
+	} else {
+		selection, err = reportai.SelectDataContext(ctx, handler.ai.Selector, reportai.DataContextSelectionRequest{Intent: body.Intent, Candidates: candidates})
+		if err != nil {
+			writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_CONTEXT_REJECTED", "report AI could not select a governed semantic asset")
+			return
+		}
+	}
+	var selected reportai.DataContextCandidate
+	for _, candidate := range candidates {
+		if candidate.DataContext.ID == selection.DataContextID {
+			selected = candidate
+			break
+		}
+	}
+	catalog, err := reportai.BuildBlueprintCatalog(candidates, []askdata.ID{selection.DataContextID})
+	if err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_CONTEXT_REJECTED", err.Error())
+		return
+	}
+	contextPack, err := reportai.BuildBlueprintContext(body.Intent, catalog, handler.ai.Kinds, handler.ai.Methods)
+	if err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_CONTEXT_REJECTED", err.Error())
+		return
+	}
+	base := applyReportType(newAIReportDefinition(reportID, selection.ReportName, body.Intent, selected.DataContext), reportType)
+	reportRecord, initial, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
+		ID: reportID, Code: base.Metadata.Code, Name: base.Metadata.Name, ReportType: base.Metadata.ReportType, Definition: base,
+	})
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	pageID := initial.Definition.Pages[0].ID
+	scope := operation.Scope{PageID: &pageID}
+	scopeJSON, _ := json.Marshal(scope)
+	run, err := handler.aiAudit.StartRun(request.Context(), identity, reportai.StartRunInput{
+		ReportID: reportID, Kind: reportai.RunGenerateDraft, PromptVersion: "report-blueprint-v1", ModelPolicy: "governed-default",
+		Summary:      reportai.RequestSummary{Intent: body.Intent, SelectionIDs: []string{string(selected.DataContext.ID)}, AvailableFields: selected.Fields},
+		BaseRevision: &initial.RevisionNo, Scope: scopeJSON,
+	})
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	generatedBlueprint, generationErr := reportai.GenerateBlueprint(ctx, handler.ai.BlueprintGenerator,
+		blueprint.Request{Intent: body.Intent, ReportType: reportType, Context: contextPack}, catalog, handler.ai.Kinds, handler.ai.Components, handler.ai.Methods)
+	if generationErr != nil {
+		_ = handler.aiAudit.FinishRun(request.Context(), identity, run.ID, reportai.RunRejected, map[string]any{"stage": "blueprint"}, "REPORT_AI_BLUEPRINT_REJECTED")
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_BLUEPRINT_REJECTED", generationErr.Error())
+		return
+	}
+	generated, expandErr := blueprint.Expand(generatedBlueprint, blueprint.ExpandInput{
+		Base: initial.Definition, Catalog: catalog, CreatedFrom: reportmodel.CreatedAI,
+		Kinds: handler.ai.Kinds, Components: handler.ai.Components, Methods: handler.ai.Methods,
+	})
+	if expandErr != nil {
+		_ = handler.aiAudit.FinishRun(request.Context(), identity, run.ID, reportai.RunRejected, map[string]any{"stage": "expand"}, "REPORT_AI_BLUEPRINT_EXPAND_REJECTED")
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_BLUEPRINT_EXPAND_REJECTED", expandErr.Error())
+		return
+	}
+	generated.Provenance.AIRunIDs = []askdata.ID{run.ID}
+	generated.Provenance.PromptVersions = []string{"report-context-pack/1.0", "report-blueprint-v1"}
+	generated.Provenance.ModelPolicies = []string{"governed-default"}
+	createOperation := operation.Operation{Op: operation.ReportCreate, TargetID: reportID, Payload: &operation.ReportCreatePayload{Definition: generated}}
+	if err := handler.aiAudit.CompletePreview(request.Context(), identity, run.ID, []operation.Operation{createOperation}, map[string]any{
+		"sectionCount": len(generatedBlueprint.Sections), "cardCount": blueprintCardCount(generatedBlueprint), "datasetRefs": reportai.RequestedDatasetRefs(generatedBlueprint),
+	}); err != nil {
+		writeError(writer, http.StatusInternalServerError, "REPORT_AI_AUDIT_FAILED", "report AI audit failed")
+		return
+	}
+	draft, revision, err := handler.repository.SaveDraftWithRevision(request.Context(), identity, reportID, store.SaveInput{
+		ExpectedRevision: initial.RevisionNo, Operations: []operation.Operation{createOperation}, Source: string(operation.SourceAI), AIRunID: run.ID, Scope: &scope,
+	})
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{
+		"report": reportRecord, "draft": draft, "revision": revision, "aiRunId": run.ID, "selection": selection,
+		"blueprint": generatedBlueprint, "context": contextPack,
+	})
+}
+
+func blueprintCardCount(value blueprint.Blueprint) int {
+	total := 0
+	for _, section := range value.Sections {
+		for _, row := range section.Rows {
+			total += len(row.Cards)
+		}
+	}
+	return total
+}
+
 func newAIReportDefinition(reportID askdata.ID, name, intent string, dataContext reportmodel.DataContext) reportmodel.ReportDefinition {
 	return newReportDefinition(reportID, name, intent, dataContext, reportmodel.CreatedAI)
 }
@@ -401,6 +552,73 @@ func (handler *Handler) componentManifests(writer http.ResponseWriter, request *
 	writeJSON(writer, http.StatusOK, map[string]any{"items": handler.ai.Components.List()})
 }
 
+// cardKinds exposes the semantic vocabulary used by both the component panel
+// and the model-facing Blueprint contract. Renderer candidates remain hints;
+// the server resolves the final component after validating the data shape.
+func (handler *Handler) cardKinds(writer http.ResponseWriter, request *http.Request) {
+	if _, ok := handler.identity(writer, request); !ok {
+		return
+	}
+	if handler.ai.Kinds == nil {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_CARD_KIND_REGISTRY_UNAVAILABLE", "card kind registry is unavailable")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": handler.ai.Kinds.List()})
+}
+
+// expandBlueprint is the model-free configuration path: a human-authored or
+// template-authored Blueprint passes through the same validation, card resolver
+// and deterministic expansion used by AI creation.
+func (handler *Handler) expandBlueprint(writer http.ResponseWriter, request *http.Request) {
+	identity, ok := handler.identity(writer, request)
+	if !ok {
+		return
+	}
+	if handler.repository == nil || handler.ai.Contexts == nil || handler.ai.Kinds == nil || handler.ai.Components == nil || handler.ai.Methods == nil {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_BLUEPRINT_UNAVAILABLE", "manual blueprint expansion is unavailable")
+		return
+	}
+	var body struct {
+		Blueprint      blueprint.Blueprint `json:"blueprint"`
+		DataContextIDs []askdata.ID        `json:"dataContextIds"`
+	}
+	if decodeJSON(request, &body) != nil {
+		writeError(writer, http.StatusBadRequest, "REPORT_BLUEPRINT_REQUEST_INVALID", "blueprint request body is invalid")
+		return
+	}
+	candidates, err := handler.ai.Contexts.Candidates(request.Context(), identity, 30)
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	if len(body.DataContextIDs) == 0 && len(candidates) != 0 {
+		body.DataContextIDs = []askdata.ID{candidates[0].DataContext.ID}
+	}
+	catalog, err := reportai.BuildBlueprintCatalog(candidates, body.DataContextIDs)
+	if err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_BLUEPRINT_CONTEXT_REJECTED", err.Error())
+		return
+	}
+	reportID := askdata.ID(uuid.NewString())
+	base := applyReportType(newReportDefinition(reportID, body.Blueprint.Title, "", catalog.Datasets[0].DataContext, reportmodel.CreatedManually), body.Blueprint.ReportType)
+	definition, err := blueprint.Expand(body.Blueprint, blueprint.ExpandInput{
+		Base: base, Catalog: catalog, CreatedFrom: reportmodel.CreatedManually,
+		Kinds: handler.ai.Kinds, Components: handler.ai.Components, Methods: handler.ai.Methods,
+	})
+	if err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_BLUEPRINT_REJECTED", err.Error())
+		return
+	}
+	reportRecord, draft, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
+		ID: reportID, Code: definition.Metadata.Code, Name: definition.Metadata.Name, ReportType: definition.Metadata.ReportType, Definition: definition,
+	})
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, map[string]any{"report": reportRecord, "draft": draft, "blueprint": body.Blueprint, "context": catalog})
+}
+
 // dataContexts 暴露当前用户可见的受治理数据上下文（已发布数据集版本及其允许字段）。
 // 报告的空白新建与 DATASET_FIELD 数据绑定都依赖它，因此它不能依赖模型提供方。
 func (handler *Handler) dataContexts(writer http.ResponseWriter, request *http.Request) {
@@ -433,9 +651,9 @@ func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	var body struct {
-		Name          string       `json:"name"`
-		Description   string       `json:"description"`
-		DataContextID askdata.ID   `json:"dataContextId"`
+		Name          string     `json:"name"`
+		Description   string     `json:"description"`
+		DataContextID askdata.ID `json:"dataContextId"`
 		// DataContextIDs lets the creation wizard declare every dataset the
 		// report will use up front; the first one becomes the primary context.
 		DataContextIDs []askdata.ID `json:"dataContextIds"`

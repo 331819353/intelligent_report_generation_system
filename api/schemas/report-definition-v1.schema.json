@@ -561,6 +561,13 @@
           "type": "integer",
           "minimum": 1
         },
+        "question": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "layoutIntent": {
+          "$ref": "#/$defs/sectionLayoutIntent"
+        },
         "blocks": {
           "type": "array",
           "maxItems": 300,
@@ -568,6 +575,14 @@
             "$ref": "#/$defs/block"
           }
         }
+      }
+    },
+    "sectionLayoutIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "type": "string", "minLength": 1, "maxLength": 64 }
       }
     },
     "block": {
@@ -593,6 +608,17 @@
             "FILTER"
           ]
         },
+        "title": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "cardKind": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "layoutIntent": {
+          "$ref": "#/$defs/blockLayoutIntent"
+        },
         "layout": {
           "$ref": "#/$defs/blockLayout"
         },
@@ -603,6 +629,17 @@
             "$ref": "#/$defs/zone"
           }
         }
+      }
+    },
+    "blockLayoutIntent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["span", "minRows", "narrativeAttach", "manualOverride"],
+      "properties": {
+        "span": { "type": "integer", "minimum": 1, "maximum": 24 },
+        "minRows": { "type": "integer", "minimum": 1 },
+        "narrativeAttach": { "type": "string", "maxLength": 64 },
+        "manualOverride": { "type": "boolean" }
       }
     },
     "blockLayout": {
@@ -1006,6 +1043,10 @@
         },
         "componentId": {
           "$ref": "#/$defs/stableId"
+        },
+        "cardKind": {
+          "type": "string",
+          "maxLength": 64
         },
         "mergedFrom": {
           "type": "array",

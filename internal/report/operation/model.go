@@ -182,7 +182,8 @@ type BlockResizePayload struct {
 }
 
 type BlockUpdatePayload struct {
-	Type report.BlockType `json:"type"`
+	Type  report.BlockType `json:"type"`
+	Title *string          `json:"title,omitempty"`
 }
 
 type BlockCopyPayload struct {
@@ -762,7 +763,15 @@ func (payload *SlotSplitPayload) Validate() error {
 	}
 	return nil
 }
-func (payload *SlotUpdatePayload) Validate() error       { return payload.ComponentID.Validate() }
+func (payload *SlotUpdatePayload) Validate() error {
+	// Empty componentId deliberately clears a design-time slot. Structured
+	// blocks keep their FILTER / INSIGHT / CONTENT placeholders after a
+	// component is removed so another component can be dropped back in.
+	if payload.ComponentID == "" {
+		return nil
+	}
+	return payload.ComponentID.Validate()
+}
 func (*SlotDeletePayload) Validate() error               { return nil }
 func (payload *ComponentCreatePayload) Validate() error  { return payload.Component.ID.Validate() }
 func (*ComponentUpdatePayload) Validate() error          { return nil }

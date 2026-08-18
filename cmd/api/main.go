@@ -60,6 +60,7 @@ import (
 	"intelligent-report-generation-system/internal/queryruntime"
 	reportasset "intelligent-report-generation-system/internal/report/asset"
 	reportauthorization "intelligent-report-generation-system/internal/report/authorization"
+	"intelligent-report-generation-system/internal/report/cardkind"
 	reportfollow "intelligent-report-generation-system/internal/report/follow"
 	reporthttp "intelligent-report-generation-system/internal/report/http"
 	"intelligent-report-generation-system/internal/report/insight"
@@ -509,6 +510,11 @@ func main() {
 		os.Exit(1)
 	}
 	reportInsightRegistry := insight.NewRegistry()
+	reportCardKindRegistry, err := cardkind.NewDefaultRegistry(reportComponentRegistry, reportInsightRegistry)
+	if err != nil {
+		logger.Error("initialize report card kind registry", "error", err)
+		os.Exit(1)
+	}
 	reportDatasetRunner, err := reportruntime.NewDatasetVersionRunner(queryService)
 	if err != nil {
 		logger.Error("initialize report dataset runtime", "error", err)
@@ -631,11 +637,11 @@ func main() {
 		reportai.NewPostgresStore(pool),
 		reportAssetService,
 		reporthttp.AIOptions{
-			PlanGenerator: reportAIGenerator, EditGenerator: reportAIGenerator,
+			PlanGenerator: reportAIGenerator, BlueprintGenerator: reportAIGenerator, EditGenerator: reportAIGenerator,
 			BindingSuggester: reportAIGenerator,
-			Reviewer: reportAIGenerator,
-			Selector: reportAIGenerator, Contexts: reportai.NewPostgresFieldCatalog(pool),
-			Fields: reportai.NewPostgresFieldCatalog(pool), Components: reportComponentRegistry,
+			Reviewer:         reportAIGenerator,
+			Selector:         reportAIGenerator, Contexts: reportai.NewPostgresFieldCatalog(pool),
+			Fields: reportai.NewPostgresFieldCatalog(pool), Components: reportComponentRegistry, Kinds: reportCardKindRegistry,
 			Methods: reportInsightRegistry, Runtime: reportRuntime, Measures: queryService,
 			Narrative: reportNarrativeService, Upgrade: reportUpgradeService,
 		},

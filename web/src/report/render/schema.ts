@@ -85,7 +85,7 @@ export type ReportComponent = {
   options: ComponentOptions
 }
 
-export type Slot = { id: string; grid: GridRect; componentId?: string; mergedFrom?: string[] }
+export type Slot = { id: string; grid: GridRect; componentId?: string; cardKind?: string; mergedFrom?: string[] }
 
 export type ZoneLayout = {
   heightMode: ZoneHeightMode
@@ -119,8 +119,15 @@ export type MobileBlockLayout = {
 }
 
 export type BlockLayout = { desktop: GridRect; mobile: MobileBlockLayout }
-export type Block = { id: string; type: BlockType; layout: BlockLayout; zones: Zone[] }
-export type Section = { id: string; name: string; order: number; blocks: Block[] }
+export type Block = {
+  id: string; type: BlockType; title?: string; cardKind?: string
+  layoutIntent?: { span: number; minRows: number; narrativeAttach: string; manualOverride: boolean }
+  layout: BlockLayout; zones: Zone[]
+}
+export type Section = {
+  id: string; name: string; order: number; question?: string
+  layoutIntent?: { mode: string }; blocks: Block[]
+}
 export type Page = { id: string; name: string; order: number; sections: Section[] }
 
 export type DataContext = {

@@ -11,7 +11,7 @@ import { RequestError } from '../lib/api'
 import {
   reportEditorAPI, type AIPreviewResponse, type DataContextCandidate, type DataContextField,
   type EditorComponent, type EditorOperation, type EditorOperationBundle,
-  type DraftExecution, type EditorScope, type ReportDraft, type ReportStarterTemplate,
+  type DraftExecution, type EditorScope, type ReportBlueprint, type ReportDraft, type ReportStarterTemplate,
 } from '../report/api/editor'
 import { reportAssetsAPI } from '../report/api/assets'
 import type { ReportAsset } from '../report/assets/model'
@@ -29,12 +29,13 @@ import {
   type BindingRole, type ComponentOptions, type FieldBinding, type GlobalFilter, type Page, type ReportDefinition, type ReportType,
 } from '../report/render/schema'
 import {
-  addComponentOperations, addDataContextOperations, addToCardOperations, bundle, createFilterOperations, createInteractionOperations,
-  createSectionOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, layoutOperations,
+  addDataContextOperations, bundle, createFilterOperations, createInteractionOperations,
+  createSectionOperations, createStructuredBlockOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, layoutOperations,
+  placeComponentInSlotOperations,
   removeBlockOperations, removeComponentOperations, removeDataContextOperations, renameSectionOperations,
-  replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations,
-  paletteDragType, zoneKindLabels, zoneReorderOperations,
-  type FilterDraft, type InteractionDraft, type ZoneKind,
+  renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations,
+  paletteDragType, zoneKindForManifest, zoneKindLabels, zoneReorderOperations,
+  type FilterDraft, type InteractionDraft,
 } from '../report/designer/operations'
 
 const reportTypeLabels: Record<ReportType, { name: string; hint: string }> = {
@@ -57,11 +58,6 @@ const optionEnumLabels: Record<string, string> = {
   SUMMARY: '总结', TREND: '趋势', COMPARISON: '对比', ANOMALY: '异常', ACTION: '建议',
 }
 const roleLabel = (role: string) => roleLabels[role] ?? role
-
-/** 组件加入报告的两种方式：新建一张卡片，或加入当前卡片的一个区域。 */
-type Placement =
-  | { mode: 'NEW_CARD' }
-  | { mode: 'INTO_CARD'; zoneKind: ZoneKind }
 
 type PartialDecision = 'retain' | 'exclude'
 
@@ -137,19 +133,44 @@ function NewReportCanvas() {
   </div>
 }
 
-type NewReportMode = 'blank' | 'template' | 'ai' | 'import'
+type NewReportMode = 'blank' | 'template' | 'blueprint' | 'ai' | 'import'
 
-const newReportModeLabels: Record<NewReportMode, string> = { blank: '空白', template: '模板', ai: 'AI 生成', import: 'JSON 导入' }
+const newReportModeLabels: Record<NewReportMode, string> = { blank: '空白', template: '模板', blueprint: '蓝图配置', ai: 'AI 生成', import: '定义导入' }
+
+function starterBlueprint(candidate: DataContextCandidate, name: string, reportType: ReportType): ReportBlueprint {
+  // 服务端按 field code 排序后分别编号 m1/x1；这里使用同一规则生成可立即
+  // 提交的手工起始蓝图，作者随后可以继续增删章节与卡片。
+  const fields = [...(candidate.fieldDefinitions ?? [])].sort((left, right) => left.code.localeCompare(right.code))
+  const measures = fields.filter(field => field.role.toUpperCase() === 'MEASURE')
+  const dimensions = fields.filter(field => field.role.toUpperCase() !== 'MEASURE')
+  const hasMetric = measures.length > 0
+  const hasDimension = dimensions.length > 0
+  const kind = hasMetric ? 'KPI' : hasDimension ? 'FILTER' : 'TEXT'
+  const dataset = hasMetric || hasDimension ? 'd1' : ''
+  return {
+    schemaVersion: 'report-blueprint/1.0', title: name.trim() || '未命名智能报告', reportType,
+    audience: 'BUSINESS', locale: 'zh-CN', theme: 'corporate-light',
+    datasets: [{ ref: 'd1', alias: candidate.dataContext.alias || candidate.name }],
+    sections: [{
+      ref: 's1', title: '分析概览', question: '当前业务表现如何？', leadIn: false, layout: 'FLOW',
+      rows: [{ cards: [{
+        ref: 's1c1', kind, dataset, metrics: hasMetric ? ['m1'] : [], dimensions: !hasMetric && hasDimension ? ['x1'] : [],
+        methods: hasMetric ? ['CURRENT_VALUE'] : [], narrative: hasMetric, weight: hasMetric ? 1 : 4,
+        title: hasMetric ? (measures[0]?.name || '核心指标') : hasDimension ? (dimensions[0]?.name || '筛选条件') : '说明', topN: null,
+      }] }],
+    }],
+    summary: { enabled: false }, recommend: { enabled: false }, style: { tone: 'REPORTING', length: 'MEDIUM' },
+  }
+}
 
 /**
- * 新建面板：公共信息（名称、类型、数据来源）+ 四种起步方式页签 + 始终可见的主按钮。
- *  - 空白 / 模板 / JSON 导入：只依赖已发布的数据集版本，未配置模型提供方时依然可用；
- *  - AI 生成：额外需要可用的模型提供方，失败时可改用空白新建。
- * 四条入口产出的都是同一种 Report Definition，进入同一个编辑器与同一条发布链。
+ * 新建面板：手工蓝图与 AI 蓝图走同一个确定性展开器；空白、模板和定义导入
+ * 继续作为兼容入口。所有入口最终都产出同一种 Report Definition。
  */
 function NewReportTaskPanel({
   name, reportType, intent, contexts, contextId, contextsLoading, contextsError, templates, templatesLoading, selectedTemplateId, creating, error,
-  importText, onName, onReportType, onIntent, onContext, onTemplate, onCreateBlank, onCreateTemplate, onGenerate, onImportText, onImport,
+  blueprintText, importText, onName, onReportType, onIntent, onContext, onTemplate, onCreateBlank, onCreateTemplate, onCreateBlueprint, onGenerate,
+  onBlueprintText, onImportText, onImport,
 }: {
   name: string
   reportType: ReportType
@@ -163,16 +184,19 @@ function NewReportTaskPanel({
   selectedTemplateId: string
   creating: '' | NewReportMode
   error: string
+  blueprintText: string
   importText: string
   onName: (value: string) => void
   onReportType: (value: ReportType) => void
   onIntent: (value: string) => void
+  onBlueprintText: (value: string) => void
   onImportText: (value: string) => void
   onImport: () => void
   onContext: (value: string) => void
   onTemplate: (value: string) => void
   onCreateBlank: () => void
   onCreateTemplate: () => void
+  onCreateBlueprint: () => void
   onGenerate: () => void
 }) {
   const [mode, setMode] = useState<NewReportMode>('blank')
@@ -182,7 +206,8 @@ function NewReportTaskPanel({
   const primary = {
     blank: { label: '创建空白报告', icon: <NotePencil size={16} />, disabled: !ready || !name.trim(), run: onCreateBlank },
     template: { label: '使用所选模板创建', icon: <CirclesFour size={16} />, disabled: !ready || !selectedTemplateId || !name.trim(), run: onCreateTemplate },
-    ai: { label: '让 AI 生成', icon: <MagicWand size={16} />, disabled: !ready || !intent.trim(), run: onGenerate },
+    blueprint: { label: '按蓝图生成报告', icon: <BracketsCurly size={16} />, disabled: !ready || !blueprintText.trim(), run: onCreateBlueprint },
+    ai: { label: '让 AI 配置蓝图', icon: <MagicWand size={16} />, disabled: !ready || !intent.trim(), run: onGenerate },
     import: { label: '导入为新草稿', icon: <BracketsCurly size={16} />, disabled: !importText.trim(), run: onImport },
   }[mode]
 
@@ -229,9 +254,15 @@ function NewReportTaskPanel({
           {templatesLoading && <p className="report-editor-new-hint"><SpinnerGap className="is-spinning" size={14} />正在读取模板…</p>}
           <div>{templates.map(template => <button className={selectedTemplateId === template.id ? 'is-selected' : ''} type="button" key={template.id} onClick={() => onTemplate(template.id)}><span>{template.category}</span><strong>{template.name}</strong><small>{template.description}</small><em>{template.componentCount} 个组件</em></button>)}</div>
         </div>}
+        {mode === 'blueprint' && <div className="report-editor-new-actions">
+          <article>
+            <div><strong>手工配置 Report Blueprint</strong><small>只配置章节、语义卡片和 m/x 短引用；组件、ID 与 24 列坐标由服务端确定性展开。这里不调用模型。</small></div>
+            <textarea className="is-code" aria-label="报告蓝图 JSON" value={blueprintText} onChange={event => onBlueprintText(event.target.value)} spellCheck={false} />
+          </article>
+        </div>}
         {mode === 'ai' && <div className="report-editor-new-actions">
           <article>
-            <div><strong>让 AI 生成结构</strong><small>由 AI 规划章节与组件并生成初始草稿；需要已配置的模型提供方，生成结果仍需人工确认后才能发布。</small></div>
+            <div><strong>让 AI 配置 Report Blueprint</strong><small>模型只规划章节、语义卡片和受治理的短引用，不接触 SQL、字段名、ID 或坐标；服务端校验并确定性展开后生成草稿。</small></div>
             <textarea aria-label="AI 报告要求" value={intent} onChange={event => onIntent(event.target.value)} placeholder="描述报告目标、受众与期间…" />
           </article>
         </div>}
@@ -503,21 +534,18 @@ function CardInspector({ component, manifest: currentManifest, manifests, report
     </section>
 }
 
-function ComponentLibraryDialog({ manifests, reportContexts, contextNameOf, fieldsOf, defaultContextId, sectionName, cardName, busy, error, onClose, onAdd }: {
+function ComponentLibraryDialog({ manifests, reportContexts, contextNameOf, fieldsOf, defaultContextId, sectionName, busy, error, onClose, onAdd }: {
   manifests: ComponentManifest[]
   reportContexts: Array<{ id: string; alias?: string }>
   contextNameOf: (dataContextId: string) => string
   fieldsOf: (dataContextId: string) => DataContextField[]
   defaultContextId: string
   sectionName: string
-  /** 当前选中组件所在的卡片；为空时只能新建卡片。 */
-  cardName: string
   busy: boolean
   error: string
   onClose: () => void
-  onAdd: (manifest: ComponentManifest, title: string, placement: Placement, dataContextId: string) => void
+  onAdd: (manifest: ComponentManifest, title: string, dataContextId: string) => void
 }) {
-  const [placement, setPlacement] = useState<Placement>({ mode: 'NEW_CARD' })
   const [contextId, setContextId] = useState(defaultContextId)
   const fields = fieldsOf(contextId)
   const [selectedRef, setSelectedRef] = useState(() => manifests[0] ? `${manifests[0].type}@${manifests[0].version}` : '')
@@ -554,32 +582,18 @@ function ComponentLibraryDialog({ manifests, reportContexts, contextNameOf, fiel
             <div><dt>尺寸</dt><dd>{selected.recommendedSize.w} × {selected.recommendedSize.h}</dd></div>
             <div><dt>数据要求</dt><dd>维度 {selected.dataContract.dimensions.min}～{selected.dataContract.dimensions.max}，度量 {selected.dataContract.measures.min}～{selected.dataContract.measures.max}</dd></div>
             <div><dt>所在章节</dt><dd>{sectionName || '新建章节'}</dd></div>
+            <div><dt>目标区域</dt><dd>{zoneKindLabels[zoneKindForManifest(selected)]}</dd></div>
           </dl>}
           <div className="report-component-placement">
             <strong>放置方式</strong>
-            <label>
-              <input type="radio" name="placement" checked={placement.mode === 'NEW_CARD'}
-                onChange={() => setPlacement({ mode: 'NEW_CARD' })} />
-              <span>新建卡片<small>成为一张可独立拖拽的卡片</small></span>
-            </label>
-            <label className={cardName ? '' : 'is-disabled'}>
-              <input type="radio" name="placement" disabled={!cardName}
-                checked={placement.mode === 'INTO_CARD'}
-                onChange={() => setPlacement({ mode: 'INTO_CARD', zoneKind: 'INSIGHT' })} />
-              <span>加入「{cardName || '当前卡片'}」<small>与卡片内已有内容一起移动和缩放</small></span>
-            </label>
-            {placement.mode === 'INTO_CARD' && <select aria-label="卡片内区域" value={placement.zoneKind}
-              onChange={event => setPlacement({ mode: 'INTO_CARD', zoneKind: event.target.value as ZoneKind })}>
-              {(Object.keys(zoneKindLabels) as ZoneKind[]).map(kind =>
-                <option key={kind} value={kind}>{zoneKindLabels[kind]}</option>)}
-            </select>}
+            <p><Info size={15} />组件将填入当前{sectionName ? `“${sectionName}”` : '章节'}中第一个兼容空槽位，不会创建新的页面站位。若没有空槽位，请先新建分块。</p>
           </div>
           {needsData && <p className={enoughFields && contextId ? '' : 'is-error'}><Info size={15} />{enoughFields && contextId ? `将按「${contextNameOf(contextId)}」的字段角色预填 ${selected?.dataContract.dimensions.min ?? 0} 个维度、${selected?.dataContract.measures.min ?? 0} 个度量；加入后点击卡片可改数据集、展示类型与绑定，也可让 AI 识别度量与维度。` : '所选数据集的可用字段不足，无法满足此组件合同。'}</p>}
           {!needsData && <p><Info size={15} />该组件无需数据绑定，可直接加入报告结构。</p>}
           {error && <p className="is-error"><WarningCircle size={15} />{error}</p>}
         </aside>
       </div>
-      <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="button" disabled={busy || !selected || !title.trim() || (needsData && (!enoughFields || !contextId))} onClick={() => selected && onAdd(selected, title.trim(), placement, contextId)}>{busy ? '正在添加…' : '添加到报告'}</button></footer>
+      <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="button" disabled={busy || !selected || !title.trim() || (needsData && (!enoughFields || !contextId))} onClick={() => selected && onAdd(selected, title.trim(), contextId)}>{busy ? '正在添加…' : '放入分块槽位'}</button></footer>
     </section>
   </div>
 }
@@ -612,6 +626,7 @@ export function ReportEditorPage() {
   const [intent, setIntent] = useState('')
   const [newName, setNewName] = useState('')
   const [newReportType, setNewReportType] = useState<ReportType>('REPORT')
+  const [blueprintText, setBlueprintText] = useState('')
   const [importText, setImportText] = useState('')
   const [contexts, setContexts] = useState<DataContextCandidate[]>([])
   const [contextId, setContextId] = useState('')
@@ -620,7 +635,7 @@ export function ReportEditorPage() {
   const [starterTemplates, setStarterTemplates] = useState<ReportStarterTemplate[]>([])
   const [starterTemplatesLoading, setStarterTemplatesLoading] = useState(newMode)
   const [selectedTemplateId, setSelectedTemplateId] = useState('')
-  const [newCreating, setNewCreating] = useState<'' | 'blank' | 'template' | 'ai' | 'import'>('')
+  const [newCreating, setNewCreating] = useState<'' | NewReportMode>('')
   const [scopeMode, setScopeMode] = useState<'page' | 'section'>('page')
   const [activeSectionId, setActiveSectionId] = useState('')
   const [selectedComponentId, setSelectedComponentId] = useState('')
@@ -735,6 +750,12 @@ export function ReportEditorPage() {
       .finally(() => { if (!cancelled) setContextsLoading(false) })
     return () => { cancelled = true }
   }, [])
+
+  useEffect(() => {
+    if (!newMode || blueprintText) return
+    const selected = contexts.find(item => item.dataContext.id === contextId)
+    if (selected) setBlueprintText(JSON.stringify(starterBlueprint(selected, newName, newReportType), null, 2))
+  }, [blueprintText, contextId, contexts, newMode, newName, newReportType])
 
   useEffect(() => {
     if (!newMode) return undefined
@@ -970,66 +991,51 @@ export function ReportEditorPage() {
     setFilterBusy(false)
   }
 
-  const addComponent = async (
-    manifest: ComponentManifest, title: string, placement: Placement, dataContextId: string,
-    drop?: { sectionId?: string; rect: { x: number; y: number } },
+  /**
+   * 组件只能落入分块的空槽位；画布级 drop 只给出纠正提示，不再隐式新建卡片。
+   */
+  const dropFromPalette = (event: DragEvent<HTMLElement>) => {
+    if (!event.dataTransfer.getData(paletteDragType)) return
+    event.preventDefault()
+    setActionError('组件需要放入分块槽位：请拖到筛选区、结论区或图表区的虚线框内。')
+  }
+
+  const placeComponentInSlot = async (
+    blockId: string, zoneId: string, slotId: string, ref: string,
+    configuredTitle?: string, configuredContextId?: string,
   ) => {
     if (!draft || !page || !canEdit) return
-    setComponentBusy(true); setComponentError('')
-    const contextID = dataContextId || currentDataContextId
-    const contextFields = fieldsOf(contextID)
-    if (placement.mode === 'INTO_CARD' && selectedCardId) {
-      const { operations, componentId } = addToCardOperations({
-        page, blockId: selectedCardId, zoneKind: placement.zoneKind,
-        manifest, title, dataContextId: contextID, fields: contextFields,
-        newId: () => crypto.randomUUID(),
-      })
-      const saved = await commit(operations, `${manifest.displayName}已加入当前卡片并生成新修订`, setComponentError)
-      if (saved) { setSelectedComponentId(componentId); setComponentLibraryOpen(false) }
-      setComponentBusy(false)
-      return
-    }
-    const { operations, sectionId, componentId } = addComponentOperations({
-      definition: draft.definition, page, sectionId: drop?.sectionId ?? activeSection?.id, manifest, title,
-      dataContextId: contextID, fields: contextFields, newId: () => crypto.randomUUID(),
-      preferredRect: drop?.rect, sectionName: `${sectionNoun} 1`,
+    setComponentBusy(true); setComponentError(''); setActionError('')
+    const [type, version] = ref.split('@')
+    const manifest = manifests.get(type, version)
+    if (!manifest) { setActionError('组件清单不存在或已经更新'); setComponentBusy(false); return }
+    const contextID = configuredContextId || currentDataContextId
+    const result = placeComponentInSlotOperations({
+      page, blockId, zoneId, slotId, manifest, title: configuredTitle || manifest.displayName,
+      dataContextId: contextID, fields: fieldsOf(contextID), newId: () => crypto.randomUUID(),
     })
-    const saved = await commit(operations, `${manifest.displayName}已加入报告并生成新修订`, drop ? setActionError : setComponentError)
-    if (saved) {
-      setActiveSectionId(sectionId); setSelectedComponentId(componentId); setComponentLibraryOpen(false)
-    }
+    if (result.error) { setActionError(result.error); setComponentError(result.error); setComponentBusy(false); return }
+    const saved = await commit(result.operations, `${manifest.displayName}已放入分块槽位`, setActionError)
+    if (saved) { setSelectedComponentId(result.componentId); setSidePanel('data'); setComponentLibraryOpen(false) }
     setComponentBusy(false)
   }
 
-  /**
-   * 从组件面板拖到画布：按落点所在章节的网格算出行列，卡片就落在那里；落在章节
-   * 外或空章节时放到该章节（或最后一个章节）的起点。没有章节时新建章节。
-   */
-  const dropFromPalette = (event: DragEvent<HTMLElement>) => {
-    if (!draft || !page || !canEdit) return
-    const ref = event.dataTransfer.getData(paletteDragType)
-    if (!ref) return
-    event.preventDefault()
-    const [type, version] = ref.split('@')
-    const manifest = manifests.get(type, version)
-    if (!manifest) return
-    const target = (event.target as HTMLElement).closest('.report-render-section') as HTMLElement | null
-    const sectionId = target?.dataset.sectionId
-    let rect = { x: 0, y: 0 }
-    const grid = target?.querySelector('.report-render-grid') as HTMLElement | null
-    if (grid && sectionId) {
-      const canvas = canvasOf(draft.definition).desktop
-      const bounds = grid.getBoundingClientRect()
-      const cellWidth = (bounds.width + canvas.gapX) / canvas.columns
-      const rowHeight = canvas.baseRowHeight + canvas.gapY
-      const section = page.sections.find(item => item.id === sectionId)
-      const originY = section && section.blocks.length ? Math.min(...section.blocks.map(block => block.layout.desktop.y)) : 0
-      rect = {
-        x: Math.max(0, Math.floor((event.clientX - bounds.left) / cellWidth)),
-        y: Math.max(0, originY + Math.floor((event.clientY - bounds.top) / rowHeight)),
+  const pickComponentForSlot = (manifest: ComponentManifest, title = manifest.displayName, dataContextId = currentDataContextId) => {
+    if (!page || !activeSection) { setActionError('请先新建分区和分块'); setComponentError('请先新建分区和分块'); return }
+    const kind = zoneKindForManifest(manifest)
+    const orderedBlocks = selectedCard
+      ? [selectedCard.block, ...activeSection.blocks.filter(block => block.id !== selectedCard.block.id)]
+      : activeSection.blocks
+    for (const block of orderedBlocks) {
+      const zone = block.zones.find(item => item.type === kind && item.slots.some(slot => !slot.componentId))
+      const slot = zone?.slots.find(item => !item.componentId)
+      if (zone && slot) {
+        void placeComponentInSlot(block.id, zone.id, slot.id, `${manifest.type}@${manifest.version}`, title, dataContextId)
+        return
       }
     }
-    void addComponent(manifest, manifest.displayName, { mode: 'NEW_CARD' }, currentDataContextId, { sectionId, rect })
+    const message = `当前${sectionNoun}没有可用的${zoneKindLabels[kind]}槽位，请先新建分块或移除原组件。`
+    setActionError(message); setComponentError(message)
   }
 
   const deleteSelectedComponent = async () => {
@@ -1043,14 +1049,14 @@ export function ReportEditorPage() {
     if (!draft || !page || !canEdit) return
     const result = duplicateBlockOperations({ definition: draft.definition, page, blockId, newId: () => crypto.randomUUID() })
     if (!result) return
-    const saved = await commit(result.operations, '卡片已复制', setActionError)
+    const saved = await commit(result.operations, '分块已复制', setActionError)
     if (saved && result.componentId) setSelectedComponentId(result.componentId)
   }
 
   const deleteBlock = async (blockId: string) => {
     if (!draft || !page || !canEdit) return
     const operations = removeBlockOperations(page, blockId)
-    const saved = await commit(operations, '卡片已删除（可撤销）', setActionError)
+    const saved = await commit(operations, '分块已删除（可撤销）', setActionError)
     if (saved && selectedCardId === blockId) setSelectedComponentId('')
   }
 
@@ -1061,6 +1067,27 @@ export function ReportEditorPage() {
     const { operations, sectionId } = createSectionOperations(page, `${sectionNoun} ${sections.length + 1}`, () => crypto.randomUUID())
     const saved = await commit(operations, `已新建${sectionNoun}`, setActionError)
     if (saved) { setActiveSectionId(sectionId); setRenamingSectionId(sectionId) }
+  }
+
+  const addStructuredBlock = async () => {
+    if (!draft || !page || !canEdit) return
+    const blockNumber = (activeSection?.blocks.length ?? 0) + 1
+    const result = createStructuredBlockOperations({
+      definition: draft.definition, page, sectionId: activeSection?.id,
+      title: `分析分块 ${blockNumber}`, sectionName: `${sectionNoun} 1`, newId: () => crypto.randomUUID(),
+    })
+    const saved = await commit(result.operations, '已新建包含筛选、结论与图表槽位的分块', setActionError)
+    if (saved) {
+      setActiveSectionId(result.sectionId)
+      window.setTimeout(() => document.querySelector(`[data-block-id="${result.blockId}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 0)
+    }
+  }
+
+  const renameBlock = async (sectionId: string, blockId: string, title: string) => {
+    if (!draft || !page || !canEdit) return
+    const block = page.sections.find(section => section.id === sectionId)?.blocks.find(item => item.id === blockId)
+    if (!block) return
+    await commit(renameBlockOperations(block, title), '分块标题已更新', setActionError)
   }
 
   const renameSection = async (sectionId: string, name: string) => {
@@ -1132,12 +1159,31 @@ export function ReportEditorPage() {
     if (!intent.trim() || newCreating) return
     setNewCreating('ai'); setActionError('')
     try {
-      const result = await reportEditorAPI.createAI({ intent: intent.trim(), reportType: newReportType })
+      const result = await reportEditorAPI.createAI({ intent: intent.trim(), reportType: newReportType, dataContextId: contextId || undefined })
       navigate(`/reports/${result.report.id}?mode=edit`, { replace: true })
     } catch (cause) {
       setActionError(cause instanceof Error
         ? `${cause.message}（可改用「创建空白报告」，它不依赖模型提供方）`
         : 'AI 新建报告失败，可改用「创建空白报告」')
+    } finally { setNewCreating('') }
+  }
+
+  const createFromBlueprint = async () => {
+    if (!blueprintText.trim() || !contextId || newCreating) return
+    setNewCreating('blueprint'); setActionError('')
+    try {
+      let parsed: ReportBlueprint
+      try { parsed = JSON.parse(blueprintText) as ReportBlueprint } catch { throw new Error('蓝图 JSON 无法解析，请检查逗号、括号与引号') }
+      if (parsed?.schemaVersion !== 'report-blueprint/1.0' || !Array.isArray(parsed.sections)) {
+        throw new Error('这不是一份 Report Blueprint 1.0：缺少 schemaVersion 或 sections')
+      }
+      const configured: ReportBlueprint = {
+        ...parsed, title: newName.trim() || parsed.title, reportType: newReportType,
+      }
+      const result = await reportEditorAPI.createFromBlueprint({ blueprint: configured, dataContextIds: [contextId] })
+      navigate(`/reports/${result.report.id}?mode=edit`, { replace: true })
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : '蓝图展开失败，请检查卡片合同与短引用')
     } finally { setNewCreating('') }
   }
 
@@ -1190,15 +1236,15 @@ export function ReportEditorPage() {
       }
       if (typing) return
       if (event.key === 'Escape') { setSelectedComponentId(''); return }
-      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedCardId) {
-        event.preventDefault(); void deleteBlock(selectedCardId)
+      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedComponentId) {
+        event.preventDefault(); void deleteSelectedComponent()
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
     // undoRedo/deleteBlock 每次渲染都是新函数；它们只读最新的 draft/selection，用最新引用即可。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [newMode, selectedCardId, draft?.revisionNo, canEdit])
+  }, [newMode, selectedComponentId, draft?.revisionNo, canEdit])
 
   if (newMode) return <AppShell className="report-editor-shell" lockBusinessDomain>
     <div className="report-editor-workspace report-editor-new-workspace">
@@ -1207,9 +1253,14 @@ export function ReportEditorPage() {
         name={newName} reportType={newReportType} intent={intent} contexts={contexts} contextId={contextId}
         contextsLoading={contextsLoading} contextsError={contextsError}
         templates={starterTemplates} templatesLoading={starterTemplatesLoading} selectedTemplateId={selectedTemplateId}
-        creating={newCreating} error={actionError} importText={importText}
-        onName={setNewName} onReportType={setNewReportType} onIntent={setIntent} onContext={setContextId} onTemplate={setSelectedTemplateId}
-        onCreateBlank={() => void createBlankReport()} onCreateTemplate={() => void createFromTemplate()} onGenerate={() => void createNewReport()}
+        creating={newCreating} error={actionError} blueprintText={blueprintText} importText={importText}
+        onName={setNewName} onReportType={setNewReportType} onIntent={setIntent} onContext={value => {
+          setContextId(value)
+          const selected = contexts.find(item => item.dataContext.id === value)
+          if (selected) setBlueprintText(JSON.stringify(starterBlueprint(selected, newName, newReportType), null, 2))
+        }} onTemplate={setSelectedTemplateId}
+        onCreateBlank={() => void createBlankReport()} onCreateTemplate={() => void createFromTemplate()} onCreateBlueprint={() => void createFromBlueprint()} onGenerate={() => void createNewReport()}
+        onBlueprintText={setBlueprintText}
         onImportText={setImportText} onImport={() => void importDefinition()}
       /></div>
     </div>
@@ -1236,7 +1287,8 @@ export function ReportEditorPage() {
           <button className="quiet-button" type="button" onClick={() => setJsonOpen(true)}><BracketsCurly size={16} />定义 JSON</button>
           <button type="button" aria-label="撤销" disabled={!canEdit || applying} onClick={() => void undoRedo(false)}><ArrowUDownLeft size={20} /></button>
           <button type="button" aria-label="重做" disabled={!canEdit || applying} onClick={() => void undoRedo(true)}><ArrowUDownRight size={20} /></button>
-          <button className="quiet-button" type="button" disabled={!canEdit || manifests.list().length === 0} title="按对话框方式添加组件（也可以直接从左侧组件面板拖拽）" onClick={() => { setComponentError(''); setComponentLibraryOpen(true) }}><Plus size={16} />添加组件</button>
+          <button className="quiet-button" type="button" disabled={!canEdit} title="自动创建标题、筛选、结论和图表槽位" onClick={() => void addStructuredBlock()}><Plus size={16} />新建分块</button>
+          <button className="quiet-button" type="button" disabled={!canEdit || manifests.list().length === 0} title="浏览全部组件；推荐直接拖入左侧分块槽位" onClick={() => { setComponentError(''); setComponentLibraryOpen(true) }}><CirclesFour size={16} />组件库</button>
           <button className="quiet-button" type="button" disabled={!canPublish || Boolean(aiPreview)} title={aiPreview ? '请先应用或退回当前 AI 方案' : ''} onClick={() => navigate(`/reports/${reportId}/publish-review`)}><ShieldCheck size={16} />预览与发布</button>
         </div>
       </header>
@@ -1247,8 +1299,11 @@ export function ReportEditorPage() {
         <div className="report-editor-main">
           <nav className="report-editor-outline report-editor-sidebar" aria-label="组件面板与大纲">
             <ComponentPalette manifests={manifests.list()} disabled={!canEdit}
-              onPick={manifest => void addComponent(manifest, manifest.displayName, { mode: 'NEW_CARD' }, currentDataContextId)} />
-            <header><strong>{sectionNoun}</strong>{canEdit && <button type="button" className="report-outline-add" title={`新建${sectionNoun}`} onClick={() => void addSection()}><Plus size={13} />新建</button>}</header>
+              onPick={pickComponentForSlot} />
+            <header><strong>{sectionNoun}</strong><span>{canEdit && <>
+              <button type="button" className="report-outline-add" title="新建分块" onClick={() => void addStructuredBlock()}><Plus size={13} />分块</button>
+              <button type="button" className="report-outline-add" title={`新建${sectionNoun}`} onClick={() => void addSection()}><Plus size={13} />{sectionNoun}</button>
+            </>}</span></header>
             <ul className="report-outline-list">
               {sections.map((section, index) => <li key={section.id} className={`report-outline-item ${section.id === activeSectionId ? 'is-active' : ''}`.trim()}>
                 {renamingSectionId === section.id
@@ -1279,7 +1334,7 @@ export function ReportEditorPage() {
             <article className="report-editor-paper report-editor-live-paper" onClick={event => { if ((event.target as HTMLElement).closest('.report-render-block')) return; setSelectedComponentId('') }}>
               <header>
                 <div><h2>{draft.definition.metadata.name}</h2><ShieldCheck size={17} weight="fill" /></div>
-                <small>{sections.length ? '拖动卡片顶部移动、右下角缩放；点击卡片在右侧配置' : '从左侧组件面板把卡片拖到这里'}</small>
+                <small>{sections.length ? '先用分块组织标题、筛选、结论与图表，再把组件拖入对应槽位' : '先新建分块，再从左侧拖入组件'}</small>
               </header>
               {draft.definition.metadata.description && <p className="report-editor-description">{draft.definition.metadata.description}</p>}
               <p className="report-editor-preview-status" aria-live="polite">
@@ -1306,6 +1361,8 @@ export function ReportEditorPage() {
                   onLayoutChange: (sectionId, blockId, rect) => void changeLayout(sectionId, blockId, rect),
                   onSlotLayoutChange: (blockId, zoneId, slotId, rect) => void changeSlotLayout(blockId, zoneId, slotId, rect),
                   onZoneReorder: (blockId, zoneId, direction) => void reorderZone(blockId, zoneId, direction),
+                  onComponentDrop: (blockId, zoneId, slotId, ref) => void placeComponentInSlot(blockId, zoneId, slotId, ref),
+                  onBlockTitleChange: (sectionId, blockId, title) => void renameBlock(sectionId, blockId, title),
                   onDuplicateBlock: (_sectionId, blockId) => void duplicateBlock(blockId),
                   onDeleteBlock: (_sectionId, blockId) => void deleteBlock(blockId),
                 } : undefined} />
@@ -1394,19 +1451,18 @@ export function ReportEditorPage() {
           阻断问题与证据校验结论由发布评审的确定性门禁给出，这里不预判。 */}
       <footer className="report-editor-statusbar">
         <span><strong>r{draft.revisionNo}</strong> 每次修改即自动保存为新修订，可撤销</span>
-        <span>{sections.length} 个{sectionNoun} · {draft.definition.components.length} 张卡片 · {draft.definition.components.filter(component => component.dataBinding).length} 张已绑定数据 · {(draft.definition.globalFilters ?? []).length} 个筛选器</span>
+        <span>{sections.length} 个{sectionNoun} · {sections.reduce((count, section) => count + section.blocks.length, 0)} 个分块 · {draft.definition.components.length} 个组件 · {draft.definition.components.filter(component => component.dataBinding).length} 个已绑定数据 · {(draft.definition.globalFilters ?? []).length} 个筛选器</span>
         {lastReceipt && <span>上次 AI 应用：r{lastReceipt.from} → r{lastReceipt.to}，{lastReceipt.count} 项</span>}
-        <span className="report-editor-statusbar-hint">{selectedComponent ? '已选中卡片：Delete 删除 · Esc 取消选中' : '发布前检查在「预览与发布」中进行'}</span>
+        <span className="report-editor-statusbar-hint">{selectedComponent ? '已选中组件：Delete 删除 · Esc 取消选中' : '发布前检查在「预览与发布」中进行'}</span>
       </footer>
     </div>
     {jsonOpen && <DefinitionJSONDialog definition={draft.definition} onClose={() => setJsonOpen(false)} />}
     {componentLibraryOpen && <ComponentLibraryDialog manifests={manifests.list()}
       reportContexts={reportContexts} contextNameOf={contextNameOf} fieldsOf={fieldsOf} defaultContextId={currentDataContextId}
       sectionName={activeSection?.name ?? ''}
-      cardName={selectedCard ? selectedComponent?.options.title || '当前卡片' : ''}
       busy={componentBusy} error={componentError}
       onClose={() => setComponentLibraryOpen(false)}
-      onAdd={(manifest, title, placement, dataContextId) => void addComponent(manifest, title, placement, dataContextId)} />}
+      onAdd={(manifest, title, dataContextId) => pickComponentForSlot(manifest, title, dataContextId)} />}
     {deleteSectionOpen && activeSection && <div className="report-modal-backdrop" role="presentation" onMouseDown={() => setDeleteSectionOpen(false)}>
       <section className="report-modal report-delete-section-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-section-title" onMouseDown={event => event.stopPropagation()}>
         <header><div><span className="eyebrow">结构变更</span><h2 id="delete-section-title">删除“{activeSection.name}”</h2></div><button type="button" aria-label="关闭" onClick={() => setDeleteSectionOpen(false)}><X size={18} /></button></header>

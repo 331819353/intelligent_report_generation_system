@@ -61,7 +61,8 @@ func newAPIMux(handlers apiHandlers) *http.ServeMux {
 	handleAll(handlers.askDataReportAsset, "/api/v1/askdata/report-assets", "/api/v1/askdata/report-assets/")
 	handleAll(handlers.report,
 		"/api/v1/reports", "/api/v1/reports/",
-		"/api/v1/report-data-contexts", "/api/v1/report-component-manifests",
+		"/api/v1/report-data-contexts", "/api/v1/report-component-manifests", "/api/v1/report-card-kinds",
+		"/api/v1/report-blueprints/",
 		"/api/v1/report-templates", "/api/v1/report-templates/",
 		"/api/v1/report-shares/",
 	)

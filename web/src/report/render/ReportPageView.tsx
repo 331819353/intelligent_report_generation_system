@@ -1,4 +1,4 @@
-import { type CSSProperties, useRef } from 'react'
+import { type CSSProperties, useRef, useState } from 'react'
 import { ReportBlockBoundary, ReportComponentBoundary, ComponentStateView } from '../runtime/ComponentStateView.tsx'
 import { mobileBlockHeight, toMobileLayout } from '../designer/layout/index.ts'
 import { useMobileViewport } from './use-mobile-viewport.ts'
@@ -7,6 +7,7 @@ import { useBlockInteraction, type DragMode } from './use-block-interaction.ts'
 import { useGridInteraction, zoneGridCellSize } from './use-grid-interaction.ts'
 import { ComponentView, type ComponentResult } from './ComponentView.tsx'
 import { minimumSize, type ManifestIndex } from './manifests.ts'
+import { paletteDragType } from '../designer/operations.ts'
 import {
   blockComponentIDs, canvasOf, orderedSections,
   type Block, type Canvas, type GridRect, type Page, type ReportComponent, type ReportDefinition, type Section, type Zone,
@@ -45,6 +46,10 @@ export type EditingHandlers = {
   onSlotLayoutChange(blockId: string, zoneId: string, slotId: string, rect: GridRect, mode: DragMode): void
   /** 区域在卡片内上移或下移。 */
   onZoneReorder(blockId: string, zoneId: string, direction: -1 | 1): void
+  /** 从组件面板把组件放入分块预先声明的空槽位。 */
+  onComponentDrop?(blockId: string, zoneId: string, slotId: string, manifestRef: string): void
+  /** 分块标题独立于内部组件标题。 */
+  onBlockTitleChange?(sectionId: string, blockId: string, title: string): void
   /** 卡片工具条：复制 / 删除整张卡片。未提供时不显示工具条。 */
   onDuplicateBlock?(sectionId: string, blockId: string): void
   onDeleteBlock?(sectionId: string, blockId: string): void
@@ -97,6 +102,7 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
     onRetryBlock, onSelectComponent, selectedComponentId, interaction, editing,
   } = props
   const gridRef = useRef<HTMLDivElement>(null)
+  const [dropSlotId, setDropSlotId] = useState('')
   const columns = Math.max(zone.layout.columns, 1)
   const rows = Math.max(zone.layout.rows, 1)
 
@@ -134,15 +140,35 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
       const selected = Boolean(component && component.id === selectedComponentId)
       const rect = slotDrag.rectFor(slot.id, slot.grid)
       const dragging = slotDrag.drag?.id === slot.id
-      return <div className={`report-render-slot ${selected ? 'is-selected' : ''} ${dragging ? 'is-dragging' : ''}`.trim()}
+      const acceptsDrop = Boolean(editing?.onComponentDrop && !slot.componentId)
+      const emptyLabel = zone.type === 'FILTER' ? '拖入筛选控件'
+        : zone.type === 'INSIGHT' ? '拖入结论或文本组件'
+          : zone.type === 'CONTENT' ? '拖入图表、指标或表格' : '拖入内容组件'
+      return <div className={`report-render-slot ${selected ? 'is-selected' : ''} ${dragging ? 'is-dragging' : ''} ${dropSlotId === slot.id ? 'is-drop-target' : ''}`.trim()}
         key={slot.id}
+        data-slot-id={slot.id}
+        data-empty-slot={!slot.componentId ? 'true' : undefined}
         style={{
           gridColumn: `${rect.x + 1} / span ${Math.max(rect.w, 1)}`,
           gridRow: `${rect.y + 1} / span ${Math.max(rect.h, 1)}`,
         }}
         onClick={component && onSelectComponent
           ? event => { event.stopPropagation(); onSelectComponent(component.id, block.id) }
-          : undefined}>
+          : undefined}
+        onDragOver={acceptsDrop ? event => {
+          if (!event.dataTransfer.types.includes(paletteDragType)) return
+          event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = 'copy'; setDropSlotId(slot.id)
+        } : undefined}
+        onDragLeave={acceptsDrop ? event => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropSlotId('')
+        } : undefined}
+        onDrop={acceptsDrop ? event => {
+          const ref = event.dataTransfer.getData(paletteDragType)
+          if (!ref) return
+          event.preventDefault(); event.stopPropagation(); setDropSlotId('')
+          editing?.onComponentDrop?.(block.id, zone.id, slot.id, ref)
+        } : undefined}>
+        {editing && slot.cardKind && <span className="report-slot-kind-badge">{slot.cardKind}</span>}
         {component
           ? <ReportComponentBoundary fallback={<ComponentStateView state="ERROR" onAction={() => onRetryBlock?.(block.id)} />}>
             <ComponentView component={component} manifests={manifests} mobile={mobile} designMode={designMode}
@@ -155,7 +181,7 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
           </ReportComponentBoundary>
           : slot.componentId
             ? <ComponentStateView state="ERROR" boundTitle="组件在定义中缺失" />
-            : <div className="report-render-empty-slot"><span>空槽位</span></div>}
+            : <div className="report-render-empty-slot"><strong>{zone.type}</strong><span>{editing ? emptyLabel : '待配置'}</span></div>}
         {slotEditable && editing && <SlotHandles
           slotId={slot.id} rect={slot.grid} columns={columns} rows={rows} minimum={minSizeFor(slot.id)}
           onStart={(event, mode) => slotDrag.start(event, slot.id, slot.grid, mode)}
@@ -201,6 +227,9 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
 
   const minSizeFor = (blockId: string) => {
     const block = section.blocks.find(item => item.id === blockId)
+    if (block?.title && (['FILTER', 'INSIGHT', 'CONTENT'] as const).every(kind => block.zones.some(zone => zone.type === kind))) {
+      return { w: 12, h: 8 }
+    }
     const componentId = block ? blockComponentIDs(block)[0] : undefined
     const component = componentId ? components.get(componentId) : undefined
     return minimumSize(component && manifests.get(component.templateRef.type, component.templateRef.version))
@@ -217,7 +246,7 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
   })
 
   if (section.blocks.length === 0) {
-    return <div className="report-render-placeholder is-section"><span>{editing ? '空分区：从左侧组件面板把卡片拖到这里' : '本分区暂无内容'}</span></div>
+    return <div className="report-render-placeholder is-section"><span>{editing ? '空分区：先新建一个分块，再把组件拖入槽位' : '本分区暂无内容'}</span></div>
   }
   return <div className={`report-render-grid ${interaction.drag ? 'is-dragging' : ''}`.trim()} ref={gridRef} style={{
     gridTemplateColumns: `repeat(${canvas.desktop.columns}, minmax(0, 1fr))`,
@@ -240,15 +269,28 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
           onClick={editing && onSelectComponent && componentIds[0]
             ? event => { event.stopPropagation(); onSelectComponent(componentIds[0], block.id) }
             : undefined}>
+          {editing && block.cardKind && <span className="report-block-kind-badge">{block.cardKind}</span>}
+          {block.title && <header className="report-render-block-head">
+            {editing?.onBlockTitleChange
+              ? <input key={block.title} defaultValue={block.title} maxLength={200} aria-label="分块标题"
+                onClick={event => event.stopPropagation()}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') (event.target as HTMLInputElement).blur()
+                  if (event.key === 'Escape') { (event.target as HTMLInputElement).value = block.title ?? ''; (event.target as HTMLInputElement).blur() }
+                }}
+                onBlur={event => editing.onBlockTitleChange?.(section.id, block.id, event.target.value)} />
+              : <h3>{block.title}</h3>}
+            {section.question && <p>{section.question}</p>}
+          </header>}
           {content(block)}
           {editing && <BlockHandles blockId={block.id} rect={block.layout.desktop} columns={canvas.desktop.columns}
             minimum={minSizeFor(block.id)}
             onStart={(event, mode) => interaction.start(event, block.id, block.layout.desktop, mode)}
             onNudge={(next, mode) => editing.onLayoutChange(section.id, block.id, next, mode)} />}
-          {editing && (editing.onDuplicateBlock || editing.onDeleteBlock) && <div className="report-block-toolbar" role="toolbar" aria-label="卡片操作">
-            {editing.onDuplicateBlock && <button type="button" title="复制卡片" aria-label="复制卡片"
+          {editing && (editing.onDuplicateBlock || editing.onDeleteBlock) && <div className="report-block-toolbar" role="toolbar" aria-label="分块操作">
+            {editing.onDuplicateBlock && <button type="button" title="复制分块" aria-label="复制分块"
               onClick={event => { event.stopPropagation(); editing.onDuplicateBlock?.(section.id, block.id) }}>⧉</button>}
-            {editing.onDeleteBlock && <button type="button" className="is-danger" title="删除卡片" aria-label="删除卡片"
+            {editing.onDeleteBlock && <button type="button" className="is-danger" title="删除分块" aria-label="删除分块"
               onClick={event => { event.stopPropagation(); editing.onDeleteBlock?.(section.id, block.id) }}>✕</button>}
           </div>}
         </div>
@@ -262,13 +304,16 @@ function DesktopPage(props: ReportPageViewProps) {
   const canvas = canvasOf(definition)
   const components = new Map(definition.components.map(component => [component.id, component]))
   return <div className={`report-render-page ${editing ? 'is-editing' : ''}`.trim()}>
-    {orderedSections(page).map(section => <section className="report-render-section"
-      id={`report-section-${section.id}`} data-section-id={section.id} key={section.id}>
-      <header className="report-render-section-head"><h2>{section.name}</h2></header>
-      <SectionGrid section={section} canvas={canvas} editing={editing} manifests={manifests} components={components}
-        selectedComponentId={props.selectedComponentId} onSelectComponent={props.onSelectComponent}
-        content={block => <BlockZones {...props} block={block} components={components} manifests={manifests} />} />
-    </section>)}
+    {orderedSections(page).map(section => {
+      const titleOwnedByBlock = section.blocks.length === 1 && section.blocks[0]?.title === section.name
+      return <section className="report-render-section"
+        id={`report-section-${section.id}`} data-section-id={section.id} key={section.id}>
+        {!titleOwnedByBlock && <header className="report-render-section-head"><h2>{section.name}</h2>{section.question && <p>{section.question}</p>}</header>}
+        <SectionGrid section={section} canvas={canvas} editing={editing} manifests={manifests} components={components}
+          selectedComponentId={props.selectedComponentId} onSelectComponent={props.onSelectComponent}
+          content={block => <BlockZones {...props} block={block} components={components} manifests={manifests} />} />
+      </section>
+    })}
   </div>
 }
 
@@ -319,10 +364,10 @@ export function ReportPageView(props: ReportPageViewProps) {
   const mobile = useMobileViewport()
   if (props.page.sections.length === 0) {
     return <div className={`report-render-placeholder is-page ${props.editing ? 'is-editing' : ''}`.trim()}>
-      <strong>{props.editing ? '把第一张卡片拖到这里' : '报告还没有内容'}</strong>
-      <span>{props.editing ? '从左侧组件面板拖入指标卡、图表、表格或文字；也可以直接点击组件加入。' : '从组件库添加指标卡、图表、表格或文字组件开始搭建。'}</span>
+      <strong>{props.editing ? '先创建第一个分块' : '报告还没有内容'}</strong>
+      <span>{props.editing ? '分块会自动准备标题、筛选、结论和图表槽位，再把左侧组件拖入对应槽位。' : '从分块开始组织报告内容。'}</span>
       {props.editing && <ol className="report-render-placeholder-steps">
-        <li>拖入卡片</li><li>点击卡片选择数据集与指标</li><li>配置过滤字段</li><li>预览与发布</li>
+        <li>创建分块</li><li>拖组件到槽位</li><li>配置数据与筛选</li><li>预览与发布</li>
       </ol>}
     </div>
   }

@@ -209,17 +209,39 @@ type Page struct {
 }
 
 type Section struct {
-	ID     askdata.ID `json:"id"`
-	Name   string     `json:"name"`
-	Order  int        `json:"order"`
-	Blocks []Block    `json:"blocks"`
+	ID           askdata.ID           `json:"id"`
+	Name         string               `json:"name"`
+	Order        int                  `json:"order"`
+	Question     string               `json:"question,omitempty"`
+	LayoutIntent *SectionLayoutIntent `json:"layoutIntent,omitempty"`
+	Blocks       []Block              `json:"blocks"`
+}
+
+// SectionLayoutIntent is semantic input to the deterministic solver. Existing
+// 1.0 artifacts omit it and keep their frozen coordinates unchanged.
+type SectionLayoutIntent struct {
+	Mode string `json:"mode"`
 }
 
 type Block struct {
-	ID     askdata.ID  `json:"id"`
-	Type   BlockType   `json:"type"`
-	Layout BlockLayout `json:"layout"`
-	Zones  []Zone      `json:"zones"`
+	ID   askdata.ID `json:"id"`
+	Type BlockType  `json:"type"`
+	// Title belongs to the layout container rather than any one component.
+	// Legacy 1.0 reports omit it and continue to render their component titles.
+	Title        string             `json:"title,omitempty"`
+	CardKind     string             `json:"cardKind,omitempty"`
+	LayoutIntent *BlockLayoutIntent `json:"layoutIntent,omitempty"`
+	Layout       BlockLayout        `json:"layout"`
+	Zones        []Zone             `json:"zones"`
+}
+
+// BlockLayoutIntent records what the author or blueprint requested; Layout is
+// still the compiler-owned fact consumed by every renderer.
+type BlockLayoutIntent struct {
+	Span            int    `json:"span"`
+	MinRows         int    `json:"minRows"`
+	NarrativeAttach string `json:"narrativeAttach"`
+	ManualOverride  bool   `json:"manualOverride"`
 }
 
 type BlockType string
@@ -335,6 +357,7 @@ type Slot struct {
 	ID          askdata.ID   `json:"id"`
 	Grid        SlotGrid     `json:"grid"`
 	ComponentID askdata.ID   `json:"componentId,omitempty"`
+	CardKind    string       `json:"cardKind,omitempty"`
 	MergedFrom  []askdata.ID `json:"mergedFrom,omitempty"`
 }
 
@@ -855,6 +878,9 @@ func (block Block) validate(columns int, componentIDs, zoneIDs, slotIDs map[askd
 	if !validBlockType(block.Type) {
 		return errors.New("type is invalid")
 	}
+	if len([]rune(block.Title)) > 200 {
+		return errors.New("title exceeds 200 characters")
+	}
 	desktop := block.Layout.Desktop
 	if desktop.X < 0 || desktop.Y < 0 || desktop.W < 1 || desktop.H < 1 || desktop.X+desktop.W > columns {
 		return fmt.Errorf("layout.desktop must fit the %d-column canvas", columns)
@@ -998,6 +1024,9 @@ func (slot Slot) validate(columns, rows int, componentIDs map[askdata.ID]struct{
 		if _, exists := componentIDs[slot.ComponentID]; !exists {
 			return fmt.Errorf("componentId %q does not reference a component", slot.ComponentID)
 		}
+	}
+	if len([]rune(slot.CardKind)) > 64 {
+		return errors.New("cardKind exceeds 64 characters")
 	}
 	seenMerged := map[askdata.ID]struct{}{}
 	if len(slot.MergedFrom) == 1 {

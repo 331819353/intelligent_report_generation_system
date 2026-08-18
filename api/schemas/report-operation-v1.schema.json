@@ -366,7 +366,10 @@
     },
     "blockUpdatePayload": {
       "type": "object", "additionalProperties": false, "required": ["type"],
-      "properties": { "type": { "enum": ["ANALYSIS_CARD", "KPI_GROUP", "CHART", "TABLE", "CONTENT", "FILTER"] } }
+      "properties": {
+        "type": { "enum": ["ANALYSIS_CARD", "KPI_GROUP", "CHART", "TABLE", "CONTENT", "FILTER"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
     },
     "zoneCreatePayload": {
       "type": "object", "additionalProperties": false, "required": ["zone"],
@@ -398,7 +401,7 @@
       "type": "object", "additionalProperties": false, "required": ["grid", "componentId"],
       "properties": {
         "grid": { "$ref": "report-definition-v1.schema.json#/$defs/slotGrid" },
-        "componentId": { "$ref": "#/$defs/stableId" }
+        "componentId": { "oneOf": [{ "$ref": "#/$defs/stableId" }, { "const": "" }] }
       }
     },
     "componentCreatePayload": {

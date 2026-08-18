@@ -113,13 +113,34 @@ export type AIReportPlan = {
     blocks: Array<{ purpose: string; recommendedComponent: string }>
   }>
 }
+export type ReportBlueprint = {
+  schemaVersion: 'report-blueprint/1.0'
+  title: string
+  reportType: 'REPORT' | 'DASHBOARD'
+  audience: 'EXECUTIVE' | 'BUSINESS' | 'ANALYST'
+  locale: 'zh-CN'
+  theme: string
+  datasets: Array<{ ref: string; alias: string }>
+  sections: Array<{
+    ref: string; title: string; question: string; leadIn: boolean; layout: 'FLOW'
+    rows: Array<{ cards: Array<{
+      ref: string; kind: string; dataset: string; metrics: string[]; dimensions: string[]; methods: string[]
+      narrative: boolean; weight: number; title: string | null; topN: number | null
+    }> }>
+  }>
+  summary: { enabled: boolean }
+  recommend: { enabled: boolean }
+  style: { tone: 'REPORTING' | 'CONCISE' | 'FORMAL'; length: 'SHORT' | 'MEDIUM' | 'LONG' }
+}
 export type AICreateReportResponse = {
   report: { id: string; name: string; code: string; reportType: 'REPORT' | 'DASHBOARD' }
   draft: ReportDraft
   revision: ReportRevision
   aiRunId: string
   selection: { dataContextId: string; reportName: string; rationale: string; confidence: 'HIGH' | 'MEDIUM' | 'LOW' }
-  plan: AIReportPlan
+  blueprint?: ReportBlueprint
+  /** One-release compatibility for servers still using report-plan-v1. */
+  plan?: AIReportPlan
 }
 
 /** 服务端裁剪后的受治理数据上下文；字段列表已按当前用户的列权限过滤。 */
@@ -185,8 +206,13 @@ function idempotencyHeaders() {
 }
 
 export const reportEditorAPI = {
-  createAI(input: { intent: string; reportType?: 'REPORT' | 'DASHBOARD' }) {
+  createAI(input: { intent: string; reportType?: 'REPORT' | 'DASHBOARD'; dataContextId?: string }) {
     return apiRequest<AICreateReportResponse>('/v1/reports/ai/create', {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
+    })
+  },
+  createFromBlueprint(input: { blueprint: ReportBlueprint; dataContextIds: string[] }) {
+    return apiRequest<BlankCreateReportResponse & { blueprint: ReportBlueprint }>('/v1/report-blueprints/expand', {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
     })
   },
