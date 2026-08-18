@@ -191,7 +191,7 @@ export const reportEditorAPI = {
     })
   },
   // 空白新建不依赖模型提供方，是未配置 LLM 时报告主链的保底入口。
-  createBlank(input: { name: string; description?: string; dataContextId?: string; reportType?: 'REPORT' | 'DASHBOARD' }) {
+  createBlank(input: { name: string; description?: string; dataContextId?: string; dataContextIds?: string[]; reportType?: 'REPORT' | 'DASHBOARD' }) {
     return apiRequest<BlankCreateReportResponse>('/v1/reports/blank', {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
     })

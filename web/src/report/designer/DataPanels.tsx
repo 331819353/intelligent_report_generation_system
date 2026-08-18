@@ -72,28 +72,35 @@ export function DataContextPanel({ definition, candidates, busy, error, onAdd, o
   </section>
 }
 
-export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId, busy, error, onCreate, onUpdate, onDelete }: {
+export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId, onlyBlock = false, defaultContextId, busy, error, onCreate, onUpdate, onDelete }: {
   definition: ReportDefinition
   candidates: DataContextCandidate[]
   fieldsOf: (dataContextId: string) => DataContextField[]
   /** 当前选中卡片；“仅作用于选中卡片”的作用域从它开始。 */
   selectedBlockId: string
+  /** 卡片视角：只列出作用于该卡片的筛选器，新建默认只作用于该卡片。 */
+  onlyBlock?: boolean
+  /** 新建筛选器默认使用的数据集（卡片视角下取卡片绑定的数据集）。 */
+  defaultContextId?: string
   busy: boolean
   error: string
   onCreate: (draft: FilterDraft) => void
   onUpdate: (filter: GlobalFilter, draft: FilterDraft) => void
   onDelete: (filterId: string) => void
 }) {
-  const filters = definition.globalFilters ?? []
+  const allFilters = definition.globalFilters ?? []
+  const filters = onlyBlock
+    ? allFilters.filter(filter => filter.scope.type === 'REPORT' || (filter.scope.type === 'BLOCK' && filter.scope.targetIds.includes(selectedBlockId)))
+    : allFilters
   const contexts = definition.dataContexts
-  const [contextId, setContextId] = useState(contexts[0]?.id ?? '')
+  const [contextId, setContextId] = useState(defaultContextId || contexts[0]?.id || '')
   const fields = fieldsOf(contextId || contexts[0]?.id || '')
   const [field, setField] = useState('')
   const effectiveField = fields.some(item => item.code === field) ? field : fields[0]?.code ?? ''
   const fieldMeta = fields.find(item => item.code === effectiveField)
   const [type, setType] = useState<GlobalFilter['type'] | ''>('')
   const effectiveType = type || suggestedFilterType(fieldMeta)
-  const [scopeMode, setScopeMode] = useState<'REPORT' | 'BLOCK'>('REPORT')
+  const [scopeMode, setScopeMode] = useState<'REPORT' | 'BLOCK'>(onlyBlock && selectedBlockId ? 'BLOCK' : 'REPORT')
   const [targets, setTargets] = useState<string[]>([])
 
   const blocks = useMemo(() => orderedPages(definition).flatMap(page => orderedSections(page).flatMap(section => section.blocks.map(block => {
@@ -111,7 +118,7 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
   })
 
   return <section className="report-interaction-panel report-filter-panel" aria-label="报告筛选器">
-    <header><strong><Funnel size={15} /> 筛选器</strong><small>取值由使用者在运行页顶部填写，服务端解析后作用于绑定卡片</small></header>
+    <header><strong><Funnel size={15} /> {onlyBlock ? '过滤字段' : '筛选器'}</strong><small>{onlyBlock ? '作用于这张卡片的过滤字段；取值由使用者在运行页填写，服务端解析' : '取值由使用者在运行页顶部填写，服务端解析后作用于绑定卡片'}</small></header>
     {filters.length > 0 && <ul className="report-interaction-list">
       {filters.map(filter => <li key={filter.id}>
         <span>
@@ -168,7 +175,7 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
       </div>}
       {error && <p className="report-interaction-note is-error"><WarningCircle size={15} />{error}</p>}
       <button className="primary-button" type="button" disabled={busy || !ready} onClick={submit}>
-        <Plus size={15} />{busy ? '正在保存…' : '添加筛选器'}
+        <Plus size={15} />{busy ? '正在保存…' : onlyBlock ? '为此卡片添加过滤字段' : '添加筛选器'}
       </button>
     </div>}
   </section>

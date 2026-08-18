@@ -3,7 +3,7 @@ import {
   CheckCircle, CirclesFour, Info, MagicWand,
   NotePencil, Plus, ShieldCheck, Sparkle, SpinnerGap, Trash, WarningCircle, X,
 } from '@phosphor-icons/react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import '../styles/report.css'
@@ -19,6 +19,7 @@ import { ReportPageView } from '../report/render/ReportPageView'
 import { InteractionPanel } from '../report/designer/InteractionPanel'
 import { EvidencePanel } from '../report/designer/EvidencePanel'
 import { DataContextPanel, DefinitionJSONDialog, FilterPanel } from '../report/designer/DataPanels'
+import { ComponentPalette } from '../report/designer/ComponentPalette'
 import {
   emptyManifestIndex, indexManifests, listComponentManifests, minimumSize,
   type ComponentManifest, type ManifestIndex,
@@ -31,7 +32,7 @@ import {
   addComponentOperations, addDataContextOperations, addToCardOperations, bundle, createFilterOperations, createInteractionOperations,
   defaultBinding, deleteFilterOperations, deleteInteractionOperations, layoutOperations, removeComponentOperations, removeDataContextOperations,
   replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateComponentOperations, updateFilterOperations,
-  zoneKindLabels, zoneReorderOperations,
+  paletteDragType, zoneKindLabels, zoneReorderOperations,
   type FilterDraft, type InteractionDraft, type ZoneKind,
 } from '../report/designer/operations'
 
@@ -260,9 +261,16 @@ function pruneOptions(options: ComponentOptions, manifest: ComponentManifest): C
  * 渲染器真正会读取的配置；绑定只能使用服务端返回的受治理字段与合同声明的角色。
  * 提交仍走 COMPONENT_UPDATE / DATA_BINDING_UPDATE 受控 Operation。
  */
-function ManualEditDialog({ component, manifest: currentManifest, manifests, reportContexts, contextNameOf, fieldsOf, defaultContextId, canAI, onSuggest, busy, error, onClose, onSave }: {
+/**
+ * 卡片配置面板（右侧内联）：数据集 → 展示类型 → 指标（度量）与维度 → 过滤字段 → 样式。
+ * 保存走 COMPONENT_REPLACE / COMPONENT_UPDATE / DATA_BINDING_UPDATE 受控 Operation。
+ */
+function CardInspector({ component, manifest: currentManifest, manifests, reportContexts, contextNameOf, fieldsOf, defaultContextId, canAI, onSuggest, busy, error, onClose, onSave, onDelete, filterPanel }: {
   component?: EditorComponent
   manifest?: ComponentManifest
+  onDelete: () => void
+  /** 作用于该卡片的过滤字段面板（由页面注入，避免面板自持草稿状态）。 */
+  filterPanel: ReactNode
   /** 可切换的展示类型（组件清单）。 */
   manifests: ComponentManifest[]
   /** 报告内已声明的数据集。 */
@@ -375,30 +383,57 @@ function ManualEditDialog({ component, manifest: currentManifest, manifests, rep
     </div>)}
   </div>
 
-  return <div className="report-modal-backdrop" role="presentation" onMouseDown={onClose}>
-    <section className="report-modal report-editor-manual-modal" role="dialog" aria-modal="true" aria-labelledby="manual-editor-title" onMouseDown={event => event.stopPropagation()}>
+  return <section className="report-card-inspector" aria-labelledby="manual-editor-title">
       <header>
-        <div><span className="eyebrow">属性与数据绑定</span><h2 id="manual-editor-title">{component?.options.title || component?.templateRef.type || '组件'}</h2></div>
-        <button type="button" aria-label="关闭" onClick={onClose}><X size={18} /></button>
+        <div><span className="eyebrow">卡片配置</span><h2 id="manual-editor-title">{component?.options.title || component?.templateRef.type || '组件'}</h2></div>
+        <button type="button" aria-label="取消选中" onClick={onClose}><X size={18} /></button>
       </header>
       <div className="report-editor-manual-form">
-        <p><Info size={15} />属性与绑定都通过受控 Operation 写入新修订，不会直接覆盖历史。</p>
+        {!semanticBound && reportContexts.length > 0 && <label>数据集
+          <select aria-label="卡片数据集" value={dataContextId} onChange={event => changeContext(event.target.value)}>
+            {reportContexts.map(context => <option key={context.id} value={context.id}>{contextNameOf(context.id)}</option>)}
+          </select>
+        </label>}
         {!semanticBound && switchable.length > 0 && <label>展示类型
           <select aria-label="展示类型" value={manifestRef} onChange={event => changeManifest(event.target.value)}>
             {switchable.map(item => <option key={`${item.type}@${item.version}`} value={`${item.type}@${item.version}`}>{item.displayName} · {item.category}</option>)}
           </select>
           {replacing && <small className="report-editor-binding-note"><Info size={13} />保存时将把该卡片更换为「{manifest?.displayName}」，绑定已按新合同重映射。</small>}
         </label>}
-        {!semanticBound && reportContexts.length > 0 && <label>数据集
-          <select aria-label="卡片数据集" value={dataContextId} onChange={event => changeContext(event.target.value)}>
-            {reportContexts.map(context => <option key={context.id} value={context.id}>{contextNameOf(context.id)}</option>)}
-          </select>
-        </label>}
         <label>组件标题<input value={options.title ?? ''} onChange={event => setOption('title', event.target.value)} /></label>
         <label>组件副标题<input value={options.subtitle ?? ''} onChange={event => setOption('subtitle', event.target.value)} /></label>
         {manifest?.renderer === 'TEXT' && <label>文字内容
           <textarea rows={4} value={options.richText ?? ''} onChange={event => setOption('richText', event.target.value)} />
         </label>}
+
+
+        {semanticBound && <p className="report-editor-binding-note">
+          <ShieldCheck size={15} />该组件使用 SEMANTIC_IR 绑定并固定了语义发布版本，只能通过语义升级流程调整。
+        </p>}
+        {!semanticBound && !contract && <p className="report-editor-binding-note">
+          <Info size={15} />未找到该组件的模板合同，暂不能在此编辑数据绑定。
+        </p>}
+        {!semanticBound && contract && fields.length === 0 && <p className="report-editor-binding-note">
+          <WarningCircle size={15} />当前报告的数据上下文没有可用字段。
+        </p>}
+
+        {bindable && contract && <div className="report-editor-binding">
+          <p className="report-editor-binding-contract">
+            组件合同：维度 {contract.dimensions.min}～{contract.dimensions.max} 个，度量 {contract.measures.min}～{contract.measures.max} 个
+          </p>
+          <div className="report-editor-binding-assist">
+            <button type="button" disabled={busy || suggesting || !manifest} onClick={() => manifest && applyBinding(defaultBinding(manifest, fields))}>按字段角色填充</button>
+            <button type="button" disabled={busy || suggesting || !canAI || !onSuggest || !manifest} title={canAI ? '' : '当前不可用：需要模型提供方与 AI 编辑权限'} onClick={() => void suggest()}>
+              {suggesting ? <SpinnerGap className="is-spinning" size={14} /> : <MagicWand size={14} />}{suggesting ? 'AI 识别中…' : 'AI 识别度量与维度'}
+            </button>
+          </div>
+          {suggestion && <p className="report-editor-binding-note"><Sparkle size={14} weight="fill" />AI 建议已填入：{suggestion.dimensions.length} 个维度、{suggestion.measures.length} 个度量{suggestion.rationale ? `（${suggestion.rationale}）` : ''}。确认后保存才会生效。</p>}
+          {suggestError && <p className="report-editor-inline-error"><WarningCircle size={15} />{suggestError}</p>}
+          {rows('指标（度量）', measures, measureRoles, contract.measures.max, measureFields, setMeasures)}
+          {rows('维度', dimensions, dimensionRoles, contract.dimensions.max, dimensionFields, setDimensions)}
+          {!measuresValid && <p className="report-editor-inline-error"><WarningCircle size={15} />指标数量不满足组件合同</p>}
+          {!dimensionsValid && <p className="report-editor-inline-error"><WarningCircle size={15} />维度数量不满足组件合同</p>}
+        </div>}
 
         {styleProperties.length > 0 && <div className="report-editor-style-group">
           <strong>表现设置</strong>
@@ -429,49 +464,20 @@ function ManualEditDialog({ component, manifest: currentManifest, manifests, rep
             </label>
           })}
         </div>}
-
-        {semanticBound && <p className="report-editor-binding-note">
-          <ShieldCheck size={15} />该组件使用 SEMANTIC_IR 绑定并固定了语义发布版本，只能通过语义升级流程调整。
-        </p>}
-        {!semanticBound && !contract && <p className="report-editor-binding-note">
-          <Info size={15} />未找到该组件的模板合同，暂不能在此编辑数据绑定。
-        </p>}
-        {!semanticBound && contract && fields.length === 0 && <p className="report-editor-binding-note">
-          <WarningCircle size={15} />当前报告的数据上下文没有可用字段。
-        </p>}
-
-        {bindable && contract && <div className="report-editor-binding">
-          <p className="report-editor-binding-contract">
-            组件合同：维度 {contract.dimensions.min}～{contract.dimensions.max} 个，度量 {contract.measures.min}～{contract.measures.max} 个
-          </p>
-          <div className="report-editor-binding-assist">
-            <button type="button" disabled={busy || suggesting || !manifest} onClick={() => manifest && applyBinding(defaultBinding(manifest, fields))}>按字段角色填充</button>
-            <button type="button" disabled={busy || suggesting || !canAI || !onSuggest || !manifest} title={canAI ? '' : '当前不可用：需要模型提供方与 AI 编辑权限'} onClick={() => void suggest()}>
-              {suggesting ? <SpinnerGap className="is-spinning" size={14} /> : <MagicWand size={14} />}{suggesting ? 'AI 识别中…' : 'AI 识别度量与维度'}
-            </button>
-          </div>
-          {suggestion && <p className="report-editor-binding-note"><Sparkle size={14} weight="fill" />AI 建议已填入：{suggestion.dimensions.length} 个维度、{suggestion.measures.length} 个度量{suggestion.rationale ? `（${suggestion.rationale}）` : ''}。确认后保存才会生效。</p>}
-          {suggestError && <p className="report-editor-inline-error"><WarningCircle size={15} />{suggestError}</p>}
-          {rows('维度', dimensions, dimensionRoles, contract.dimensions.max, dimensionFields, setDimensions)}
-          {rows('度量', measures, measureRoles, contract.measures.max, measureFields, setMeasures)}
-          {!dimensionsValid && <p className="report-editor-inline-error"><WarningCircle size={15} />维度数量不满足组件合同</p>}
-          {!measuresValid && <p className="report-editor-inline-error"><WarningCircle size={15} />度量数量不满足组件合同</p>}
-        </div>}
-
         {error && <div className="report-editor-inline-error"><WarningCircle size={15} />{error}</div>}
       </div>
       <footer>
-        <button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button>
+        <button className="quiet-button is-danger" type="button" disabled={busy} onClick={onDelete}><Trash size={15} />删除卡片</button>
         <button className="primary-button" type="button" disabled={busy || !options.title?.trim() || !bindingValid}
           onClick={() => onSave({
             options: { ...(manifest ? pruneOptions(options, manifest) : options), title: options.title?.trim(), subtitle: options.subtitle?.trim() },
             binding: bindable ? { dimensions, measures } : undefined,
             dataContextId: bindable ? dataContextId : undefined,
             replaceWith: replacing ? manifest : undefined,
-          })}>{busy ? '正在保存…' : '保存为新修订'}</button>
+          })}>{busy ? '正在保存…' : '保存卡片配置'}</button>
       </footer>
+      {filterPanel}
     </section>
-  </div>
 }
 
 function ComponentLibraryDialog({ manifests, reportContexts, contextNameOf, fieldsOf, defaultContextId, sectionName, cardName, busy, error, onClose, onAdd }: {
@@ -604,7 +610,6 @@ export function ReportEditorPage() {
   const [actionError, setActionError] = useState('')
   const [toast, setToast] = useState('')
   const [manifests, setManifests] = useState<ManifestIndex>(emptyManifestIndex)
-  const [manualOpen, setManualOpen] = useState(false)
   const [manualBusy, setManualBusy] = useState(false)
   const [manualError, setManualError] = useState('')
   const [componentLibraryOpen, setComponentLibraryOpen] = useState(false)
@@ -878,8 +883,7 @@ export function ReportEditorPage() {
       ...(result.replaceWith ? replaceComponentOperations(selectedComponent, result.replaceWith) : []),
       ...updateComponentOperations(selectedComponent, result.options, result.binding, result.dataContextId ?? selectedComponent.dataBinding?.dataContextId ?? currentDataContextId),
     ]
-    const saved = await commit(operations, result.replaceWith ? '展示类型、属性与绑定已保存为新修订' : result.binding ? '属性与数据绑定已保存为新修订' : '组件属性已保存为新修订', setManualError)
-    if (saved) setManualOpen(false)
+    await commit(operations, result.replaceWith ? '展示类型、属性与绑定已保存为新修订' : result.binding ? '卡片数据绑定已保存为新修订' : '卡片属性已保存为新修订', setManualError)
     setManualBusy(false)
   }
 
@@ -941,7 +945,10 @@ export function ReportEditorPage() {
     setFilterBusy(false)
   }
 
-  const addComponent = async (manifest: ComponentManifest, title: string, placement: Placement, dataContextId: string) => {
+  const addComponent = async (
+    manifest: ComponentManifest, title: string, placement: Placement, dataContextId: string,
+    drop?: { sectionId?: string; rect: { x: number; y: number } },
+  ) => {
     if (!draft || !page || !canEdit) return
     setComponentBusy(true); setComponentError('')
     const contextID = dataContextId || currentDataContextId
@@ -958,14 +965,46 @@ export function ReportEditorPage() {
       return
     }
     const { operations, sectionId, componentId } = addComponentOperations({
-      definition: draft.definition, page, sectionId: activeSection?.id, manifest, title,
+      definition: draft.definition, page, sectionId: drop?.sectionId ?? activeSection?.id, manifest, title,
       dataContextId: contextID, fields: contextFields, newId: () => crypto.randomUUID(),
+      preferredRect: drop?.rect,
     })
-    const saved = await commit(operations, `${manifest.displayName}已加入报告并生成新修订`, setComponentError)
+    const saved = await commit(operations, `${manifest.displayName}已加入报告并生成新修订`, drop ? setActionError : setComponentError)
     if (saved) {
       setActiveSectionId(sectionId); setSelectedComponentId(componentId); setComponentLibraryOpen(false)
     }
     setComponentBusy(false)
+  }
+
+  /**
+   * 从组件面板拖到画布：按落点所在章节的网格算出行列，卡片就落在那里；落在章节
+   * 外或空章节时放到该章节（或最后一个章节）的起点。没有章节时新建章节。
+   */
+  const dropFromPalette = (event: DragEvent<HTMLElement>) => {
+    if (!draft || !page || !canEdit) return
+    const ref = event.dataTransfer.getData(paletteDragType)
+    if (!ref) return
+    event.preventDefault()
+    const [type, version] = ref.split('@')
+    const manifest = manifests.get(type, version)
+    if (!manifest) return
+    const target = (event.target as HTMLElement).closest('.report-render-section') as HTMLElement | null
+    const sectionId = target?.dataset.sectionId
+    let rect = { x: 0, y: 0 }
+    const grid = target?.querySelector('.report-render-grid') as HTMLElement | null
+    if (grid && sectionId) {
+      const canvas = canvasOf(draft.definition).desktop
+      const bounds = grid.getBoundingClientRect()
+      const cellWidth = (bounds.width + canvas.gapX) / canvas.columns
+      const rowHeight = canvas.baseRowHeight + canvas.gapY
+      const section = page.sections.find(item => item.id === sectionId)
+      const originY = section && section.blocks.length ? Math.min(...section.blocks.map(block => block.layout.desktop.y)) : 0
+      rect = {
+        x: Math.max(0, Math.floor((event.clientX - bounds.left) / cellWidth)),
+        y: Math.max(0, originY + Math.floor((event.clientY - bounds.top) / rowHeight)),
+      }
+    }
+    void addComponent(manifest, manifest.displayName, { mode: 'NEW_CARD' }, currentDataContextId, { sectionId, rect })
   }
 
   const deleteSelectedComponent = async () => {
@@ -1105,9 +1144,7 @@ export function ReportEditorPage() {
           <button className="quiet-button" type="button" onClick={() => setJsonOpen(true)}><BracketsCurly size={16} />定义 JSON</button>
           <button type="button" aria-label="撤销" disabled={!canEdit || applying} onClick={() => void undoRedo(false)}><ArrowUDownLeft size={20} /></button>
           <button type="button" aria-label="重做" disabled={!canEdit || applying} onClick={() => void undoRedo(true)}><ArrowUDownRight size={20} /></button>
-          <button className="quiet-button" type="button" disabled={!canEdit || manifests.list().length === 0} onClick={() => { setComponentError(''); setComponentLibraryOpen(true) }}><Plus size={16} />添加组件</button>
-          <button className="quiet-button" type="button" disabled={!canEdit || !selectedComponent} onClick={() => setManualOpen(true)}><NotePencil size={16} />属性与绑定</button>
-          <button className="quiet-button is-danger" type="button" disabled={!canEdit || !selectedComponent} onClick={() => void deleteSelectedComponent()}><Trash size={16} />删除组件</button>
+          <button className="quiet-button" type="button" disabled={!canEdit || manifests.list().length === 0} title="按对话框方式添加组件（也可以直接从左侧组件面板拖拽）" onClick={() => { setComponentError(''); setComponentLibraryOpen(true) }}><Plus size={16} />添加组件</button>
           <button className="quiet-button" type="button" disabled={!canPublish || Boolean(aiPreview)} title={aiPreview ? '请先应用或退回当前 AI 方案' : ''} onClick={() => navigate(`/reports/${reportId}/publish-review`)}><ShieldCheck size={16} />预览与发布</button>
         </div>
       </header>
@@ -1124,20 +1161,24 @@ export function ReportEditorPage() {
 
       <div className="report-editor-body">
         <div className="report-editor-main">
-          <nav className="report-editor-outline" aria-label="报告大纲">
-            <header><strong>报告大纲</strong></header>
+          <nav className="report-editor-outline report-editor-sidebar" aria-label="组件面板与大纲">
+            <ComponentPalette manifests={manifests.list()} disabled={!canEdit}
+              onPick={manifest => void addComponent(manifest, manifest.displayName, { mode: 'NEW_CARD' }, currentDataContextId)} />
+            <header><strong>{draft.definition.metadata.reportType === 'DASHBOARD' ? '看板分区' : '报告大纲'}</strong></header>
             {sections.map(section => <button className={section.id === activeSectionId ? 'is-active' : ''} type="button" key={section.id}
               onClick={() => {
                 setActiveSectionId(section.id)
                 document.getElementById(`report-section-${section.id}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
               }}><span />{section.name}</button>)}
-            {sections.length === 0 && <p>尚未添加章节</p>}
+            {sections.length === 0 && <p>拖入第一张卡片即自动创建分区</p>}
           </nav>
-          <main className={`report-editor-canvas ${aiPreview ? 'has-ai-proposal' : ''}`.trim()}>
+          <main className={`report-editor-canvas ${aiPreview ? 'has-ai-proposal' : ''}`.trim()}
+            onDragOver={event => { if (event.dataTransfer.types.includes(paletteDragType)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' } }}
+            onDrop={dropFromPalette}>
             <article className="report-editor-paper report-editor-live-paper">
               <header>
                 <div><h2>{draft.definition.metadata.name}</h2><ShieldCheck size={17} weight="fill" /></div>
-                <small>拖动区块顶部的把手移动位置，拖动右下角调整大小；每次改动都会保存为新修订。</small>
+                <small>从左侧组件面板拖卡片到这里；拖动卡片顶部把手移动、右下角缩放；点击卡片在右侧配置数据集、指标与过滤字段。</small>
               </header>
               {draft.definition.metadata.description && <p className="report-editor-description">{draft.definition.metadata.description}</p>}
               <p className="report-editor-preview-status" aria-live="polite">
@@ -1155,6 +1196,7 @@ export function ReportEditorPage() {
                 selectedComponentId={selectedComponentId}
                 onSelectComponent={(componentId, blockId) => {
                   setSelectedComponentId(componentId)
+                  if (componentId) setSidePanel('data')
                   const located = findComponentBlock(page, componentId)
                   if (located) setActiveSectionId(located.section.id)
                   else if (blockId) setActiveSectionId(activeSectionId)
@@ -1171,22 +1213,39 @@ export function ReportEditorPage() {
 
         <aside className="report-editor-task-panel">
           <div className="report-editor-panel-tabs" role="tablist" aria-label="侧栏面板">
-            <button type="button" role="tab" aria-selected={sidePanel === 'data'} className={sidePanel === 'data' ? 'is-active' : ''} onClick={() => setSidePanel('data')}>数据与筛选</button>
+            <button type="button" role="tab" aria-selected={sidePanel === 'data'} className={sidePanel === 'data' ? 'is-active' : ''} onClick={() => setSidePanel('data')}>{selectedComponent ? '卡片配置' : '数据与筛选'}</button>
             <button type="button" role="tab" aria-selected={sidePanel === 'ai'} className={sidePanel === 'ai' ? 'is-active' : ''} onClick={() => setSidePanel('ai')}>AI 改稿</button>
           </div>
           {sidePanel === 'data' && <div className="report-editor-panel-body is-data">
-            <DataContextPanel definition={draft.definition} candidates={contexts} busy={dataBusy || !canEdit} error={dataError}
-              onAdd={candidate => void addDataContext(candidate)} onRemove={dataContextId => void removeDataContext(dataContextId)} />
-            <FilterPanel definition={draft.definition} candidates={contexts} fieldsOf={fieldsOf} selectedBlockId={selectedCardId}
-              busy={filterBusy || !canEdit} error={filterError}
-              onCreate={filterDraft => void createFilter(filterDraft)} onUpdate={(filter, filterDraft) => void updateFilter(filter, filterDraft)}
-              onDelete={filterId => void deleteFilter(filterId)} />
-            {selectedComponent && selectedComponent.dataBinding && <EvidencePanel
-              key={selectedComponent.id} reportId={reportId} component={selectedComponent} canEdit={canEdit} />}
-            {selectedComponent && <InteractionPanel definition={draft.definition} manifests={manifests}
-              sourceComponentId={selectedComponent.id} busy={interactionBusy} error={interactionError}
-              onCreate={interactionDraft => void addInteraction(interactionDraft)}
-              onDelete={interactionId => void removeInteraction(interactionId)} />}
+            {selectedComponent ? <>
+              <CardInspector
+                key={selectedComponent.id}
+                component={selectedComponent} manifest={selectedManifest} manifests={manifests.list()}
+                reportContexts={reportContexts} contextNameOf={contextNameOf} fieldsOf={fieldsOf} defaultContextId={currentDataContextId}
+                canAI={canAIEdit} onSuggest={suggestBinding}
+                busy={manualBusy || !canEdit} error={manualError}
+                onClose={() => setSelectedComponentId('')} onSave={result => void saveManual(result)}
+                onDelete={() => void deleteSelectedComponent()}
+                filterPanel={<FilterPanel definition={draft.definition} candidates={contexts} fieldsOf={fieldsOf} selectedBlockId={selectedCardId}
+                  onlyBlock defaultContextId={selectedComponent.dataBinding?.dataContextId ?? currentDataContextId}
+                  busy={filterBusy || !canEdit} error={filterError}
+                  onCreate={filterDraft => void createFilter(filterDraft)} onUpdate={(filter, filterDraft) => void updateFilter(filter, filterDraft)}
+                  onDelete={filterId => void deleteFilter(filterId)} />}
+              />
+              {selectedComponent.dataBinding && <EvidencePanel key={`evidence-${selectedComponent.id}`} reportId={reportId} component={selectedComponent} canEdit={canEdit} />}
+              <InteractionPanel definition={draft.definition} manifests={manifests}
+                sourceComponentId={selectedComponent.id} busy={interactionBusy} error={interactionError}
+                onCreate={interactionDraft => void addInteraction(interactionDraft)}
+                onDelete={interactionId => void removeInteraction(interactionId)} />
+            </> : <>
+              <p className="report-editor-binding-note report-editor-panel-intro"><Info size={15} />点击画布上的卡片可配置它的数据集、指标与过滤字段；下面是报告级的数据集与筛选器。</p>
+              <DataContextPanel definition={draft.definition} candidates={contexts} busy={dataBusy || !canEdit} error={dataError}
+                onAdd={candidate => void addDataContext(candidate)} onRemove={dataContextId => void removeDataContext(dataContextId)} />
+              <FilterPanel definition={draft.definition} candidates={contexts} fieldsOf={fieldsOf} selectedBlockId={selectedCardId}
+                busy={filterBusy || !canEdit} error={filterError}
+                onCreate={filterDraft => void createFilter(filterDraft)} onUpdate={(filter, filterDraft) => void updateFilter(filter, filterDraft)}
+                onDelete={filterId => void deleteFilter(filterId)} />
+            </>}
           </div>}
           {sidePanel === 'ai' && <div className="report-editor-panel-body is-ai">
           <header><div><h2>AI 改稿会话</h2><span>{aiPreview?.aiRunId || '等待开始'}</span></div><em className={aiPreview ? 'is-pending' : ''}>{previewing ? '思考中' : aiPreview ? '待确认' : '可输入'}</em></header>
@@ -1239,14 +1298,6 @@ export function ReportEditorPage() {
         <span>发布前检查将在「预览与发布」中给出阻断与告警项</span>
       </footer>
     </div>
-    {manualOpen && <ManualEditDialog
-      key={selectedComponent?.id}
-      component={selectedComponent} manifest={selectedManifest} manifests={manifests.list()}
-      reportContexts={reportContexts} contextNameOf={contextNameOf} fieldsOf={fieldsOf} defaultContextId={currentDataContextId}
-      canAI={canAIEdit} onSuggest={suggestBinding}
-      busy={manualBusy} error={manualError}
-      onClose={() => setManualOpen(false)} onSave={result => void saveManual(result)}
-    />}
     {jsonOpen && <DefinitionJSONDialog definition={draft.definition} onClose={() => setJsonOpen(false)} />}
     {componentLibraryOpen && <ComponentLibraryDialog manifests={manifests.list()}
       reportContexts={reportContexts} contextNameOf={contextNameOf} fieldsOf={fieldsOf} defaultContextId={currentDataContextId}

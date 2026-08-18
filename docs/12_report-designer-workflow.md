@@ -19,18 +19,25 @@
 
 ## 2. 手动开发流程（补全版）
 
+主链按「新建 → 选类型 → 选数据集 → 拖卡片 → 点卡片绑定 → 选指标 → 配过滤字段 → 保存/发布」组织；
+每一步都只需要一个面板，编辑器不再一上来就把所有选项摊开。
+
 | 步骤 | 界面 | 写入的定义 / Operation |
 |---|---|---|
-| ① 新建 | `/reports/new`：名称、**类型（报告 REPORT / 报表 DASHBOARD）**、初始数据集；空白 / 模板 / AI 生成 / **从 JSON 导入** | `POST /reports/blank`、`/report-templates/{id}/instantiate`、`/reports/ai/create`（均含 `reportType`）、`POST /reports {definition}` |
-| ② 声明数据集 | 侧栏「数据与筛选 → 数据集」：从已发布数据集目录加入/移除 | `DATA_CONTEXT_CREATE` / `DATA_CONTEXT_DELETE`（被卡片或筛选器引用的数据集不能移除；服务端按目录重解析 ID/查询策略） |
-| ③ 添加卡片 | 「添加组件」：选展示类型（组件清单）、标题、**数据集**、放置方式（新卡片 / 加入当前卡片的区域） | `COMPONENT_CREATE` + `BLOCK_CREATE`（或 `ZONE_CREATE`）；绑定按字段角色预填合同下限 |
-| ④ 布局 | 画布拖拽把手移动、右下角缩放；碰撞自动消解；章节上移/下移 | `BLOCK_MOVE` / `BLOCK_RESIZE` / `SLOT_UPDATE` / `ZONE_REORDER` / `SECTION_REORDER` |
-| ⑤ 配置卡片 | 点击卡片 →「属性与绑定」：**展示类型切换**、**数据集切换**、标题/副标题、表现属性（按清单 optionSchema 生成）、维度/度量绑定；**按字段角色填充**（确定性）或 **AI 识别度量与维度** | `COMPONENT_REPLACE`（换类型，绑定按新合同重映射）+ `COMPONENT_UPDATE` + `DATA_BINDING_UPDATE` |
-| ⑥ 筛选器 | 侧栏「筛选器」：数据集 → 字段 → 类型（按字段语义建议：时间→日期区间、度量→数值区间、其它→多选）→ 作用范围（全报告 / 指定卡片） | `FILTER_CREATE` / `FILTER_UPDATE` / `FILTER_DELETE`；取值在运行页顶部筛选栏填写，服务端解析后作用于绑定卡片 |
-| ⑦ 联动 / 结论 | 侧栏「图表联动」「结论证据」 | `INTERACTION_*` / `INSIGHT_*` |
-| ⑧ 保存 | 每次操作即修订（`r1, r2, …`），撤销/重做；草稿按当前用户权限实时执行预览 | `POST .../undo|redo`，`POST .../draft/execute` |
-| ⑨ 发布 | 「预览与发布」→ 发布评审（确定性门禁 + 可选 AI 说明）→ 发布人确认桌面/移动布局 → 版本 | `POST .../publish-review`、`POST .../publish`、版本/回滚/升级 |
-| ⑩ 运行 | `/reports/{id}`：筛选栏 + 卡片；交互（点击筛选/钻取）由服务端解析 | `POST .../runtime/execute` |
+| ① 新建 | 报告中心「新建报告」→ **弹窗向导**：第 1 步选类型（报告 REPORT / 报表 DASHBOARD）并命名；第 2 步勾选该报告要用的数据集（可多选、可搜索，只列当前领域已发布的数据集版本） | `POST /reports/blank {name, reportType, dataContextIds[]}`（第一个为主数据集；服务端逐个按目录校验）。模板 / AI 生成 / JSON 导入仍在 `/reports/new` 页 |
+| ② 拖卡片 | 编辑器左侧 **组件面板**（按 图表 / 表格 / 内容 / 控件 分组）→ 拖到画布落点，或点击加到当前章节空位；空报告拖入第一张卡片即自动建分区 | `COMPONENT_CREATE` + `BLOCK_CREATE`（+ `SECTION_CREATE`）；落点与既有卡片重叠时附带 `BLOCK_MOVE/RESIZE` 让位；绑定按字段角色预填合同下限，数据集取报告主数据集 |
+| ③ 布局 | 画布拖拽把手移动、右下角缩放；碰撞自动消解；章节上移/下移 | `BLOCK_MOVE` / `BLOCK_RESIZE` / `SLOT_UPDATE` / `ZONE_REORDER` / `SECTION_REORDER` |
+| ④ 点卡片绑定 | 点击卡片 → 右侧 **卡片配置**（内联，不再弹窗）：**数据集** → **展示类型** → 标题/副标题 | `COMPONENT_UPDATE`、`COMPONENT_REPLACE`（换类型时绑定按新合同重映射、表现属性按新清单裁剪） |
+| ⑤ 选指标 | 同一面板：**指标（度量）** 与 **维度** 行（角色下拉 + 字段下拉），**按字段角色填充**（确定性）或 **AI 识别度量与维度**；表现设置按清单 optionSchema 生成；「保存卡片配置」一次提交 | `DATA_BINDING_UPDATE`（+ 上述 UPDATE/REPLACE）合并为一条修订 |
+| ⑥ 配过滤字段 | 同一面板下方 **过滤字段**：只列作用于这张卡片的过滤器；新增默认作用范围=这张卡片，数据集默认=卡片数据集；类型按字段语义建议（时间→日期区间、度量→数值区间、其它→多选） | `FILTER_CREATE` / `FILTER_UPDATE` / `FILTER_DELETE`；取值在运行页顶部筛选栏填写，服务端解析 |
+| ⑦ 报告级设置 | 未选中卡片时右侧为「数据与筛选」：数据集增删（被引用的不能删）、全报告筛选器 | `DATA_CONTEXT_CREATE` / `DATA_CONTEXT_DELETE`、`FILTER_*` |
+| ⑧ 联动 / 结论 | 卡片配置下方「结论证据」「图表联动」 | `INTERACTION_*` / `INSIGHT_*` |
+| ⑨ 保存 | 每次操作即修订（`r1, r2, …`），撤销/重做；草稿按当前用户权限实时执行预览 | `POST .../undo|redo`，`POST .../draft/execute` |
+| ⑩ 发布 | 「预览与发布」→ 发布评审（确定性门禁 + 可选 AI 说明）→ 发布人确认桌面/移动布局 → 版本 | `POST .../publish-review`、`POST .../publish`、版本/回滚/升级 |
+| ⑪ 运行 | `/reports/{id}`：筛选栏 + 卡片；交互（点击筛选/钻取）由服务端解析 | `POST .../runtime/execute` |
+
+前端入口：`web/src/report/designer/{NewReportDialog,ComponentPalette,DataPanels,operations}.tsx|ts`，
+`web/src/pages/ReportEditorPage.tsx`（`CardInspector`、`dropFromPalette`）。
 
 ## 3. LLM 在卡片上的角色
 

@@ -433,10 +433,13 @@ func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	var body struct {
-		Name          string     `json:"name"`
-		Description   string     `json:"description"`
-		DataContextID askdata.ID `json:"dataContextId"`
-		ReportType    string     `json:"reportType"`
+		Name          string       `json:"name"`
+		Description   string       `json:"description"`
+		DataContextID askdata.ID   `json:"dataContextId"`
+		// DataContextIDs lets the creation wizard declare every dataset the
+		// report will use up front; the first one becomes the primary context.
+		DataContextIDs []askdata.ID `json:"dataContextIds"`
+		ReportType     string       `json:"reportType"`
 	}
 	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.Name) == "" {
 		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "report name is required")
@@ -457,12 +460,22 @@ func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	// 数据上下文只能取自服务端候选，客户端 ID 不作为可信引用。
-	selected := candidates[0]
+	requested := append([]askdata.ID(nil), body.DataContextIDs...)
 	if body.DataContextID != "" {
+		requested = append([]askdata.ID{body.DataContextID}, requested...)
+	}
+	selectedContexts := make([]reportmodel.DataContext, 0, len(requested)+1)
+	seenContexts := map[askdata.ID]bool{}
+	for _, wanted := range requested {
+		if seenContexts[wanted] {
+			continue
+		}
 		found := false
 		for _, candidate := range candidates {
-			if candidate.DataContext.ID == body.DataContextID {
-				selected, found = candidate, true
+			if candidate.DataContext.ID == wanted {
+				selectedContexts = append(selectedContexts, candidate.DataContext)
+				seenContexts[wanted] = true
+				found = true
 				break
 			}
 		}
@@ -471,11 +484,15 @@ func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Re
 			return
 		}
 	}
+	if len(selectedContexts) == 0 {
+		selectedContexts = append(selectedContexts, candidates[0].DataContext)
+	}
 	reportID := askdata.ID(uuid.NewString())
 	definition := applyReportType(newReportDefinition(
 		reportID, strings.TrimSpace(body.Name), strings.TrimSpace(body.Description),
-		selected.DataContext, reportmodel.CreatedManually,
+		selectedContexts[0], reportmodel.CreatedManually,
 	), reportType)
+	definition.DataContexts = selectedContexts
 	reportRecord, draft, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
 		ID: reportID, Code: definition.Metadata.Code, Name: definition.Metadata.Name,
 		ReportType: definition.Metadata.ReportType, Definition: definition,

@@ -15,6 +15,13 @@ import { findFreeRect, resolveLayout, resolveSlotPlacement } from './placement.t
  * 与 AI 改稿写入的是同一种指令、同一份 Definition、同一条修订链。
  */
 
+/** 组件面板拖拽载荷的 MIME 类型；画布按它识别“从组件面板拖来的卡片”。 */
+export const paletteDragType = 'application/x-report-component'
+
+export function manifestRef(manifest: ComponentManifest) {
+  return `${manifest.type}@${manifest.version}`
+}
+
 export function bundle(reportId: string, baseRevision: number, operations: EditorOperation[]): EditorOperationBundle {
   return { schemaVersion: '1.0', reportId, baseRevision, source: 'USER', aiRunId: null, scope: null, operations }
 }
@@ -173,6 +180,8 @@ export type AddComponentInput = {
   dataContextId: string
   fields: DataContextField[]
   newId: () => string
+  /** 拖放落点（网格坐标）；给定时卡片放在落点，与之重叠的卡片按碰撞规则下移。 */
+  preferredRect?: { x: number; y: number }
 }
 
 /**
@@ -193,7 +202,13 @@ export function addComponentOperations(input: AddComponentInput): { operations: 
 
   const sections = orderedSections(page)
   const target = sections.find(section => section.id === input.sectionId) ?? sections.at(-1)
-  const rect = target ? findFreeRect(target.blocks, size, columns) : { x: 0, y: 0, ...size }
+  const dropped = input.preferredRect
+    ? {
+      x: Math.min(Math.max(input.preferredRect.x, 0), Math.max(columns - Math.min(size.w, columns), 0)),
+      y: Math.max(input.preferredRect.y, 0), w: Math.min(size.w, columns), h: size.h,
+    }
+    : undefined
+  const rect = dropped ?? (target ? findFreeRect(target.blocks, size, columns) : { x: 0, y: 0, ...size })
   const block = {
     id: blockId, type: blockTypes[manifest.category] ?? 'CHART',
     layout: {
@@ -218,6 +233,14 @@ export function addComponentOperations(input: AddComponentInput): { operations: 
   ]
   if (target) {
     operations.push({ op: 'BLOCK_CREATE', targetId: target.id, payload: { block } })
+    if (dropped) {
+      // 落点与既有卡片重叠时，沿用拖拽的碰撞消解：其它卡片让位，同一条修订提交。
+      for (const change of resolveLayout([...target.blocks, block as Block], blockId, rect, columns, minimumSize(manifest))) {
+        if (change.blockId === blockId) continue
+        if (change.moved) operations.push({ op: 'BLOCK_MOVE', targetId: change.blockId, payload: { x: change.rect.x, y: change.rect.y } })
+        if (change.resized) operations.push({ op: 'BLOCK_RESIZE', targetId: change.blockId, payload: { w: change.rect.w, h: change.rect.h } })
+      }
+    }
     return { operations, sectionId: target.id, componentId }
   }
   const sectionId = newId()

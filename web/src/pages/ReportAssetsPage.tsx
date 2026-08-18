@@ -16,6 +16,7 @@ import { canRun, filterAssets, lifecycleLabels, type ReportAction, type ReportAs
 import { ReportPageView } from '../report/render/ReportPageView'
 import { emptyManifestIndex, indexManifests, listComponentManifests, type ManifestIndex } from '../report/render/manifests'
 import { orderedPages } from '../report/render/schema'
+import { NewReportDialog } from '../report/designer/NewReportDialog'
 
 /**
  * 资产缩略图只呈现资产自身的属性（类型与状态）。这里曾经按报告 ID 哈希出一套
@@ -366,6 +367,7 @@ function ReportAssetDrawer({ asset, events, eventsLoading, onClose, onView, onEd
 
 export function ReportAssetsPage() {
   const navigate = useNavigate()
+  const [newOpen, setNewOpen] = useState(false)
   // 设计走查快照只在开发构建中可用，生产构建绝不返回虚构报告资产。
   const snapshot = import.meta.env.DEV && new URLSearchParams(window.location.search).get('snapshot') === 'assets'
   const [assets, setAssets] = useState<ReportAsset[]>(snapshot ? reportAssetFixtures : [])
@@ -474,7 +476,7 @@ export function ReportAssetsPage() {
   return <AppShell className="report-assets-shell report-workbench-shell" eyebrow="智能报告" title="报告中心" lockBusinessDomain>
     <div className={`report-workbench ${selected ? 'is-detail-open' : ''}`.trim()}>
       <section className="report-library-panel" aria-label="报告资产列表">
-        <header className="report-library-header"><div><h1>报告中心</h1><p>统一管理与发现报告资产，支持浏览、协作与发布</p></div><AppButton variant="primary" size="small" type="button" onClick={() => navigate(snapshot ? '/reports/new?snapshot=runtime-draft' : '/reports/new')}><Plus size={16} weight="bold" />新建报告</AppButton></header>
+        <header className="report-library-header"><div><h1>报告中心</h1><p>统一管理与发现报告资产，支持浏览、协作与发布</p></div><AppButton variant="primary" size="small" type="button" onClick={() => snapshot ? navigate('/reports/new?snapshot=runtime-draft') : setNewOpen(true)}><Plus size={16} weight="bold" />新建报告</AppButton></header>
 
         <div className="report-library-controls">
           <label className="report-search"><MagnifyingGlass size={17} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索报告名称或编码" aria-label="搜索报告名称或编码" /></label>
@@ -500,7 +502,7 @@ export function ReportAssetsPage() {
           {viewMode === 'list' && !loading && !error && visibleAssets.length > 0 && <div className="report-library-table-head" aria-hidden="true"><span>报告名称 / 编码</span><span>所有者</span><span>版本 / 草稿</span><span>状态</span><span>最近更新</span><span>可见范围</span><i /></div>}
           {loading && <div className="report-assets-feedback"><span className="report-loading-spinner" />正在加载报告资产…</div>}
           {!loading && error && <div className="report-assets-feedback is-error"><WarningCircle size={24} /><strong>报告暂时无法加载</strong><p>{error}</p><AppButton link type="button" onClick={() => void loadAssets()}>重新加载</AppButton></div>}
-          {!loading && !error && visibleAssets.length === 0 && <div className="report-assets-feedback"><Archive size={27} /><strong>{query || lifecycle !== 'ALL' || scope !== 'all' ? '没有符合条件的报告' : '当前领域还没有报告'}</strong><p>{query || lifecycle !== 'ALL' || scope !== 'all' ? '调整搜索或筛选条件后重试。' : '创建第一份受治理报告，或等待有权限的报告共享给你。'}</p>{query || lifecycle !== 'ALL' || scope !== 'all' ? <AppButton link type="button" onClick={() => { setQuery(''); setLifecycle('ALL'); setScope('all') }}>清除筛选</AppButton> : <AppButton variant="primary" size="small" type="button" onClick={() => navigate(snapshot ? '/reports/new?snapshot=runtime-draft' : '/reports/new')}>新建报告</AppButton>}</div>}
+          {!loading && !error && visibleAssets.length === 0 && <div className="report-assets-feedback"><Archive size={27} /><strong>{query || lifecycle !== 'ALL' || scope !== 'all' ? '没有符合条件的报告' : '当前领域还没有报告'}</strong><p>{query || lifecycle !== 'ALL' || scope !== 'all' ? '调整搜索或筛选条件后重试。' : '创建第一份受治理报告，或等待有权限的报告共享给你。'}</p>{query || lifecycle !== 'ALL' || scope !== 'all' ? <AppButton link type="button" onClick={() => { setQuery(''); setLifecycle('ALL'); setScope('all') }}>清除筛选</AppButton> : <AppButton variant="primary" size="small" type="button" onClick={() => snapshot ? navigate('/reports/new?snapshot=runtime-draft') : setNewOpen(true)}>新建报告</AppButton>}</div>}
           {!loading && !error && viewMode === 'list' && visibleAssets.map(asset => <AssetListRow key={asset.id} asset={asset} selected={asset.id === selected?.id} onSelect={() => setSelectedID(asset.id)} />)}
           {!loading && !error && viewMode === 'grid' && <div className="report-library-grid">{visibleAssets.map(asset => <AssetGridCard key={asset.id} asset={asset} selected={asset.id === selected?.id} onSelect={() => setSelectedID(asset.id)} />)}</div>}
           {!loading && !error && visibleAssets.length > 0 && nextCursor && <AppButton plain size="small" className="report-load-more" type="button" disabled={loadingMore} onClick={() => void loadAssets(nextCursor, true)}>{loadingMore ? '正在加载…' : '加载更多报告'}</AppButton>}
@@ -526,6 +528,7 @@ export function ReportAssetsPage() {
     {shareAsset && <ShareDialog asset={shareAsset} snapshot={snapshot} onClose={() => setShareAsset(null)} />}
     {archiveAsset && <LifecycleDialog asset={archiveAsset} busy={transitionBusy} error={transitionError} onClose={() => setArchiveAsset(null)} onConfirm={reason => void transition(archiveAsset, reason, false)} />}
     {restoreAsset && <LifecycleDialog asset={restoreAsset} restore busy={transitionBusy} error={transitionError} onClose={() => setRestoreAsset(null)} onConfirm={reason => void transition(restoreAsset, reason, true)} />}
+    {newOpen && <NewReportDialog onClose={() => setNewOpen(false)} />}
     {toast && <div className="report-toast" role="status"><Check size={16} weight="bold" />{toast}</div>}
   </AppShell>
 }
