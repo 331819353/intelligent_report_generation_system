@@ -119,11 +119,15 @@ function NewReportCanvas() {
   </div>
 }
 
+type NewReportMode = 'blank' | 'template' | 'ai' | 'import'
+
+const newReportModeLabels: Record<NewReportMode, string> = { blank: '空白', template: '模板', ai: 'AI 生成', import: 'JSON 导入' }
+
 /**
- * 新建面板提供三条并列入口：
- *  - 空白新建与模板新建：只依赖已发布的数据集版本，未配置模型提供方时依然可用；
- *  - AI 生成：额外需要可用的模型提供方，失败时回退到空白新建。
- * 三条入口产出的都是同一种 Report Definition，进入同一个编辑器与同一条发布链。
+ * 新建面板：公共信息（名称、类型、数据来源）+ 四种起步方式页签 + 始终可见的主按钮。
+ *  - 空白 / 模板 / JSON 导入：只依赖已发布的数据集版本，未配置模型提供方时依然可用；
+ *  - AI 生成：额外需要可用的模型提供方，失败时可改用空白新建。
+ * 四条入口产出的都是同一种 Report Definition，进入同一个编辑器与同一条发布链。
  */
 function NewReportTaskPanel({
   name, reportType, intent, contexts, contextId, contextsLoading, contextsError, templates, templatesLoading, selectedTemplateId, creating, error,
@@ -139,7 +143,7 @@ function NewReportTaskPanel({
   templates: ReportStarterTemplate[]
   templatesLoading: boolean
   selectedTemplateId: string
-  creating: '' | 'blank' | 'template' | 'ai' | 'import'
+  creating: '' | NewReportMode
   error: string
   importText: string
   onName: (value: string) => void
@@ -153,75 +157,82 @@ function NewReportTaskPanel({
   onCreateTemplate: () => void
   onGenerate: () => void
 }) {
+  const [mode, setMode] = useState<NewReportMode>('blank')
   const selected = contexts.find(item => item.dataContext.id === contextId)
   const ready = !contextsLoading && !contextsError && contexts.length > 0
+  const busy = Boolean(creating)
+  const primary = {
+    blank: { label: '创建空白报告', icon: <NotePencil size={16} />, disabled: !ready || !name.trim(), run: onCreateBlank },
+    template: { label: '使用所选模板创建', icon: <CirclesFour size={16} />, disabled: !ready || !selectedTemplateId || !name.trim(), run: onCreateTemplate },
+    ai: { label: '让 AI 生成', icon: <MagicWand size={16} />, disabled: !ready || !intent.trim(), run: onGenerate },
+    import: { label: '导入为新草稿', icon: <BracketsCurly size={16} />, disabled: !importText.trim(), run: onImport },
+  }[mode]
+
   return <aside className="report-editor-task-panel report-editor-new-panel">
-    <header><div><h2>新建报告</h2><span>草稿 r0</span></div><em className={creating ? 'is-pending' : ''}>{creating ? '创建中' : '待创建'}</em></header>
+    <header><div><h2>新建{reportTypeLabels[reportType].name}</h2><span>草稿 r0</span></div><em className={busy ? 'is-pending' : ''}>{busy ? '创建中' : '待创建'}</em></header>
 
-    <section className="report-editor-new-form">
-      <label>报告名称
-        <input value={name} onChange={event => onName(event.target.value)} placeholder="例如：2026 年 7 月经营月报" maxLength={80} />
-      </label>
-      <fieldset className="report-editor-type-picker">
-        <legend>类型</legend>
-        {(Object.keys(reportTypeLabels) as ReportType[]).map(type => <label key={type} className={reportType === type ? 'is-selected' : ''}>
-          <input type="radio" name="report-type" value={type} checked={reportType === type} onChange={() => onReportType(type)} />
-          <span><strong>{reportTypeLabels[type].name}</strong><small>{reportTypeLabels[type].hint}</small></span>
-        </label>)}
-      </fieldset>
-      <label>数据来源
-        <select aria-label="受治理数据上下文" value={contextId} disabled={!ready} onChange={event => onContext(event.target.value)}>
-          {contexts.map(item => <option key={item.dataContext.id} value={item.dataContext.id}>{item.name}</option>)}
-        </select>
-      </label>
-      {contextsLoading && <p className="report-editor-new-hint"><SpinnerGap className="is-spinning" size={14} />正在读取当前领域可用的已发布数据集…</p>}
-      {contextsError && <p className="report-editor-new-hint is-error"><WarningCircle size={14} />{contextsError}</p>}
-      {ready && selected && <p className="report-editor-new-hint">
-        <Info size={14} />
-        <span>
-          {(selected.description || '已发布数据集版本').replace(/[。;；]\s*$/, '')}。
-          可用字段 {selected.fields.length} 个（已按你的列权限裁剪）。
-        </span>
-      </p>}
-      {!contextsLoading && !contextsError && contexts.length === 0 && <p className="report-editor-new-hint is-error">
-        <WarningCircle size={14} />当前业务领域还没有已发布的数据集版本，请先在「数据集」中发布一个版本。
-      </p>}
-    </section>
+    <div className="report-editor-new-scroll">
+      <section className="report-editor-new-form">
+        <label>名称
+          <input value={name} onChange={event => onName(event.target.value)} placeholder="例如：2026 年 7 月经营月报" maxLength={80} />
+        </label>
+        <fieldset className="report-editor-type-picker">
+          <legend>类型</legend>
+          {(Object.keys(reportTypeLabels) as ReportType[]).map(type => <label key={type} className={reportType === type ? 'is-selected' : ''}>
+            <input type="radio" name="report-type" value={type} checked={reportType === type} onChange={() => onReportType(type)} />
+            <span><strong>{reportTypeLabels[type].name}</strong><small>{reportTypeLabels[type].hint}</small></span>
+          </label>)}
+        </fieldset>
+        {mode !== 'import' && <label>数据来源
+          <select aria-label="受治理数据上下文" value={contextId} disabled={!ready} onChange={event => onContext(event.target.value)}>
+            {contexts.map(item => <option key={item.dataContext.id} value={item.dataContext.id}>{item.name}</option>)}
+          </select>
+        </label>}
+        {contextsLoading && <p className="report-editor-new-hint"><SpinnerGap className="is-spinning" size={14} />正在读取当前领域可用的已发布数据集…</p>}
+        {contextsError && <p className="report-editor-new-hint is-error"><WarningCircle size={14} />{contextsError}</p>}
+        {ready && selected && mode !== 'import' && <p className="report-editor-new-hint">
+          <Info size={14} />
+          <span>{(selected.description || '已发布数据集版本').replace(/[。;；]\s*$/, '')}。可用字段 {selected.fields.length} 个（已按你的列权限裁剪）；进入编辑器后还可以再加数据集。</span>
+        </p>}
+        {!contextsLoading && !contextsError && contexts.length === 0 && <p className="report-editor-new-hint is-error">
+          <WarningCircle size={14} />当前业务领域还没有已发布的数据集版本，请先在「数据集」中发布一个版本。
+        </p>}
+      </section>
 
-    <section className="report-editor-template-center" aria-label="报告模板中心">
-      <header><div><strong>从模板开始</strong><small>直接生成可编辑的真实草稿和受治理数据绑定</small></div><span>{templates.length} 个模板</span></header>
-      {templatesLoading && <p className="report-editor-new-hint"><SpinnerGap className="is-spinning" size={14} />正在读取模板…</p>}
-      <div>{templates.map(template => <button className={selectedTemplateId === template.id ? 'is-selected' : ''} type="button" key={template.id} onClick={() => onTemplate(template.id)}><span>{template.category}</span><strong>{template.name}</strong><small>{template.description}</small><em>{template.componentCount} 个组件</em></button>)}</div>
-      <button className="primary-button" type="button" disabled={Boolean(creating) || !ready || !selectedTemplateId || !name.trim()} onClick={onCreateTemplate}>{creating === 'template' ? <SpinnerGap className="is-spinning" size={16} /> : <CirclesFour size={16} />}{creating === 'template' ? '正在创建…' : '使用所选模板'}</button>
-    </section>
+      <div className="report-editor-panel-tabs" role="tablist" aria-label="起步方式">
+        {(Object.keys(newReportModeLabels) as NewReportMode[]).map(item => <button key={item} type="button" role="tab" aria-selected={mode === item}
+          className={mode === item ? 'is-active' : ''} onClick={() => setMode(item)}>{newReportModeLabels[item]}</button>)}
+      </div>
 
-    {error && <div className="report-editor-new-error" role="alert"><WarningCircle size={15} /><span>{error}</span></div>}
+      <section className="report-editor-new-mode">
+        {mode === 'blank' && <p className="report-editor-new-hint"><Info size={14} /><span>创建空白草稿，随后在编辑器中添加数据集、卡片、筛选器与联动。不需要模型提供方。</span></p>}
+        {mode === 'template' && <div className="report-editor-template-center">
+          <header><div><strong>从模板开始</strong><small>直接生成可编辑的真实草稿和受治理数据绑定</small></div><span>{templates.length} 个模板</span></header>
+          {templatesLoading && <p className="report-editor-new-hint"><SpinnerGap className="is-spinning" size={14} />正在读取模板…</p>}
+          <div>{templates.map(template => <button className={selectedTemplateId === template.id ? 'is-selected' : ''} type="button" key={template.id} onClick={() => onTemplate(template.id)}><span>{template.category}</span><strong>{template.name}</strong><small>{template.description}</small><em>{template.componentCount} 个组件</em></button>)}</div>
+        </div>}
+        {mode === 'ai' && <div className="report-editor-new-actions">
+          <article>
+            <div><strong>让 AI 生成结构</strong><small>由 AI 规划章节与组件并生成初始草稿；需要已配置的模型提供方，生成结果仍需人工确认后才能发布。</small></div>
+            <textarea aria-label="AI 报告要求" value={intent} onChange={event => onIntent(event.target.value)} placeholder="描述报告目标、受众与期间…" />
+          </article>
+        </div>}
+        {mode === 'import' && <div className="report-editor-new-actions">
+          <article>
+            <div><strong>从 JSON 导入</strong><small>粘贴一份 Report Definition 1.0（编辑器「定义 JSON」导出的内容）。导入时会分配新的报告 ID 与编码；名称留空则沿用 JSON 中的名称。</small></div>
+            <textarea aria-label="报告定义 JSON" value={importText} onChange={event => onImportText(event.target.value)} placeholder='{"schemaVersion":"1.0","metadata":{...},"dataContexts":[...],"pages":[...],"components":[...]}' spellCheck={false} />
+          </article>
+        </div>}
+      </section>
+    </div>
 
-    <section className="report-editor-new-actions">
-      <article>
-        <div><strong>空白报告</strong><small>创建空白草稿，随后在编辑器中手动添加组件与数据绑定。不需要模型提供方。</small></div>
-        <button className="primary-button" type="button" disabled={Boolean(creating) || !ready || !name.trim()} onClick={onCreateBlank}>
-          {creating === 'blank' ? <SpinnerGap className="is-spinning" size={16} /> : <NotePencil size={16} />}
-          <span>{creating === 'blank' ? '创建中' : '创建空白报告'}</span>
-        </button>
-      </article>
-      <article>
-        <div><strong>让 AI 生成结构</strong><small>由 AI 规划章节与组件并生成初始草稿；需要已配置的模型提供方，生成结果仍需人工确认后才能发布。</small></div>
-        <textarea aria-label="AI 报告要求" value={intent} onChange={event => onIntent(event.target.value)} placeholder="描述报告目标、受众与期间…" />
-        <button className="quiet-button" type="button" disabled={Boolean(creating) || !ready || !intent.trim()} onClick={onGenerate}>
-          {creating === 'ai' ? <SpinnerGap className="is-spinning" size={16} /> : <MagicWand size={16} />}
-          <span>{creating === 'ai' ? '生成中' : '让 AI 生成'}</span>
-        </button>
-      </article>
-      <article>
-        <div><strong>从 JSON 导入</strong><small>粘贴一份 Report Definition 1.0（编辑器「定义 JSON」导出的内容）。导入时会分配新的报告 ID 与编码，随后按同一条校验与发布链处理。</small></div>
-        <textarea aria-label="报告定义 JSON" value={importText} onChange={event => onImportText(event.target.value)} placeholder='{"schemaVersion":"1.0","metadata":{...},"dataContexts":[...],"pages":[...],"components":[...]}' spellCheck={false} />
-        <button className="quiet-button" type="button" disabled={Boolean(creating) || !importText.trim()} onClick={onImport}>
-          {creating === 'import' ? <SpinnerGap className="is-spinning" size={16} /> : <BracketsCurly size={16} />}
-          <span>{creating === 'import' ? '导入中' : '导入为新草稿'}</span>
-        </button>
-      </article>
-    </section>
+    <footer className="report-editor-new-footer">
+      {error && <div className="report-editor-new-error" role="alert"><WarningCircle size={15} /><span>{error}</span></div>}
+      <button className="primary-button" type="button" disabled={busy || primary.disabled} onClick={primary.run}>
+        {busy ? <SpinnerGap className="is-spinning" size={16} /> : primary.icon}
+        <span>{busy ? '正在创建…' : primary.label}</span>
+      </button>
+    </footer>
   </aside>
 }
 

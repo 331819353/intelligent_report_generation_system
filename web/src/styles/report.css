@@ -2165,3 +2165,13 @@
 .report-editor-json { width: calc(100% - 32px); margin: 10px 16px 0; border: 1px solid #dfe4eb; border-radius: 8px; padding: 10px; background: #f8fafc; color: #2e394a; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
 /* 新建面板内容纵向可滚动（类型选择与 JSON 导入加入后更长），不能再被任务面板的 overflow: hidden 裁掉。 */
 .report-editor-task-panel.report-editor-new-panel { display: flex; overflow-y: auto; }
+/* 新建面板：头部 + 可滚动正文 + 始终可见的主按钮 */
+.report-editor-task-panel.report-editor-new-panel { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
+.report-editor-new-scroll { min-height: 0; overflow-y: auto; }
+.report-editor-new-panel .report-editor-panel-tabs { border-top: 1px solid #e5e9ef; }
+.report-editor-new-mode { background: #fff; }
+.report-editor-new-mode > .report-editor-new-hint { padding: 12px 13px; }
+.report-editor-new-mode .report-editor-template-center { border-top: 0; }
+.report-editor-new-mode .report-editor-new-actions textarea { height: 110px; }
+.report-editor-new-footer { display: grid; gap: 8px; border-top: 1px solid #e5e9ef; padding: 10px 13px 12px; background: #fff; }
+.report-editor-new-footer .primary-button { min-height: 38px; justify-content: center; }
