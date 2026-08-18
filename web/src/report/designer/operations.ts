@@ -3,7 +3,7 @@ import type { ComponentManifest, ManifestIndex } from '../render/manifests.ts'
 import { minimumSize, recommendedSize } from '../render/manifests.ts'
 import {
   canvasOf, findBlock, findComponentBlock, orderedSections,
-  type BlockType, type ComponentOptions, type FieldBinding,
+  type BlockType, type ComponentOptions, type FieldBinding, type GlobalFilter,
   type Block, type GridRect, type Page, type ReportComponent, type ReportDefinition, type Section, type Zone,
 } from '../render/schema.ts'
 import { findFreeRect, resolveLayout, resolveSlotPlacement } from './placement.ts'
@@ -124,12 +124,19 @@ export function addToCardOperations(input: AddToCardInput): { operations: Editor
   return { operations, componentId }
 }
 
-/** 组件构造在「新建卡片」与「加入卡片」之间共用，避免两处默认值漂移。 */
-function buildComponent(
-  componentId: string, manifest: ComponentManifest, title: string,
-  dataContextId: string, fields: DataContextField[],
-): ReportComponent {
-  const dimensionFields = fields.filter(field => field.role !== 'MEASURE')
+/**
+ * 按数据集字段角色确定性地填充一份满足组件合同下限的绑定：维度优先取时间/类目
+ * 字段，度量取 MEASURE 字段。这是“不依赖模型提供方”的保底识别；AI 识别只是在
+ * 同一份字段目录上给出更贴合卡片意图的选择。
+ */
+export function defaultBinding(
+  manifest: ComponentManifest, fields: DataContextField[],
+): { dimensions: FieldBinding[]; measures: FieldBinding[] } {
+  const rank = (field: DataContextField) =>
+    field.role === 'TIME' || field.semanticType === 'DATE' || field.semanticType === 'DATETIME' ? 0
+      : field.role === 'DIMENSION' || field.semanticType === 'CATEGORY' || field.semanticType === 'REGION' ? 1
+        : field.role === 'IDENTIFIER' ? 3 : 2
+  const dimensionFields = fields.filter(field => field.role !== 'MEASURE').sort((left, right) => rank(left) - rank(right))
   const measureFields = fields.filter(field => field.role === 'MEASURE')
   const dimensions: FieldBinding[] = Array.from({ length: manifest.dataContract.dimensions.min }, (_, index) => ({
     role: preferredRole(manifest, true), field: dimensionFields[index]?.code ?? '',
@@ -137,6 +144,15 @@ function buildComponent(
   const measures: FieldBinding[] = Array.from({ length: manifest.dataContract.measures.min }, (_, index) => ({
     role: preferredRole(manifest, false), field: measureFields[index]?.code ?? '',
   }))
+  return { dimensions, measures }
+}
+
+/** 组件构造在「新建卡片」与「加入卡片」之间共用，避免两处默认值漂移。 */
+function buildComponent(
+  componentId: string, manifest: ComponentManifest, title: string,
+  dataContextId: string, fields: DataContextField[],
+): ReportComponent {
+  const { dimensions, measures } = defaultBinding(manifest, fields)
   return {
     id: componentId,
     templateRef: { type: manifest.type, version: manifest.version },
@@ -246,7 +262,8 @@ export function updateComponentOperations(
   ]
   if (!binding) return operations
   const empty = binding.dimensions.length === 0 && binding.measures.length === 0
-  const contextID = component.dataBinding?.dataContextId ?? dataContextId
+  // 卡片可以显式改绑到报告内的另一个数据集；未指定时沿用组件当前的数据上下文。
+  const contextID = dataContextId ?? component.dataBinding?.dataContextId
   operations.push(empty || !contextID
     ? { op: 'DATA_BINDING_UPDATE', targetId: component.id, payload: { mode: 'CLEAR', dataBinding: null } }
     : {
@@ -360,4 +377,112 @@ export function zoneReorderOperations(block: Block, zoneId: string, direction: -
     { op: 'ZONE_REORDER', targetId: zoneId, payload: { order: index + direction + 1 } },
     { op: 'ZONE_REORDER', targetId: adjacent.id, payload: { order: index + 1 } },
   ]
+}
+
+/**
+ * 更换卡片的展示类型：同一组件 ID 换成另一份组件清单。标题/副标题保留，其它表现
+ * 属性按新清单的 optionSchema 过滤后叠加新默认值；数据绑定按新合同的角色白名单
+ * 与数量上限重映射，多余的维度/度量被截掉，不足的留给作者补齐（保存前面板会校验）。
+ */
+export function replaceComponentOperations(
+  component: ReportComponent,
+  manifest: ComponentManifest,
+): EditorOperation[] {
+  const allowed = new Set(Object.keys(manifest.optionSchema.properties ?? {}))
+  const kept = Object.fromEntries(Object.entries(component.options ?? {}).filter(([name]) => allowed.has(name)))
+  const options: ComponentOptions = {
+    ...(manifest.defaultOptions as ComponentOptions), ...kept,
+    title: component.options.title, subtitle: component.options.subtitle,
+  }
+  let dataBinding = component.dataBinding
+  if (dataBinding && dataBinding.bindingMode === 'DATASET_FIELD') {
+    const dimensions = (dataBinding.dimensions ?? []).slice(0, manifest.dataContract.dimensions.max)
+      .map(item => ({ ...item, role: manifest.dataContract.roles.includes(item.role) ? item.role : preferredRole(manifest, true) }))
+    const measures = (dataBinding.measures ?? []).slice(0, manifest.dataContract.measures.max)
+      .map(item => ({ ...item, role: manifest.dataContract.roles.includes(item.role) ? item.role : preferredRole(manifest, false) }))
+    dataBinding = dimensions.length || measures.length
+      ? { ...dataBinding, dimensions, measures }
+      : undefined
+  }
+  const replacement: ReportComponent = {
+    id: component.id,
+    templateRef: { type: manifest.type, version: manifest.version },
+    ...(dataBinding ? { dataBinding } : {}),
+    options,
+  }
+  return [{ op: 'COMPONENT_REPLACE', targetId: component.id, payload: { component: replacement } }]
+}
+
+/**
+ * 报告级数据集：DATA_CONTEXT_CREATE 只声明想用的数据集版本，服务端会从当前用户
+ * 可见的受治理目录重新解析 ID 与查询策略；删除受定义校验保护，仍被卡片或筛选器
+ * 引用的数据集无法移除。
+ */
+export function addDataContextOperations(
+  definition: ReportDefinition,
+  candidate: { id: string; datasetId: string; datasetVersionId: string; alias?: string },
+): EditorOperation[] {
+  return [{
+    op: 'DATA_CONTEXT_CREATE', targetId: definition.metadata.id,
+    payload: {
+      dataContext: {
+        id: candidate.id, datasetId: candidate.datasetId, datasetVersionId: candidate.datasetVersionId,
+        alias: candidate.alias || candidate.datasetId, defaultParameters: [],
+        queryPolicy: { timeoutMs: 10000, maxRows: 5000, cacheTtlSeconds: 300 },
+      },
+    },
+  }]
+}
+
+export function removeDataContextOperations(dataContextId: string): EditorOperation[] {
+  return [{ op: 'DATA_CONTEXT_DELETE', targetId: dataContextId, payload: {} }]
+}
+
+/** 数据集在报告内是否仍被卡片绑定或筛选器引用；被引用时不能移除。 */
+export function dataContextInUse(definition: ReportDefinition, dataContextId: string): boolean {
+  return definition.components.some(component => component.dataBinding?.dataContextId === dataContextId) ||
+    (definition.globalFilters ?? []).some(filter => filter.fieldRef.dataContextId === dataContextId)
+}
+
+export type FilterDraft = {
+  dataContextId: string
+  field: string
+  type: GlobalFilter['type']
+  /** 全报告生效，或只作用于选中的卡片。 */
+  scope: { type: 'REPORT' } | { type: 'BLOCK'; targetIds: string[] }
+}
+
+/** 按字段的语义类型建议筛选器类型：时间字段用日期区间，度量用数值区间，其余多选。 */
+export function suggestedFilterType(field: DataContextField | undefined): GlobalFilter['type'] {
+  if (!field) return 'MULTI_SELECT'
+  if (field.role === 'TIME' || field.semanticType === 'DATE' || field.semanticType === 'DATETIME') return 'DATE_RANGE'
+  if (field.role === 'MEASURE') return 'NUMBER_RANGE'
+  if (field.semanticType === 'BOOLEAN') return 'SINGLE_SELECT'
+  return 'MULTI_SELECT'
+}
+
+/**
+ * 筛选器写入走 FILTER_CREATE / FILTER_UPDATE / FILTER_DELETE。筛选器的取值在运行页
+ * 顶部的筛选栏由使用者填写并由服务端解析生效；这里只声明字段、类型与作用范围。
+ */
+export function createFilterOperations(definition: ReportDefinition, draft: FilterDraft, newId: () => string): EditorOperation[] {
+  const filter: GlobalFilter = {
+    id: newId(), type: draft.type,
+    fieldRef: { dataContextId: draft.dataContextId, field: draft.field },
+    scope: draft.scope.type === 'REPORT' ? { type: 'REPORT', targetIds: [] } : { type: 'BLOCK', targetIds: draft.scope.targetIds },
+  }
+  return [{ op: 'FILTER_CREATE', targetId: definition.metadata.id, payload: { filter } }]
+}
+
+export function updateFilterOperations(filter: GlobalFilter, draft: FilterDraft): EditorOperation[] {
+  const next: GlobalFilter = {
+    ...filter, type: draft.type,
+    fieldRef: { dataContextId: draft.dataContextId, field: draft.field },
+    scope: draft.scope.type === 'REPORT' ? { type: 'REPORT', targetIds: [] } : { type: 'BLOCK', targetIds: draft.scope.targetIds },
+  }
+  return [{ op: 'FILTER_UPDATE', targetId: filter.id, payload: { filter: next } }]
+}
+
+export function deleteFilterOperations(filterId: string): EditorOperation[] {
+  return [{ op: 'FILTER_DELETE', targetId: filterId, payload: {} }]
 }

@@ -93,6 +93,20 @@ func NewPostgresFieldCatalog(pool *pgxpool.Pool) *PostgresFieldCatalog {
 	return &PostgresFieldCatalog{pool: pool, policies: policy.NewPostgresStore(pool)}
 }
 
+// FieldDefinitionCatalog exposes the role-bearing field metadata a per-card
+// binding suggestion needs. Same policy trimming as AllowedFields.
+type FieldDefinitionCatalog interface {
+	AllowedFieldDefinitions(context.Context, store.Identity, report.DataContext) ([]FieldDefinition, error)
+}
+
+func (catalog *PostgresFieldCatalog) AllowedFieldDefinitions(
+	ctx context.Context,
+	identity store.Identity,
+	dataContext report.DataContext,
+) ([]FieldDefinition, error) {
+	return catalog.allowedFieldDefinitions(ctx, identity, dataContext)
+}
+
 func (catalog *PostgresFieldCatalog) AllowedFields(
 	ctx context.Context,
 	identity store.Identity,

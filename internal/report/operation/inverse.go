@@ -183,6 +183,14 @@ func Invert(operation Operation, beforeDefinition report.ReportDefinition) (Oper
 			mode = DataBindingSet
 		}
 		result = Operation{Op: DataBindingUpdate, TargetID: component.ID, Payload: &DataBindingUpdatePayload{Mode: mode, DataBinding: component.DataBinding}}
+	case DataContextCreate:
+		result = Operation{Op: DataContextDelete, TargetID: operation.Payload.(*DataContextCreatePayload).DataContext.ID, Payload: &DataContextDeletePayload{}}
+	case DataContextDelete:
+		index := dataContextIndex(before, operation.TargetID)
+		if index < 0 {
+			return Operation{}, missing("data context", operation.TargetID)
+		}
+		result = Operation{Op: DataContextCreate, TargetID: before.Metadata.ID, Payload: &DataContextCreatePayload{DataContext: before.DataContexts[index]}}
 	case FilterCreate:
 		result = Operation{Op: FilterDelete, TargetID: operation.Payload.(*FilterCreatePayload).Filter.ID, Payload: &FilterDeletePayload{}}
 	case FilterUpdate:

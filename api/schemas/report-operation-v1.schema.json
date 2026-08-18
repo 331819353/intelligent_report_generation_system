@@ -85,6 +85,8 @@
         { "$ref": "#/$defs/componentCopyOperation" },
         { "$ref": "#/$defs/componentDeleteOperation" },
         { "$ref": "#/$defs/dataBindingUpdateOperation" },
+        { "$ref": "#/$defs/dataContextCreateOperation" },
+        { "$ref": "#/$defs/dataContextDeleteOperation" },
         { "$ref": "#/$defs/filterCreateOperation" },
         { "$ref": "#/$defs/filterUpdateOperation" },
         { "$ref": "#/$defs/filterDeleteOperation" },
@@ -260,6 +262,16 @@
       "required": ["op", "targetId", "payload"],
       "properties": { "op": { "const": "DATA_BINDING_UPDATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/dataBindingUpdatePayload" } }
     },
+    "dataContextCreateOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "DATA_CONTEXT_CREATE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/dataContextCreatePayload" } }
+    },
+    "dataContextDeleteOperation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["op", "targetId", "payload"],
+      "properties": { "op": { "const": "DATA_CONTEXT_DELETE" }, "targetId": { "$ref": "#/$defs/stableId" }, "payload": { "$ref": "#/$defs/emptyPayload" } }
+    },
     "filterCreateOperation": {
       "type": "object", "additionalProperties": false,
       "required": ["op", "targetId", "payload"],
@@ -411,6 +423,10 @@
         { "properties": { "mode": { "const": "SET" }, "dataBinding": { "$ref": "report-definition-v1.schema.json#/$defs/dataBinding" } } },
         { "properties": { "mode": { "const": "CLEAR" }, "dataBinding": { "type": "null" } } }
       ]
+    },
+    "dataContextCreatePayload": {
+      "type": "object", "additionalProperties": false, "required": ["dataContext"],
+      "properties": { "dataContext": { "$ref": "report-definition-v1.schema.json#/$defs/dataContext" } }
     },
     "filterCreatePayload": {
       "type": "object", "additionalProperties": false, "required": ["filter"],

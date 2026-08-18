@@ -64,6 +64,8 @@ const (
 	ComponentCopy        Type = "COMPONENT_COPY"
 	ComponentDelete      Type = "COMPONENT_DELETE"
 	DataBindingUpdate    Type = "DATA_BINDING_UPDATE"
+	DataContextCreate    Type = "DATA_CONTEXT_CREATE"
+	DataContextDelete    Type = "DATA_CONTEXT_DELETE"
 	FilterCreate         Type = "FILTER_CREATE"
 	FilterUpdate         Type = "FILTER_UPDATE"
 	FilterDelete         Type = "FILTER_DELETE"
@@ -83,6 +85,7 @@ var allTypes = []Type{
 	SlotCreate, SlotMerge, SlotSplit, SlotUpdate, SlotDelete,
 	ComponentCreate, ComponentUpdate, ComponentReplace, ComponentCopy, ComponentDelete,
 	DataBindingUpdate,
+	DataContextCreate, DataContextDelete,
 	FilterCreate, FilterUpdate, FilterDelete,
 	InteractionCreate, InteractionUpdate, InteractionDelete,
 	InsightUpdate, InsightRegenerate,
@@ -255,6 +258,18 @@ type DataBindingUpdatePayload struct {
 	Mode        DataBindingUpdateMode `json:"mode"`
 	DataBinding *report.DataBinding   `json:"dataBinding"`
 }
+
+// DataContextCreatePayload adds a governed dataset version to the report. The
+// HTTP layer re-derives the context from the actor-visible catalog before the
+// bundle is applied, so client-supplied dataset identifiers are never trusted
+// on their own; the payload only names the intended dataset version.
+type DataContextCreatePayload struct {
+	DataContext report.DataContext `json:"dataContext"`
+}
+
+// DataContextDeletePayload removes a data context; definition validation
+// rejects the bundle when a component binding or filter still references it.
+type DataContextDeletePayload struct{}
 
 type FilterCreatePayload struct {
 	Filter report.GlobalFilter `json:"filter"`
@@ -578,6 +593,10 @@ func newPayload(operationType Type) (Payload, error) {
 		return &ComponentDeletePayload{}, nil
 	case DataBindingUpdate:
 		return &DataBindingUpdatePayload{}, nil
+	case DataContextCreate:
+		return &DataContextCreatePayload{}, nil
+	case DataContextDelete:
+		return &DataContextDeletePayload{}, nil
 	case FilterCreate:
 		return &FilterCreatePayload{}, nil
 	case FilterUpdate:
@@ -653,6 +672,8 @@ func (*ComponentReplacePayload) operationPayload()     {}
 func (*ComponentCopyPayload) operationPayload()        {}
 func (*ComponentDeletePayload) operationPayload()      {}
 func (*DataBindingUpdatePayload) operationPayload()    {}
+func (*DataContextCreatePayload) operationPayload()    {}
+func (*DataContextDeletePayload) operationPayload()    {}
 func (*FilterCreatePayload) operationPayload()         {}
 func (*FilterUpdatePayload) operationPayload()         {}
 func (*FilterDeletePayload) operationPayload()         {}
@@ -763,6 +784,19 @@ func (payload *DataBindingUpdatePayload) Validate() error {
 	}
 	return nil
 }
+func (payload *DataContextCreatePayload) Validate() error {
+	if err := payload.DataContext.ID.Validate(); err != nil {
+		return fmt.Errorf("dataContext.id: %w", err)
+	}
+	if err := payload.DataContext.DatasetID.Validate(); err != nil {
+		return fmt.Errorf("dataContext.datasetId: %w", err)
+	}
+	if err := payload.DataContext.DatasetVersionID.Validate(); err != nil {
+		return fmt.Errorf("dataContext.datasetVersionId: %w", err)
+	}
+	return nil
+}
+func (*DataContextDeletePayload) Validate() error         { return nil }
 func (payload *FilterCreatePayload) Validate() error      { return payload.Filter.ID.Validate() }
 func (payload *FilterUpdatePayload) Validate() error      { return payload.Filter.ID.Validate() }
 func (*FilterDeletePayload) Validate() error              { return nil }

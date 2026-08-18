@@ -153,7 +153,10 @@ func selectSubtree(definition report.ReportDefinition, scope operation.Scope) ([
 func allowedScopedOperations() []operation.Type {
 	result := []operation.Type{}
 	for _, candidate := range operation.Types() {
-		if candidate != operation.TemplateApply && candidate != operation.PageDelete && candidate != operation.SectionDelete {
+		// Data contexts are governed dataset choices made by people through the
+		// catalog; the model edits structure and bindings inside them only.
+		if candidate != operation.TemplateApply && candidate != operation.PageDelete && candidate != operation.SectionDelete &&
+			candidate != operation.DataContextCreate && candidate != operation.DataContextDelete {
 			result = append(result, candidate)
 		}
 	}

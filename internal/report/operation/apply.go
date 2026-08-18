@@ -327,6 +327,21 @@ func applyOne(definition *report.ReportDefinition, operation Operation) error {
 		}
 		payload := operation.Payload.(*DataBindingUpdatePayload)
 		component.DataBinding = payload.DataBinding
+	case DataContextCreate:
+		created := operation.Payload.(*DataContextCreatePayload).DataContext
+		if dataContextIndex(*definition, created.ID) >= 0 {
+			return fmt.Errorf("data context %q already exists", created.ID)
+		}
+		definition.DataContexts = append(definition.DataContexts, created)
+	case DataContextDelete:
+		index := dataContextIndex(*definition, operation.TargetID)
+		if index < 0 {
+			return missing("data context", operation.TargetID)
+		}
+		if len(definition.DataContexts) == 1 {
+			return errors.New("a report keeps at least one data context")
+		}
+		definition.DataContexts = append(definition.DataContexts[:index], definition.DataContexts[index+1:]...)
 	case FilterCreate:
 		definition.GlobalFilters = append(definition.GlobalFilters, operation.Payload.(*FilterCreatePayload).Filter)
 	case FilterUpdate:
@@ -609,6 +624,15 @@ func componentByID(definition *report.ReportDefinition, id askdata.ID) (*report.
 		return nil, missing("component", id)
 	}
 	return &definition.Components[index], nil
+}
+
+func dataContextIndex(definition report.ReportDefinition, id askdata.ID) int {
+	for index := range definition.DataContexts {
+		if definition.DataContexts[index].ID == id {
+			return index
+		}
+	}
+	return -1
 }
 
 func filterIndex(definition report.ReportDefinition, id askdata.ID) int {

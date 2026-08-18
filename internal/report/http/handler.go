@@ -35,6 +35,10 @@ import (
 type AIOptions struct {
 	PlanGenerator reportai.PlanGenerator
 	EditGenerator reportai.ScopedEditGenerator
+	// BindingSuggester identifies a card's measures/dimensions from the governed
+	// field catalog of one dataset; optional — without it the editor keeps the
+	// deterministic role-based fill only.
+	BindingSuggester reportai.CardBindingSuggester
 	Reviewer      reportai.PublishReviewGenerator
 	Selector      reportai.DataContextSelector
 	Contexts      reportai.DataContextCatalog
@@ -106,6 +110,7 @@ func NewHandler(
 	mux.HandleFunc("POST /api/v1/reports/{id}/operations", handler.operations)
 	mux.HandleFunc("POST /api/v1/reports/{id}/ai/plan", handler.aiPlan)
 	mux.HandleFunc("POST /api/v1/reports/{id}/ai/preview", handler.aiPreview)
+	mux.HandleFunc("POST /api/v1/reports/{id}/ai/card-binding", handler.aiCardBinding)
 	mux.HandleFunc("POST /api/v1/reports/{id}/undo", handler.undo)
 	mux.HandleFunc("POST /api/v1/reports/{id}/redo", handler.redo)
 	mux.HandleFunc("POST /api/v1/reports/{id}/publish", handler.publish)
@@ -217,10 +222,16 @@ func (handler *Handler) createAI(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	var body struct {
-		Intent string `json:"intent"`
+		Intent     string `json:"intent"`
+		ReportType string `json:"reportType"`
 	}
 	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.Intent) == "" {
 		writeError(writer, http.StatusBadRequest, "REPORT_AI_REQUEST_INVALID", "report AI creation request is invalid")
+		return
+	}
+	reportType, typeOK := resolveReportType(body.ReportType)
+	if !typeOK {
+		writeError(writer, http.StatusBadRequest, "REPORT_AI_REQUEST_INVALID", "reportType must be REPORT or DASHBOARD")
 		return
 	}
 	body.Intent = strings.TrimSpace(body.Intent)
@@ -251,7 +262,7 @@ func (handler *Handler) createAI(writer http.ResponseWriter, request *http.Reque
 			break
 		}
 	}
-	base := newAIReportDefinition(reportID, selection.ReportName, body.Intent, selected.DataContext)
+	base := applyReportType(newAIReportDefinition(reportID, selection.ReportName, body.Intent, selected.DataContext), reportType)
 	reportRecord, initial, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
 		ID: reportID, Code: base.Metadata.Code, Name: base.Metadata.Name,
 		ReportType: base.Metadata.ReportType, Definition: base,
@@ -319,6 +330,35 @@ func (handler *Handler) createAI(writer http.ResponseWriter, request *http.Reque
 
 func newAIReportDefinition(reportID askdata.ID, name, intent string, dataContext reportmodel.DataContext) reportmodel.ReportDefinition {
 	return newReportDefinition(reportID, name, intent, dataContext, reportmodel.CreatedAI)
+}
+
+// resolveReportType maps the optional creation-time choice onto the closed
+// ReportType enum. 报告（REPORT）是分章节的分析文档，报表（DASHBOARD）是以卡片
+// 与筛选器为主的看板；两者共用同一份 Report Definition、同一个编辑器与发布链，
+// 类型只影响默认页面命名、运行页的展示策略与资产库分类。
+func resolveReportType(raw string) (reportmodel.ReportType, bool) {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "", string(reportmodel.ReportTypeReport):
+		return reportmodel.ReportTypeReport, true
+	case string(reportmodel.ReportTypeDashboard):
+		return reportmodel.ReportTypeDashboard, true
+	default:
+		return "", false
+	}
+}
+
+// applyReportType stamps the chosen type on a freshly built definition and
+// renames the default page for dashboards.
+func applyReportType(definition reportmodel.ReportDefinition, reportType reportmodel.ReportType) reportmodel.ReportDefinition {
+	definition.Metadata.ReportType = reportType
+	if reportType == reportmodel.ReportTypeDashboard {
+		for index := range definition.Pages {
+			if definition.Pages[index].Name == "报告正文" {
+				definition.Pages[index].Name = "看板"
+			}
+		}
+	}
+	return definition
 }
 
 func newReportDefinition(
@@ -396,9 +436,15 @@ func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Re
 		Name          string     `json:"name"`
 		Description   string     `json:"description"`
 		DataContextID askdata.ID `json:"dataContextId"`
+		ReportType    string     `json:"reportType"`
 	}
 	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.Name) == "" {
 		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "report name is required")
+		return
+	}
+	reportType, typeOK := resolveReportType(body.ReportType)
+	if !typeOK {
+		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "reportType must be REPORT or DASHBOARD")
 		return
 	}
 	candidates, err := handler.ai.Contexts.Candidates(request.Context(), identity, 30)
@@ -426,10 +472,10 @@ func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Re
 		}
 	}
 	reportID := askdata.ID(uuid.NewString())
-	definition := newReportDefinition(
+	definition := applyReportType(newReportDefinition(
 		reportID, strings.TrimSpace(body.Name), strings.TrimSpace(body.Description),
 		selected.DataContext, reportmodel.CreatedManually,
-	)
+	), reportType)
 	reportRecord, draft, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
 		ID: reportID, Code: definition.Metadata.Code, Name: definition.Metadata.Name,
 		ReportType: definition.Metadata.ReportType, Definition: definition,
@@ -488,9 +534,15 @@ func (handler *Handler) instantiateTemplate(writer http.ResponseWriter, request 
 		Name          string     `json:"name"`
 		Description   string     `json:"description"`
 		DataContextID askdata.ID `json:"dataContextId"`
+		ReportType    string     `json:"reportType"`
 	}
 	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.Name) == "" {
 		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "report name is required")
+		return
+	}
+	reportType, typeOK := resolveReportType(body.ReportType)
+	if !typeOK {
+		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "reportType must be REPORT or DASHBOARD")
 		return
 	}
 	candidates, err := handler.ai.Contexts.Candidates(request.Context(), identity, 30)
@@ -509,6 +561,7 @@ func (handler *Handler) instantiateTemplate(writer http.ResponseWriter, request 
 		writeError(writer, http.StatusUnprocessableEntity, "REPORT_TEMPLATE_NOT_APPLICABLE", err.Error())
 		return
 	}
+	definition = applyReportType(definition, reportType)
 	reportRecord, draft, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
 		ID: reportID, Code: definition.Metadata.Code, Name: definition.Metadata.Name,
 		ReportType: definition.Metadata.ReportType, Definition: definition,
@@ -670,6 +723,9 @@ func (handler *Handler) operations(writer http.ResponseWriter, request *http.Req
 	if bundle.AIRunID != nil {
 		aiRunID = *bundle.AIRunID
 	}
+	if !handler.trustDataContextOperations(writer, request, identity, bundle.Operations) {
+		return
+	}
 	draft, revision, err := handler.repository.SaveDraftWithRevision(request.Context(), identity, id, store.SaveInput{
 		ExpectedRevision: bundle.BaseRevision, Operations: bundle.Operations,
 		Source: string(bundle.Source), AIRunID: aiRunID, Scope: bundle.Scope,
@@ -685,6 +741,54 @@ func (handler *Handler) operations(writer http.ResponseWriter, request *http.Req
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"draft": draft, "revision": revision})
+}
+
+// trustDataContextOperations re-derives every DATA_CONTEXT_CREATE payload from
+// the actor-visible governed catalog. The client only names the dataset
+// version it wants; identifiers, dataset linkage and query policy come from the
+// server so a report can never bind a dataset the actor cannot read. Aliases
+// remain editable by people. AI bundles are not allowed to add data contexts.
+func (handler *Handler) trustDataContextOperations(
+	writer http.ResponseWriter, request *http.Request, identity store.Identity, operations []operation.Operation,
+) bool {
+	var candidates []reportai.DataContextCandidate
+	for index := range operations {
+		if operations[index].Op != operation.DataContextCreate {
+			continue
+		}
+		if handler.ai.Contexts == nil {
+			writeError(writer, http.StatusServiceUnavailable, "REPORT_DATA_CONTEXT_UNAVAILABLE", "governed data context catalog is unavailable")
+			return false
+		}
+		if candidates == nil {
+			loaded, err := handler.ai.Contexts.Candidates(request.Context(), identity, 30)
+			if err != nil {
+				writeReportError(writer, err)
+				return false
+			}
+			candidates = loaded
+		}
+		payload := operations[index].Payload.(*operation.DataContextCreatePayload)
+		trusted := false
+		for _, candidate := range candidates {
+			if candidate.DataContext.DatasetID != payload.DataContext.DatasetID ||
+				candidate.DataContext.DatasetVersionID != payload.DataContext.DatasetVersionID {
+				continue
+			}
+			resolved := candidate.DataContext
+			if alias := strings.TrimSpace(payload.DataContext.Alias); alias != "" {
+				resolved.Alias = alias
+			}
+			operations[index].Payload = &operation.DataContextCreatePayload{DataContext: resolved}
+			trusted = true
+			break
+		}
+		if !trusted {
+			writeError(writer, http.StatusUnprocessableEntity, "REPORT_DATA_CONTEXT_REJECTED", "the requested data context is not available to this actor")
+			return false
+		}
+	}
+	return true
 }
 
 func shouldAuditAIRejection(err error) bool {
@@ -848,6 +952,121 @@ func (handler *Handler) aiPreview(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"aiRunId": run.ID, "preview": preview})
+}
+
+// aiCardBinding lets the model identify a card's dimensions and measures from
+// one governed dataset. The suggestion is advisory: it is returned to the
+// editor, and only a subsequent USER operation bundle writes a binding.
+func (handler *Handler) aiCardBinding(writer http.ResponseWriter, request *http.Request) {
+	identity, reportID, ok := handler.subject(writer, request)
+	if !ok {
+		return
+	}
+	if handler == nil || handler.repository == nil || handler.aiAudit == nil || handler.ai.Fields == nil ||
+		handler.ai.Components == nil || handler.ai.BindingSuggester == nil {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_AI_UNAVAILABLE", "report AI card binding is unavailable")
+		return
+	}
+	definitions, ok := handler.ai.Fields.(reportai.FieldDefinitionCatalog)
+	if !ok {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_AI_UNAVAILABLE", "report AI field catalog is unavailable")
+		return
+	}
+	var body struct {
+		ComponentID     askdata.ID `json:"componentId"`
+		DataContextID   askdata.ID `json:"dataContextId"`
+		ManifestType    string     `json:"manifestType"`
+		ManifestVersion string     `json:"manifestVersion"`
+		Title           string     `json:"title"`
+		Intent          string     `json:"intent"`
+	}
+	if decodeJSON(request, &body) != nil || body.DataContextID.Validate() != nil || strings.TrimSpace(body.ManifestType) == "" {
+		writeError(writer, http.StatusBadRequest, "REPORT_AI_REQUEST_INVALID", "report AI card binding request is invalid")
+		return
+	}
+	draft, err := handler.repository.GetDraft(request.Context(), identity, reportID)
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	var dataContext *reportmodel.DataContext
+	for index := range draft.Definition.DataContexts {
+		if draft.Definition.DataContexts[index].ID == body.DataContextID {
+			dataContext = &draft.Definition.DataContexts[index]
+		}
+	}
+	if dataContext == nil {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_FIELDS_UNAVAILABLE", "the data context is not part of this report")
+		return
+	}
+	var manifest *template.Manifest
+	for _, candidate := range handler.ai.Components.List() {
+		if candidate.Type == body.ManifestType && (body.ManifestVersion == "" || candidate.Version == body.ManifestVersion) {
+			item := candidate
+			manifest = &item
+			break
+		}
+	}
+	if manifest == nil {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_REQUEST_INVALID", "unknown component manifest")
+		return
+	}
+	fieldDefinitions, err := definitions.AllowedFieldDefinitions(request.Context(), identity, *dataContext)
+	if err != nil || len(fieldDefinitions) == 0 {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_FIELDS_UNAVAILABLE", "no governed fields are available for report AI")
+		return
+	}
+	fields := make([]reportai.CardBindingField, 0, len(fieldDefinitions))
+	fieldNames := make([]string, 0, len(fieldDefinitions))
+	for _, field := range fieldDefinitions {
+		fields = append(fields, reportai.CardBindingField{Code: field.Code, Name: field.Name, Role: field.Role, SemanticType: field.SemanticType, CanonicalType: field.CanonicalType})
+		fieldNames = append(fieldNames, field.Code)
+	}
+	roles := make([]string, 0, len(manifest.DataContract.Roles))
+	for _, role := range manifest.DataContract.Roles {
+		roles = append(roles, string(role))
+	}
+	aiRequest := reportai.CardBindingRequest{
+		CardTitle: strings.TrimSpace(body.Title), ComponentType: manifest.Type, ComponentName: manifest.DisplayName,
+		Contract: reportai.CardBindingContract{
+			DimensionsMin: manifest.DataContract.Dimensions.Min, DimensionsMax: manifest.DataContract.Dimensions.Max,
+			MeasuresMin: manifest.DataContract.Measures.Min, MeasuresMax: manifest.DataContract.Measures.Max, Roles: roles,
+		},
+		DataContextName: dataContext.Alias, Fields: fields, Intent: strings.TrimSpace(body.Intent),
+	}
+	if err := reportai.ValidateCardBindingRequest(aiRequest); err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_REQUEST_INVALID", err.Error())
+		return
+	}
+	selection := []string{string(body.DataContextID)}
+	if body.ComponentID != "" {
+		selection = append(selection, string(body.ComponentID))
+	}
+	run, err := handler.aiAudit.StartRun(request.Context(), identity, reportai.StartRunInput{
+		ReportID: reportID, Kind: reportai.RunScopedEdit, PromptVersion: "report-card-binding-v1",
+		ModelPolicy: "governed-default", Summary: reportai.RequestSummary{
+			Intent: aiRequest.CardTitle + " " + aiRequest.Intent, SelectionIDs: selection, AvailableFields: fieldNames,
+		}, BaseRevision: &draft.RevisionNo,
+	})
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	ctx := reportai.WithInvocationIdentity(request.Context(), reportai.InvocationIdentity{
+		TenantID: identity.TenantID, ActorID: identity.ActorID, ReportID: reportID,
+	})
+	suggestion, err := handler.ai.BindingSuggester.SuggestCardBinding(ctx, aiRequest)
+	if err != nil {
+		handler.finishAIError(writer, request.Context(), identity, run.ID, reportai.RunFailed, "REPORT_AI_GENERATION_FAILED")
+		return
+	}
+	if err := handler.aiAudit.FinishRun(request.Context(), identity, run.ID, reportai.RunSucceeded, map[string]any{
+		"dimensionCount": len(suggestion.Dimensions), "measureCount": len(suggestion.Measures), "componentType": manifest.Type,
+	}, ""); err != nil {
+		writeError(writer, http.StatusInternalServerError, "REPORT_AI_AUDIT_FAILED", "report AI audit failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"aiRunId": run.ID, "suggestion": suggestion})
 }
 
 func (handler *Handler) reportAIReady(scoped bool) bool {

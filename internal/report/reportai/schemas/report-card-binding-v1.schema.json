@@ -1,0 +1,35 @@
+{
+  "title": "Report Card Binding v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["dimensions", "measures", "rationale"],
+  "properties": {
+    "dimensions": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "field"],
+        "properties": {
+          "role": { "type": "string", "enum": ["DIMENSION", "SERIES", "X_AXIS", "CATEGORY", "TIME", "COLOR", "LABEL", "DETAIL", "TOOLTIP"] },
+          "field": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      }
+    },
+    "measures": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "field"],
+        "properties": {
+          "role": { "type": "string", "enum": ["VALUE", "Y_AXIS", "SIZE"] },
+          "field": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      }
+    },
+    "rationale": { "type": "string", "maxLength": 400 }
+  }
+}

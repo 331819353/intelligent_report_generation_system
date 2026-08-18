@@ -26,6 +26,35 @@ var reportOperationSchema json.RawMessage
 //go:embed schemas/report-publish-review-v1.schema.json
 var reportPublishReviewSchema json.RawMessage
 
+//go:embed schemas/report-card-binding-v1.schema.json
+var reportCardBindingSchema json.RawMessage
+
+// The embedded schema files double as public API documents and therefore carry
+// "$schema"/"$id" metadata. The AI platform's strict structured-output contract
+// rejects unknown top-level keywords, so the model-facing copies are stripped
+// of that metadata once at start-up. Structural rules stay identical.
+func init() {
+	reportPlanSchema = aiFacingSchema(reportPlanSchema)
+	reportContextSchema = aiFacingSchema(reportContextSchema)
+	reportOperationSchema = aiFacingSchema(reportOperationSchema)
+	reportPublishReviewSchema = aiFacingSchema(reportPublishReviewSchema)
+	reportCardBindingSchema = aiFacingSchema(reportCardBindingSchema)
+}
+
+func aiFacingSchema(raw json.RawMessage) json.RawMessage {
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return raw
+	}
+	delete(root, "$schema")
+	delete(root, "$id")
+	stripped, err := json.Marshal(root)
+	if err != nil {
+		return raw
+	}
+	return stripped
+}
+
 type invocationIdentityKey struct{}
 
 type InvocationIdentity struct {
@@ -183,6 +212,37 @@ func invocationIdentity(ctx context.Context) (InvocationIdentity, error) {
 		return InvocationIdentity{}, errors.New("report AI invocation identity is missing")
 	}
 	return identity, nil
+}
+
+// SuggestCardBinding asks the model to pick dimensions and measures for one
+// card from the governed field catalog; the answer is validated against the
+// same catalog and contract before it is returned.
+func (generator *OrchestratedGenerator) SuggestCardBinding(ctx context.Context, request CardBindingRequest) (CardBindingSuggestion, error) {
+	identity, err := invocationIdentity(ctx)
+	if err != nil || generator == nil || generator.AI == nil {
+		return CardBindingSuggestion{}, errors.New("report AI card binding is unavailable")
+	}
+	if err := ValidateCardBindingRequest(request); err != nil {
+		return CardBindingSuggestion{}, err
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return CardBindingSuggestion{}, err
+	}
+	result, err := generator.AI.Invoke(ctx, aiplatform.Invocation{
+		TenantID: string(identity.TenantID), ActorID: string(identity.ActorID),
+		Purpose: aiplatform.PurposeReportBlockEdit, PromptVersion: "report-card-binding-v1",
+		ResourceType: "REPORT", ResourceID: string(identity.ReportID),
+		Request: structuredRequest(cardBindingPrompt, payload, "report_card_binding_v1", reportCardBindingSchema),
+	})
+	if err != nil {
+		return CardBindingSuggestion{}, err
+	}
+	var suggestion CardBindingSuggestion
+	if err := json.Unmarshal(result.ProviderResult.Content, &suggestion); err != nil {
+		return CardBindingSuggestion{}, fmt.Errorf("decode report AI card binding: %w", err)
+	}
+	return ValidateCardBindingSuggestion(request, suggestion)
 }
 
 func structuredRequest(system string, payload []byte, schemaName string, schema json.RawMessage) aiplatform.ProviderRequest {

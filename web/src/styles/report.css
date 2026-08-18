@@ -2122,3 +2122,46 @@
   .report-schedule-dialog { width: 100%; max-height: calc(100dvh - 24px); }
   .report-permission-add { grid-template-columns: 1fr; }
 }
+
+/* 侧栏页签：数据与筛选 / AI 改稿 —— 两块内容共用同一个任务面板 */
+.report-editor-task-panel.report-editor-task-panel { grid-template-rows: auto minmax(0, 1fr); }
+.report-editor-panel-tabs { display: flex; gap: 4px; border-bottom: 1px solid #e5e9ef; padding: 8px 10px 0; background: #fff; }
+.report-editor-panel-tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 7px 10px 8px; background: transparent; color: #6b7889; font: inherit; font-size: 12px; font-weight: 640; cursor: pointer; }
+.report-editor-panel-tabs button.is-active { border-bottom-color: #0872d3; color: #0872d3; }
+.report-editor-panel-body { min-height: 0; }
+.report-editor-panel-body.is-ai { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto auto auto; overflow: hidden; }
+.report-editor-panel-body.is-ai > header { min-height: 47px; display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; border-bottom: 1px solid #e5e9ef; padding: 11px 13px 8px; background: #fff; }
+.report-editor-panel-body.is-ai > header > div { min-width: 0; display: flex; align-items: baseline; gap: 9px; }
+.report-editor-panel-body.is-ai > header span { overflow: hidden; color: #798698; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.report-editor-panel-body.is-ai > header em { border-radius: 4px; padding: 4px 7px; background: #f0f2f5; color: #7b8492; font-size: 12px; font-style: normal; font-weight: 720; }
+.report-editor-panel-body.is-ai > header em.is-pending { background: #fff3df; color: #de850e; }
+.report-editor-panel-body.is-ai > dl { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 12px; margin: 0; border-bottom: 1px solid #e5e9ef; padding: 9px 13px; background: #fff; }
+.report-editor-panel-body.is-ai > dl > div { display: grid; grid-template-columns: 52px minmax(0, 1fr); gap: 5px; }
+.report-editor-panel-body.is-data { overflow: auto; padding: 0 13px 12px; background: #fff; }
+.report-editor-panel-body.is-data .report-interaction-panel:first-child { border-top: 0; }
+.report-data-panel header strong, .report-filter-panel header strong { display: inline-flex; align-items: center; gap: 5px; }
+.report-filter-actions { display: inline-flex; align-items: center; gap: 4px; }
+.report-filter-actions select { height: 24px; border: 1px solid var(--line); border-radius: 5px; background: var(--paper); font-size: 11px; }
+.report-interaction-list li code { font-size: 11px; }
+
+/* 新建：类型选择 */
+.report-editor-type-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; padding: 0; border: 0; }
+.report-editor-type-picker legend { margin-bottom: 6px; color: #56637a; font-size: 12px; font-weight: 620; }
+.report-editor-type-picker label { position: relative; display: grid; gap: 3px; border: 1px solid #dfe4eb; border-radius: 8px; padding: 9px 10px; cursor: pointer; }
+.report-editor-type-picker label.is-selected { border-color: #0872d3; background: #f2f7ff; }
+.report-editor-type-picker input { position: absolute; opacity: 0; pointer-events: none; }
+.report-editor-type-picker strong { color: #263244; font-size: 13px; }
+.report-editor-type-picker small { color: #6b7889; font-size: 11px; line-height: 1.45; }
+
+/* 属性面板：绑定辅助 */
+.report-editor-binding-assist { display: flex; flex-wrap: wrap; gap: 6px; }
+.report-editor-binding-assist button { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #dfe4eb; border-radius: 6px; padding: 5px 9px; background: #fff; color: #2e394a; font: inherit; font-size: 12px; cursor: pointer; }
+.report-editor-binding-assist button:disabled { color: #a3adbb; cursor: not-allowed; }
+.report-editor-manual-form label > small.report-editor-binding-note { margin-top: 4px; }
+
+/* 定义 JSON */
+.report-editor-json-modal { width: min(760px, 100%); }
+.report-editor-json-modal .report-editor-binding-note { margin: 0 16px; }
+.report-editor-json { width: calc(100% - 32px); margin: 10px 16px 0; border: 1px solid #dfe4eb; border-radius: 8px; padding: 10px; background: #f8fafc; color: #2e394a; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
+/* 新建面板内容纵向可滚动（类型选择与 JSON 导入加入后更长），不能再被任务面板的 overflow: hidden 裁掉。 */
+.report-editor-task-panel.report-editor-new-panel { display: flex; overflow-y: auto; }

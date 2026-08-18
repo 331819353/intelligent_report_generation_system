@@ -1,5 +1,5 @@
 import { apiRequest } from '../../lib/api'
-import type { Block, Page, ReportComponent, ReportDefinition, Section } from '../render/schema'
+import type { Block, FieldBinding, Page, ReportComponent, ReportDefinition, Section } from '../render/schema'
 import type { ComponentManifest } from '../render/manifests'
 import type { RuntimeComponentResult } from './runtime'
 
@@ -185,21 +185,31 @@ function idempotencyHeaders() {
 }
 
 export const reportEditorAPI = {
-  createAI(input: { intent: string }) {
+  createAI(input: { intent: string; reportType?: 'REPORT' | 'DASHBOARD' }) {
     return apiRequest<AICreateReportResponse>('/v1/reports/ai/create', {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
     })
   },
   // 空白新建不依赖模型提供方，是未配置 LLM 时报告主链的保底入口。
-  createBlank(input: { name: string; description?: string; dataContextId?: string }) {
+  createBlank(input: { name: string; description?: string; dataContextId?: string; reportType?: 'REPORT' | 'DASHBOARD' }) {
     return apiRequest<BlankCreateReportResponse>('/v1/reports/blank', {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
+    })
+  },
+  /**
+   * 以 JSON 配置文件为核心：任何一份合法的 Report Definition 1.0 都可以直接
+   * 导入成新的报告草稿（同一份 JSON、同一条校验与发布链）。调用前应刷新
+   * metadata.id/code，避免与已有报告冲突。
+   */
+  createFromDefinition(definition: ReportDefinition) {
+    return apiRequest<BlankCreateReportResponse>('/v1/reports', {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ definition }),
     })
   },
   listStarterTemplates() {
     return apiRequest<{ items: ReportStarterTemplate[] }>('/v1/report-templates')
   },
-  instantiateStarterTemplate(templateId: string, input: { name: string; description?: string; dataContextId: string }) {
+  instantiateStarterTemplate(templateId: string, input: { name: string; description?: string; dataContextId: string; reportType?: 'REPORT' | 'DASHBOARD' }) {
     return apiRequest<BlankCreateReportResponse>(`/v1/report-templates/${encodeURIComponent(templateId)}/instantiate`, {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
     })
@@ -230,6 +240,18 @@ export const reportEditorAPI = {
     return apiRequest<AIPreviewResponse>(`/v1/reports/${encodeURIComponent(reportId)}/ai/preview`, {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
     })
+  },
+  /**
+   * 让模型在所选数据集的受治理字段目录里为一张卡片识别度量与维度。返回的是建议，
+   * 不写草稿；编辑器把它填入绑定面板，由人确认后再以 USER 操作保存。
+   */
+  suggestCardBinding(reportId: string, input: {
+    componentId?: string; dataContextId: string; manifestType: string; manifestVersion?: string; title?: string; intent?: string
+  }) {
+    return apiRequest<{ aiRunId: string; suggestion: { dimensions: FieldBinding[]; measures: FieldBinding[]; rationale: string } }>(
+      `/v1/reports/${encodeURIComponent(reportId)}/ai/card-binding`,
+      { method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input) },
+    )
   },
   applyOperations(reportId: string, bundle: EditorOperationBundle) {
     return apiRequest<DraftMutationResponse>(`/v1/reports/${encodeURIComponent(reportId)}/operations`, {

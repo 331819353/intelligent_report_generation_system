@@ -122,6 +122,7 @@ func BuildMappedDatasetDocument(table MappedDatasetTable, columns []MappedDatase
 			Description:      strings.TrimSpace(column.BusinessDescription),
 			Role:             role,
 			Expression:       Expression{Type: "FIELD_REF", NodeID: "node_1", Field: physicalName},
+			Aggregation:      mappedDatasetFieldAggregation(column),
 			CanonicalType:    mappedDatasetColumnCanonicalType(table, column),
 			SemanticType:     strings.ToUpper(strings.TrimSpace(column.SemanticType)),
 			SensitivityLevel: strings.ToUpper(strings.TrimSpace(column.SensitivityLevel)),
@@ -1299,6 +1300,23 @@ func (s *PostgresStore) enqueueMappedMaterializationTx(
 	// enqueuePublicationProcessing in the same transaction. This compatibility
 	// hook remains intentionally idempotent for the system-mapped caller.
 	return nil
+}
+
+// mappedDatasetFieldAggregation declares how a source-lineage MEASURE rolls up
+// when a report or a downstream query drops part of the row grain. Amounts and
+// quantities are additive by construction and default to SUM; percentages and
+// other ratios stay undeclared so consumers keep failing closed instead of
+// summing a ratio. Humans can still refine the field contract afterwards.
+func mappedDatasetFieldAggregation(column MappedDatasetColumn) string {
+	if mappedDatasetFieldRole(column) != "MEASURE" {
+		return ""
+	}
+	switch strings.ToUpper(strings.TrimSpace(column.SemanticType)) {
+	case "AMOUNT", "QUANTITY":
+		return "SUM"
+	default:
+		return ""
+	}
 }
 
 func mappedDatasetFieldRole(column MappedDatasetColumn) string {

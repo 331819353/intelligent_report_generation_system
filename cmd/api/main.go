@@ -632,6 +632,7 @@ func main() {
 		reportAssetService,
 		reporthttp.AIOptions{
 			PlanGenerator: reportAIGenerator, EditGenerator: reportAIGenerator,
+			BindingSuggester: reportAIGenerator,
 			Reviewer: reportAIGenerator,
 			Selector: reportAIGenerator, Contexts: reportai.NewPostgresFieldCatalog(pool),
 			Fields: reportai.NewPostgresFieldCatalog(pool), Components: reportComponentRegistry,
