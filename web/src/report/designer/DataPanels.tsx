@@ -124,7 +124,7 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
   }
 
   return <section className="report-interaction-panel report-filter-panel" aria-label="报告筛选器">
-    <header><strong><Funnel size={15} /> {onlyBlock ? '过滤字段' : '筛选器'}</strong><small>{onlyBlock ? '作用于这张卡片的过滤字段；取值由使用者在运行页填写，服务端解析' : '取值由使用者在运行页顶部填写，服务端解析后作用于绑定卡片'}</small></header>
+    <header><strong><Funnel size={15} /> {onlyBlock ? '过滤字段' : '筛选器'}</strong><small>{onlyBlock ? '作用于这张卡片；保存后会作为画布筛选控件原位显示' : '新增筛选会自动放入画布，发布后使用者可在报告内原位操作'}</small></header>
     {filters.length > 0 && <ul className="report-interaction-list">
       {filters.map(filter => <li key={filter.id}>
         <span>

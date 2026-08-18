@@ -7,8 +7,9 @@ import { CaretLeft, CaretRight, Image as ImageIcon, Info } from '@phosphor-icons
 import { ComponentStateView } from '../runtime/ComponentStateView.tsx'
 import { componentPresentation, type ReportComponentState } from '../runtime/state.ts'
 import { buildChartOption, formatNumber, resolveColumns, singleMetric, type QueryResult } from './chart-option.ts'
+import { FilterControl } from './FilterControl.tsx'
 import type { ComponentManifest, ManifestIndex } from './manifests.ts'
-import type { ReportComponent } from './schema.ts'
+import type { GlobalFilter, ReportComponent } from './schema.ts'
 
 registerEChartsComponents([
   BarChart, LineChart, PieChart, ScatterChart, FunnelChart,
@@ -108,16 +109,27 @@ function ImageView({ component }: { component: ReportComponent }) {
     alt={component.options.title || '报告图片'} />
 }
 
+export type InlineFilterControl = {
+  filter: GlobalFilter
+  value: unknown
+  onChange: (next: unknown) => void
+}
+
 /**
- * 控件类组件（筛选器）在报告正文内只呈现其绑定字段。实际取值来自报告级
- * 筛选栏，由运行页统一收集后提交给执行接口，避免同一个筛选出现两套状态。
+ * 筛选控件就是画布元素：编辑器先把字段与报告筛选定义关联，运行页再在原位置
+ * 收集取值。这样筛选不会被运行页额外复制到一个固定顶部栏里。
  */
-function ControlView({ component }: { component: ReportComponent }) {
+function ControlView({ component, inlineFilter }: { component: ReportComponent; inlineFilter?: InlineFilterControl }) {
   const bound = component.dataBinding?.dimensions?.map(item => item.field).join('、')
+  if (inlineFilter) {
+    return <div className="report-inline-filter">
+      <FilterControl filter={inlineFilter.filter} value={inlineFilter.value} onChange={inlineFilter.onChange} />
+    </div>
+  }
   return <div className="report-render-placeholder is-control">
     <Info size={18} />
     <span>{bound ? `筛选字段：${bound}` : '该筛选组件尚未绑定字段'}</span>
-    <small>取值在报告顶部的筛选栏中设置</small>
+    <small>{bound ? '发布后可直接在画布中的此位置筛选' : '先在右侧配置字段与筛选规则'}</small>
   </div>
 }
 
@@ -136,6 +148,7 @@ export type ComponentViewProps = {
   onSelect?: (values: Record<string, unknown>) => void
   selected?: boolean
   dimmed?: boolean
+  inlineFilter?: InlineFilterControl
 }
 
 /**
@@ -143,7 +156,7 @@ export type ComponentViewProps = {
  * 按 dataBinding 的角色解析结果列。这里不含任何针对具体报告的分支。
  */
 export function ComponentView({
-  component, manifests, item, mobile, designMode, onRetry, onSelect, selected, dimmed,
+  component, manifests, item, mobile, designMode, onRetry, onSelect, selected, dimmed, inlineFilter,
 }: ComponentViewProps) {
   const manifest = manifests.get(component.templateRef.type, component.templateRef.version)
   const result = item?.result
@@ -175,7 +188,7 @@ export function ComponentView({
     // 文本、图片与控件不依赖查询结果，可以在草稿态直接呈现真实内容。
     if (manifest?.renderer === 'TEXT') return <TextView component={component} />
     if (manifest?.renderer === 'IMAGE') return <ImageView component={component} />
-    if (manifest?.renderer === 'CONTROL') return <ControlView component={component} />
+    if (manifest?.renderer === 'CONTROL') return <ControlView component={component} inlineFilter={inlineFilter} />
     if (!manifest) {
       return <ComponentStateView state="ERROR" boundTitle={`未注册的组件模板 ${component.templateRef.type}@${component.templateRef.version}`} />
     }

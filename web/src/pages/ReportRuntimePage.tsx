@@ -17,7 +17,6 @@ import {
 import type { ReportAsset } from '../report/assets/model'
 import { ReportPageView } from '../report/render/ReportPageView'
 import { emptyManifestIndex, indexManifests, listComponentManifests, type ManifestIndex } from '../report/render/manifests'
-import { FilterControl } from '../report/render/FilterControl'
 import { describeSelections, useReportRuntimeState, type ReportExecutionInput } from '../report/render/runtime-state'
 import { orderedPages, orderedSections, placedComponentIDs } from '../report/render/schema'
 
@@ -293,6 +292,18 @@ export function ReportRuntimePage() {
     () => new Map((execution?.components ?? []).map(item => [item.componentId, item])),
     [execution],
   )
+  const canvasFilterCount = useMemo(() => {
+    if (!loaded || !page) return 0
+    const componentMap = new Map(loaded.definition.components.map(component => [component.id, component]))
+    return placedComponentIDs(page).reduce((count, componentId) => {
+      const component = componentMap.get(componentId)
+      if (!component || manifests.get(component.templateRef.type, component.templateRef.version)?.renderer !== 'CONTROL') return count
+      const field = component.dataBinding?.dimensions?.[0]?.field
+      const dataContextId = component.dataBinding?.dataContextId
+      return count + Number(Boolean(field && dataContextId && filters.some(filter =>
+        filter.fieldRef.field === field && filter.fieldRef.dataContextId === dataContextId)))
+    }, 0)
+  }, [filters, loaded, manifests, page])
 
   const run = async (input: ReportExecutionInput, blockId?: string) => {
     if (!loaded || !page) return
@@ -373,49 +384,40 @@ export function ReportRuntimePage() {
   return <AppShell className="report-runtime-shell report-runtime-selected" lockBusinessDomain>
     <div className="runtime-workspace">
       <header className="runtime-report-header">
-        <button className="runtime-back" type="button" onClick={() => navigate('/reports')}><ArrowLeft size={15} />返回报告工作台</button>
+        <div className="runtime-header-topline">
+          <button className="runtime-back" type="button" onClick={() => navigate('/reports')}><ArrowLeft size={15} />报告工作台</button>
+          <span>发布画布</span>
+        </div>
         <div className="runtime-title-row">
-          <div><h1>{title}</h1><span className="report-publish-badge">已发布</span><span className="report-version-badge">v{versionNo}</span></div>
+          <div className="runtime-report-identity">
+            <div className="runtime-title-labels"><span>智能报告</span><span className="report-publish-badge">已发布</span><span className="report-version-badge">v{versionNo}</span></div>
+            <h1>{title}</h1>
+            <p>{loaded?.definition.metadata.description || '基于受治理数据生成的可交互分析报告。'}</p>
+            <div className="runtime-report-meta">
+              <span>负责人 {ownerName}</span>
+              <i /><span>更新 {formatDateTime(assetMeta?.updatedAt || currentVersion?.publishedAt)}</span>
+              <i /><span>数据截至 {formatDateTime(asOf)}</span>
+              <i /><button type="button" onClick={openVersions}>v{versionNo} 版本记录</button>
+            </div>
+          </div>
           <div className="runtime-header-actions">
+            <button className="quiet-button" type="button" disabled={refreshing} onClick={() => void run(currentInput())}><ArrowClockwise className={refreshing ? 'is-spinning' : ''} size={16} />刷新</button>
+            {canvasFilterCount > 0 && <button className="primary-button runtime-apply-button" type="button" disabled={refreshing} onClick={applyFilters}><Funnel size={16} />应用筛选</button>}
             <button className="quiet-button" type="button" disabled={!loaded?.versionId} onClick={() => setCreateDecisionOpen(true)}><ShieldCheck size={17} />形成决策</button>
-            <button className="quiet-button" type="button" disabled={!assetMeta?.allowedActions.includes('SHARE')} onClick={() => setShareOpen(true)}><ShareNetwork size={17} />分享</button>
-            <button className="quiet-button" type="button" disabled={!loaded?.versionId} onClick={() => setScheduleOpen(true)}><CalendarDots size={17} />订阅</button>
-            <button className="quiet-button" type="button" disabled={!assetMeta?.allowedActions.includes('EDIT')} onClick={() => navigate(`/reports/${reportId}?mode=edit`)}><NotePencil size={17} />编辑报告</button>
-            <button className="primary-button" type="button" disabled={!loaded?.definition.runtimePolicy?.exportEnabled || !assetMeta?.allowedActions.includes('EXPORT')} onClick={() => setExportOpen(true)}><DownloadSimple size={17} />导出报告</button>
+            <button className="quiet-button" type="button" disabled={!assetMeta?.allowedActions.includes('EDIT')} onClick={() => navigate(`/reports/${reportId}?mode=edit`)}><NotePencil size={17} />编辑</button>
+            <button className="quiet-button" type="button" disabled={!loaded?.definition.runtimePolicy?.exportEnabled || !assetMeta?.allowedActions.includes('EXPORT')} onClick={() => setExportOpen(true)}><DownloadSimple size={17} />导出</button>
             <div className="runtime-more-wrap">
               <button className="quiet-button runtime-icon-button" type="button" aria-label="更多操作" aria-expanded={moreOpen} onClick={() => setMoreOpen(value => !value)}><DotsThree size={20} weight="bold" /></button>
               {moreOpen && <div className="runtime-more-menu">
+                <button type="button" disabled={!assetMeta?.allowedActions.includes('SHARE')} onClick={() => { setMoreOpen(false); setShareOpen(true) }}><ShareNetwork size={15} />分享报告</button>
+                <button type="button" disabled={!loaded?.versionId} onClick={() => { setMoreOpen(false); setScheduleOpen(true) }}><CalendarDots size={15} />订阅报告</button>
                 <button type="button" onClick={() => { setMoreOpen(false); openVersions() }}><ClockCounterClockwise size={15} />版本历史</button>
                 <button type="button" onClick={() => { setMoreOpen(false); navigate('/reports') }}><ArrowLeft size={15} />返回报告中心</button>
               </div>}
             </div>
           </div>
         </div>
-        <div className="runtime-report-meta">
-          <span>拥有者：{ownerName}</span>
-          <span>更新于 {formatDateTime(assetMeta?.updatedAt || currentVersion?.publishedAt)}</span>
-          <i /><span>数据截至 {formatDateTime(asOf)}</span>
-          <i /><button type="button" onClick={openVersions}>版本历史</button>
-        </div>
       </header>
-
-      <section className="runtime-filter-bar" aria-label="报告筛选">
-        <div className="runtime-filter-fields">
-          {filters.map(filter => <FilterControl key={filter.id} filter={filter}
-            value={runtimeState.filterValues[filter.id]}
-            onChange={next => runtimeState.setFilterValue(filter.id, next)} />)}
-          {filters.length === 0 && <p className="runtime-filter-empty">当前发布版本未配置报告级筛选。</p>}
-        </div>
-        {runtimeState.selections.length > 0 && <div className="runtime-selection-chip" role="status">
-          <Funnel size={14} weight="fill" />
-          <span>图表联动：{describeSelections(runtimeState.selections)}</span>
-          <button type="button" onClick={() => runtimeState.clearSelections()}>清除联动</button>
-        </div>}
-        <div className="runtime-filter-actions">
-          <button className="quiet-button" type="button" disabled={refreshing} onClick={() => void run(currentInput())}><ArrowClockwise className={refreshing ? 'is-spinning' : ''} size={16} />刷新数据</button>
-          <button className="primary-button" type="button" disabled={refreshing || filters.length === 0} onClick={applyFilters}><Funnel size={16} />应用筛选</button>
-        </div>
-      </section>
 
       {loading && <div className="runtime-report-feedback"><SpinnerGap className="is-spinning" size={25} /><strong>正在加载不可变发布制品</strong><p>随后会按当前查看者权限执行可见组件。</p></div>}
       {!loading && loadError && !loaded && <div className="runtime-report-feedback is-error"><WarningCircle size={25} /><strong>报告加载失败</strong><p>{loadError}</p><button type="button" onClick={() => window.location.reload()}>重新加载</button></div>}
@@ -425,9 +427,15 @@ export function ReportRuntimePage() {
         </nav>
         <main className="runtime-report-document">
           {loadError && <div className="runtime-inline-error"><WarningCircle size={15} />{loadError}<button type="button" onClick={() => void run(currentInput())}>重试</button></div>}
+          {runtimeState.selections.length > 0 && <div className="runtime-selection-chip" role="status">
+            <Funnel size={14} weight="fill" />
+            <span>图表联动：{describeSelections(runtimeState.selections)}</span>
+            <button type="button" onClick={() => runtimeState.clearSelections()}>清除联动</button>
+          </div>}
           {page
             ? <ReportPageView definition={loaded.definition} page={page} manifests={manifests}
               results={results} onRetryBlock={blockId => void run(currentInput(), blockId)}
+              inlineFilters={{ definitions: filters, values: runtimeState.filterValues, onChange: runtimeState.setFilterValue }}
               interaction={{ roleFor: runtimeState.roleFor, onSelect: selectComponent }} />
             : <div className="runtime-report-level-empty"><WarningCircle size={24} /><strong>发布版本没有可显示页面</strong><p>请联系报告 Owner 检查不可变 Definition。</p></div>}
         </main>
@@ -453,7 +461,7 @@ export function ReportRuntimePage() {
           </dl><button type="button" onClick={openVersions}>查看版本记录</button></section>
           <section><h2>组件恢复</h2>{recoveryItems.length ? recoveryItems.map(({ item, component, blockId }) => <div className="runtime-recovery-item" key={item.componentId}>
             <span className={`is-${item.state.toLocaleLowerCase()}`} />
-            <div><strong>{item.state === 'NO_PERMISSION' ? '受限组件' : `${item.state} - ${component?.options.title || component?.templateRef.type || '组件'}`}</strong><small>{item.errorCode || '可重新执行当前分块'}</small></div>
+            <div><strong>{item.state === 'NO_PERMISSION' ? '受限组件' : `${item.state} - ${component?.options.title || component?.templateRef.type || '组件'}`}</strong><small>{item.errorCode || '可重新执行当前元素'}</small></div>
             {item.state !== 'NO_PERMISSION' && <button type="button" disabled={!blockId || refreshing} onClick={() => void run(currentInput(), blockId)}>尝试恢复</button>}
           </div>) : <p className="runtime-rail-empty"><CheckCircle size={16} weight="fill" />当前组件均已正常完成。</p>}</section>
         </aside>

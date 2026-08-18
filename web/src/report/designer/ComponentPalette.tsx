@@ -20,10 +20,7 @@ function paletteIcon(manifest: ComponentManifest) {
   return <ListBullets size={18} weight="duotone" />
 }
 
-/**
- * 组件面板：组件应当被拖进分块预先准备的语义槽位；点击时由编辑器选择当前
- * 分块中第一个兼容空槽位。组件本身不再隐式占用页面级站位。
- */
+/** 组件面板：拖入或点击都会创建一个独立画布元素，并由布局算法寻找空位。 */
 export function ComponentPalette({ manifests, disabled, onPick }: {
   manifests: ComponentManifest[]
   disabled: boolean
@@ -33,7 +30,7 @@ export function ComponentPalette({ manifests, disabled, onPick }: {
     .map(category => ({ category, items: manifests.filter(item => item.category === category) }))
     .filter(group => group.items.length > 0)
   return <div className="report-palette" aria-label="组件面板">
-    <header><strong>组件面板</strong><small>拖入分块槽位，或点击填入可用槽位</small></header>
+    <header><strong>画布元素</strong><small>拖入画布或点击添加，位置会自动排布</small></header>
     {groups.map(group => <section key={group.category}>
       <h3>{categoryLabels[group.category]}</h3>
       <div className="report-palette-grid">

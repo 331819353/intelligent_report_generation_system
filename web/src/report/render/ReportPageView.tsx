@@ -1,6 +1,5 @@
 import { type CSSProperties, useRef, useState } from 'react'
 import { ReportBlockBoundary, ReportComponentBoundary, ComponentStateView } from '../runtime/ComponentStateView.tsx'
-import { mobileBlockHeight, toMobileLayout } from '../designer/layout/index.ts'
 import { useMobileViewport } from './use-mobile-viewport.ts'
 import { BlockHandles, SlotHandles } from './BlockInteraction.tsx'
 import { useBlockInteraction, type DragMode } from './use-block-interaction.ts'
@@ -10,16 +9,15 @@ import { minimumSize, type ManifestIndex } from './manifests.ts'
 import { paletteDragType } from '../designer/operations.ts'
 import {
   blockComponentIDs, canvasOf, orderedSections,
-  type Block, type Canvas, type GridRect, type Page, type ReportComponent, type ReportDefinition, type Section, type Zone,
+  type Block, type Canvas, type GlobalFilter, type GridRect, type Page, type ReportComponent, type ReportDefinition, type Section, type Zone,
 } from './schema.ts'
 
 /**
  * 报告页渲染器。
  *
- * 唯一的渲染入口，编辑器画布与运行页共用：布局完全由 Report Definition 的
- * canvas / block.layout / zone.layout / slot.grid 驱动，组件表现由组件清单与
- * options 驱动。渲染器内部没有任何针对具体报告的分支或数据；编辑态与运行态
- * 只差一个 editing 开关，因此「所见」与「发布后所得」共用同一份布局实现。
+ * 唯一的渲染入口，编辑器画布与运行页共用同一份 Report Definition 与组件表现。
+ * 编辑态读取 block / zone / slot 作为可操作布局；发布态则把已放置组件扁平化为
+ * 自动流式画布，内部结构不会作为报告卡片边界暴露给阅读者。
  */
 
 /**
@@ -74,6 +72,26 @@ export type ReportPageViewProps = {
     roleFor(componentId: string): { source: boolean; selected: boolean; dimmed: boolean }
     onSelect(componentId: string, values: Record<string, unknown>): void
   }
+  /** 运行页把筛选状态注入画布内的 CONTROL 组件，不再另起固定筛选栏。 */
+  inlineFilters?: {
+    definitions: GlobalFilter[]
+    values: Record<string, unknown>
+    onChange(filterId: string, value: unknown): void
+  }
+}
+
+function inlineFilterFor(component: ReportComponent, inlineFilters?: ReportPageViewProps['inlineFilters']) {
+  const field = component.dataBinding?.dimensions?.[0]?.field
+  const dataContextId = component.dataBinding?.dataContextId
+  if (!field || !dataContextId || !inlineFilters) return undefined
+  const filter = inlineFilters.definitions.find(item =>
+    item.fieldRef.dataContextId === dataContextId && item.fieldRef.field === field)
+  if (!filter) return undefined
+  return {
+    filter,
+    value: inlineFilters.values[filter.id],
+    onChange: (value: unknown) => inlineFilters.onChange(filter.id, value),
+  }
 }
 
 type BlockContentProps = {
@@ -87,6 +105,7 @@ type BlockContentProps = {
   onSelectComponent?: (componentId: string, blockId: string) => void
   selectedComponentId?: string
   interaction?: ReportPageViewProps['interaction']
+  inlineFilters?: ReportPageViewProps['inlineFilters']
   editing?: EditingHandlers
 }
 
@@ -173,6 +192,7 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
           ? <ReportComponentBoundary fallback={<ComponentStateView state="ERROR" onAction={() => onRetryBlock?.(block.id)} />}>
             <ComponentView component={component} manifests={manifests} mobile={mobile} designMode={designMode}
               item={results?.get(component.id)} onRetry={() => onRetryBlock?.(block.id)}
+              inlineFilter={inlineFilterFor(component, props.inlineFilters)}
               selected={interaction?.roleFor(component.id).selected}
               dimmed={interaction?.roleFor(component.id).dimmed}
               onSelect={interaction && interaction.roleFor(component.id).source
@@ -246,7 +266,7 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
   })
 
   if (section.blocks.length === 0) {
-    return <div className="report-render-placeholder is-section"><span>{editing ? '空分区：先新建一个分块，再把组件拖入槽位' : '本分区暂无内容'}</span></div>
+    return <div className="report-render-placeholder is-section"><span>{editing ? '空分区：从左侧拖入图表、指标、文本或筛选控件' : '本分区暂无内容'}</span></div>
   }
   return <div className={`report-render-grid ${interaction.drag ? 'is-dragging' : ''}`.trim()} ref={gridRef} style={{
     gridTemplateColumns: `repeat(${canvas.desktop.columns}, minmax(0, 1fr))`,
@@ -272,7 +292,7 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
           {editing && block.cardKind && <span className="report-block-kind-badge">{block.cardKind}</span>}
           {block.title && <header className="report-render-block-head">
             {editing?.onBlockTitleChange
-              ? <input key={block.title} defaultValue={block.title} maxLength={200} aria-label="分块标题"
+              ? <input key={block.title} defaultValue={block.title} maxLength={200} aria-label="元素组标题"
                 onClick={event => event.stopPropagation()}
                 onKeyDown={event => {
                   if (event.key === 'Enter') (event.target as HTMLInputElement).blur()
@@ -287,10 +307,10 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
             minimum={minSizeFor(block.id)}
             onStart={(event, mode) => interaction.start(event, block.id, block.layout.desktop, mode)}
             onNudge={(next, mode) => editing.onLayoutChange(section.id, block.id, next, mode)} />}
-          {editing && (editing.onDuplicateBlock || editing.onDeleteBlock) && <div className="report-block-toolbar" role="toolbar" aria-label="分块操作">
-            {editing.onDuplicateBlock && <button type="button" title="复制分块" aria-label="复制分块"
+          {editing && (editing.onDuplicateBlock || editing.onDeleteBlock) && <div className="report-block-toolbar" role="toolbar" aria-label="画布元素操作">
+            {editing.onDuplicateBlock && <button type="button" title="复制元素" aria-label="复制元素"
               onClick={event => { event.stopPropagation(); editing.onDuplicateBlock?.(section.id, block.id) }}>⧉</button>}
-            {editing.onDeleteBlock && <button type="button" className="is-danger" title="删除分块" aria-label="删除分块"
+            {editing.onDeleteBlock && <button type="button" className="is-danger" title="删除元素" aria-label="删除元素"
               onClick={event => { event.stopPropagation(); editing.onDeleteBlock?.(section.id, block.id) }}>✕</button>}
           </div>}
         </div>
@@ -318,44 +338,46 @@ function DesktopPage(props: ReportPageViewProps) {
 }
 
 /**
- * 移动端：按定义里的 layout.mobile 投影为单列，复用与服务端执行计划一致的
- * toMobileLayout（顺序、PRIMARY_ONLY 裁剪、筛选抽屉分离）。
+ * 发布态把 Definition 中的分块降级为内部编排信息，再把每个已配置组件提升为
+ * 独立画布元素。元素按类型自动选择跨度并以 dense grid 重排，因此运行页不会
+ * 暴露分块边框、空槽位或分块标题，也不会因旧坐标留下大片空白。
  */
-function MobilePage(props: ReportPageViewProps) {
-  const { definition, page, manifests, results, designMode, onRetryBlock, interaction } = props
+function RuntimeAutoPage(props: ReportPageViewProps & { mobile?: boolean }) {
+  const { definition, page, manifests, results, designMode, onRetryBlock, interaction, mobile } = props
   const components = new Map(definition.components.map(component => [component.id, component]))
-  const projected = toMobileLayout(
-    page as Parameters<typeof toMobileLayout>[0],
-    definition.components.map(component => ({ id: component.id, templateRef: component.templateRef })),
-    manifests.list(),
-  )
-  return <div className="report-render-page is-mobile">
-    {projected.blocks.map(block => {
-      let height: number | undefined
-      try {
-        height = block.heightMode === 'AUTO' ? undefined : mobileBlockHeight({
-          order: block.order, visible: true, heightMode: block.heightMode, slotMode: block.slotMode,
-          fixedHeight: block.fixedHeight, aspectRatio: block.aspectRatio,
-        }, typeof window === 'undefined' ? 375 : window.innerWidth, -1)
-      } catch { height = undefined }
-      return <ReportBlockBoundary key={block.id}>
-        <div className="report-render-mobile-block" style={{ height: height ? `${height}px` : undefined }}>
-          {block.slots.map(slot => {
-            const component = components.get(slot.componentId)
-            if (!component) return null
-            return <ReportComponentBoundary key={slot.id}
-              fallback={<ComponentStateView state="ERROR" onAction={() => onRetryBlock?.(block.id)} />}>
-              <ComponentView component={component} manifests={manifests} mobile designMode={designMode}
-                item={results?.get(component.id)} onRetry={() => onRetryBlock?.(block.id)}
-                selected={interaction?.roleFor(component.id).selected}
-                dimmed={interaction?.roleFor(component.id).dimmed}
-                onSelect={interaction && interaction.roleFor(component.id).source
-                  ? values => interaction.onSelect(component.id, values)
-                  : undefined} />
-            </ReportComponentBoundary>
+
+  return <div className={`report-render-page is-auto ${mobile ? 'is-mobile' : ''}`.trim()}>
+    {orderedSections(page).map(section => {
+      const elements = section.blocks.flatMap(block => block.zones.flatMap(zone => zone.slots.flatMap(slot => {
+        const component = slot.componentId ? components.get(slot.componentId) : undefined
+        return component ? [{ block, zone, component }] : []
+      })))
+      if (elements.length === 0) return null
+      return <section className="report-render-section report-runtime-auto-section"
+        id={`report-section-${section.id}`} data-section-id={section.id} key={section.id}>
+        <header className="report-render-section-head"><div><span /> <h2>{section.name}</h2></div>{section.question && <p>{section.question}</p>}</header>
+        <div className="report-runtime-auto-grid">
+          {elements.map(({ block, zone, component }) => {
+            const manifest = manifests.get(component.templateRef.type, component.templateRef.version)
+            const kind = manifest?.renderer === 'CONTROL' || zone.type === 'FILTER' ? 'filter'
+              : manifest?.category === 'TABLE' ? 'table'
+                : component.templateRef.type === 'metric-card' ? 'metric'
+                  : manifest?.renderer === 'TEXT' || zone.type === 'INSIGHT' ? 'narrative'
+                    : manifest?.renderer === 'IMAGE' ? 'image' : 'visual'
+            const role = interaction?.roleFor(component.id)
+            return <ReportBlockBoundary key={`${block.id}:${component.id}`}>
+              <div className={`report-runtime-element is-${kind}`} data-block-id={block.id} data-component-id={component.id}>
+                <ReportComponentBoundary fallback={<ComponentStateView state="ERROR" onAction={() => onRetryBlock?.(block.id)} />}>
+                  <ComponentView component={component} manifests={manifests} mobile={mobile} designMode={designMode}
+                    item={results?.get(component.id)} onRetry={() => onRetryBlock?.(block.id)}
+                    inlineFilter={inlineFilterFor(component, props.inlineFilters)} selected={role?.selected} dimmed={role?.dimmed}
+                    onSelect={interaction && role?.source ? values => interaction.onSelect(component.id, values) : undefined} />
+                </ReportComponentBoundary>
+              </div>
+            </ReportBlockBoundary>
           })}
         </div>
-      </ReportBlockBoundary>
+      </section>
     })}
   </div>
 }
@@ -364,13 +386,13 @@ export function ReportPageView(props: ReportPageViewProps) {
   const mobile = useMobileViewport()
   if (props.page.sections.length === 0) {
     return <div className={`report-render-placeholder is-page ${props.editing ? 'is-editing' : ''}`.trim()}>
-      <strong>{props.editing ? '先创建第一个分块' : '报告还没有内容'}</strong>
-      <span>{props.editing ? '分块会自动准备标题、筛选、结论和图表槽位，再把左侧组件拖入对应槽位。' : '从分块开始组织报告内容。'}</span>
+      <strong>{props.editing ? '把第一个元素拖入画布' : '报告还没有内容'}</strong>
+      <span>{props.editing ? '图表、指标、文本与筛选控件会按内容类型自动排布。' : '画布中暂时没有可显示的元素。'}</span>
       {props.editing && <ol className="report-render-placeholder-steps">
-        <li>创建分块</li><li>拖组件到槽位</li><li>配置数据与筛选</li><li>预览与发布</li>
+        <li>添加元素</li><li>配置数据</li><li>在画布放置筛选</li><li>预览与发布</li>
       </ol>}
     </div>
   }
-  // 编辑态始终使用桌面栅格：拖拽编排的是桌面布局，移动端是它的确定性投影。
-  return mobile && !props.editing ? <MobilePage {...props} /> : <DesktopPage {...props} />
+  // 编辑态保留可操作的结构栅格；发布态一律提升为独立元素并自动重排。
+  return props.editing ? <DesktopPage {...props} /> : <RuntimeAutoPage {...props} mobile={mobile} />
 }

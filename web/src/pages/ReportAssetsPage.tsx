@@ -1,7 +1,7 @@
 import {
   Archive, Check, ClockCounterClockwise, DotsThreeVertical, Eye, Funnel, ListBullets,
   MagnifyingGlass, NotePencil, Plus, ShareNetwork, ShieldCheck, SortAscending, SquaresFour,
-  UploadSimple, Users, WarningCircle, X,
+  Sparkle, UploadSimple, Users, WarningCircle, X,
 } from '@phosphor-icons/react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -103,10 +103,10 @@ function AssetListRow({ asset, selected, onSelect }: { asset: ReportAsset; selec
 
 function AssetGridCard({ asset, selected, onSelect }: { asset: ReportAsset; selected: boolean; onSelect: () => void }) {
   return <AppButton text className={`report-library-grid-card ${selected ? 'is-selected' : ''}`.trim()} type="button" aria-pressed={selected} onClick={onSelect}>
-    <AssetThumb asset={asset} />
-    <span className="report-library-grid-heading"><strong>{asset.name}</strong><span className={`report-lifecycle is-${asset.lifecycle.toLocaleLowerCase()}`}>{lifecycleLabels[asset.lifecycle]}</span></span>
-    <small>{asset.code}</small>
-    <span><img src={avatarFor(asset)} alt="" />{asset.ownerName}<time>{formatUpdatedAt(asset.updatedAt)}</time></span>
+    <span className="report-library-grid-top"><AssetThumb asset={asset} /><span className={`report-lifecycle is-${asset.lifecycle.toLocaleLowerCase()}`}>{lifecycleLabels[asset.lifecycle]}</span></span>
+    <span className="report-library-grid-heading"><strong>{asset.name}</strong><small>{asset.code}</small></span>
+    <span className="report-library-grid-meta"><span>{asset.currentVersionNo ? `v${asset.currentVersionNo}` : '尚未发布'} · 草稿 r{asset.draftRevisionNo}</span><span>{asset.visibleCount} 人可查看</span></span>
+    <span className="report-library-grid-owner"><img src={avatarFor(asset)} alt="" /><span>{asset.ownerName}</span><time>{formatUpdatedAt(asset.updatedAt)}</time></span>
   </AppButton>
 }
 
@@ -388,7 +388,7 @@ export function ReportAssetsPage() {
   const [transitionBusy, setTransitionBusy] = useState(false)
   const [transitionError, setTransitionError] = useState('')
   const [toast, setToast] = useState('')
-  const [viewMode, setViewMode] = useState<'list' | 'grid'>('list')
+  const [viewMode, setViewMode] = useState<'list' | 'grid'>('grid')
   const [sortOrder, setSortOrder] = useState<'latest' | 'oldest'>('latest')
 
   const loadAssets = useCallback(async (cursor = '', append = false) => {
@@ -476,7 +476,21 @@ export function ReportAssetsPage() {
   return <AppShell className="report-assets-shell report-workbench-shell" eyebrow="智能报告" title="报告中心" lockBusinessDomain>
     <div className={`report-workbench ${selected ? 'is-detail-open' : ''}`.trim()}>
       <section className="report-library-panel" aria-label="报告资产列表">
-        <header className="report-library-header"><div><h1>报告中心</h1><p>统一管理与发现报告资产，支持浏览、协作与发布</p></div><AppButton variant="primary" size="small" type="button" onClick={() => snapshot ? navigate('/reports/new?snapshot=runtime-draft') : setNewOpen(true)}><Plus size={16} weight="bold" />新建报告</AppButton></header>
+        <header className="report-library-header">
+          <div className="report-library-heading">
+            <span className="report-library-kicker"><Sparkle size={14} weight="fill" /> REPORT STUDIO</span>
+            <h1>智能报告工作台</h1>
+            <p>在画布中编排指标、图表、结论与筛选，统一完成协作和发布。</p>
+          </div>
+          <div className="report-library-header-side">
+            <div className="report-library-overview" aria-label="报告概览">
+              <span><strong>{assets.length}</strong>全部报告</span>
+              <span><strong>{lifecycleCounts.PUBLISHED}</strong>已发布</span>
+              <span><strong>{lifecycleCounts.CHANGED + lifecycleCounts.DRAFT_ONLY}</strong>待处理</span>
+            </div>
+            <AppButton variant="primary" size="small" type="button" onClick={() => snapshot ? navigate('/reports/new?snapshot=runtime-draft') : setNewOpen(true)}><Plus size={16} weight="bold" />创建报告</AppButton>
+          </div>
+        </header>
 
         <div className="report-library-controls">
           <label className="report-search"><MagnifyingGlass size={17} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索报告名称或编码" aria-label="搜索报告名称或编码" /></label>
