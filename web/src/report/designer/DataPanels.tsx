@@ -124,7 +124,7 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
   }
 
   return <section className="report-interaction-panel report-filter-panel" aria-label="报告筛选器">
-    <header><strong><Funnel size={15} /> {onlyBlock ? '过滤字段' : '筛选器'}</strong><small>{onlyBlock ? '作用于这张卡片；保存后会作为画布筛选控件原位显示' : '新增筛选会自动放入画布，发布后使用者可在报告内原位操作'}</small></header>
+    <header><strong><Funnel size={15} /> {onlyBlock ? '过滤字段' : '筛选器'}</strong><small>{onlyBlock ? '作用于这张卡片；输入控件固定显示在报告头下方' : '筛选栏属于报告固定结构，不参与正文布局'}</small></header>
     {filters.length > 0 && <ul className="report-interaction-list">
       {filters.map(filter => <li key={filter.id}>
         <span>
@@ -146,7 +146,7 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
     </ul>}
     {contexts.length === 0 && <p className="report-interaction-note"><Info size={15} />先为报告添加数据集，再配置筛选器。</p>}
     {contexts.length > 0 && !formOpen && <button className="quiet-button report-filter-add" type="button" disabled={busy} onClick={() => setAdding(true)}>
-      <Plus size={15} />{onlyBlock ? '为此卡片添加过滤字段' : '添加筛选器'}
+      <Plus size={15} />{onlyBlock ? '为此卡片添加过滤字段' : '添加筛选条件'}
     </button>}
     {contexts.length > 0 && formOpen && <div className="report-interaction-form">
       {contexts.length > 1 && <label>数据集
@@ -186,7 +186,7 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
       <div className="report-filter-form-actions">
         {filters.length > 0 && <button className="quiet-button" type="button" disabled={busy} onClick={() => setAdding(false)}>取消</button>}
         <button className="primary-button" type="button" disabled={busy || !ready} onClick={submit}>
-          <Plus size={15} />{busy ? '正在保存…' : onlyBlock ? '为此卡片添加过滤字段' : '添加筛选器'}
+          <Plus size={15} />{busy ? '正在保存…' : onlyBlock ? '为此卡片添加过滤字段' : '加入筛选栏'}
         </button>
       </div>
     </div>}

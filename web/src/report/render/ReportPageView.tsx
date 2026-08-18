@@ -95,6 +95,34 @@ function inlineFilterFor(component: ReportComponent, inlineFilters?: ReportPageV
   }
 }
 
+/**
+ * 报告头与筛选栏是系统框架，CONTROL 组件和 FILTER 区域不再进入正文布局。
+ * 旧定义里已经存在的筛选卡片在这里按视图兼容隐藏，数据仍保留到作者显式保存
+ * 筛选配置或删除规则时再由受控 Operation 清理。
+ */
+function contentComponentMap(definition: ReportPageViewProps['definition'], manifests: ManifestIndex) {
+  return new Map(definition.components
+    .filter(component => component.templateRef.type !== 'filter-control' &&
+      manifests.get(component.templateRef.type, component.templateRef.version)?.renderer !== 'CONTROL')
+    .map(component => [component.id, component]))
+}
+
+function contentSections(page: Page, components: Map<string, ReportComponent>): Section[] {
+  return orderedSections(page).map(section => ({
+    ...section,
+    blocks: section.blocks.map(block => ({
+      ...block,
+      zones: block.zones
+        .filter(zone => zone.type !== 'FILTER')
+        .map(zone => ({
+          ...zone,
+          slots: zone.slots.filter(slot => !slot.componentId || components.has(slot.componentId)),
+        }))
+        .filter(zone => zone.slots.length > 0),
+    })).filter(block => block.zones.length > 0),
+  }))
+}
+
 type BlockContentProps = {
   block: Block
   components: Map<string, ReportComponent>
@@ -161,8 +189,7 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
       const rect = slotDrag.rectFor(slot.id, slot.grid)
       const dragging = slotDrag.drag?.id === slot.id
       const acceptsDrop = Boolean(editing?.onComponentDrop && !slot.componentId)
-      const emptyLabel = zone.type === 'FILTER' ? '拖入筛选控件'
-        : zone.type === 'INSIGHT' ? '拖入结论或文本组件'
+      const emptyLabel = zone.type === 'INSIGHT' ? '拖入结论或文本组件'
           : zone.type === 'CONTENT' ? '拖入图表、指标或表格' : '拖入内容组件'
       return <div className={`report-render-slot ${selected ? 'is-selected' : ''} ${dragging ? 'is-dragging' : ''} ${dropSlotId === slot.id ? 'is-drop-target' : ''}`.trim()}
         key={slot.id}
@@ -267,7 +294,7 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
   })
 
   if (section.blocks.length === 0) {
-    return <div className="report-render-placeholder is-section"><span>{editing ? '空分区：从左侧拖入图表、指标、文本或筛选控件' : '本分区暂无内容'}</span></div>
+    return <div className="report-render-placeholder is-section"><span>{editing ? '空分区：从左侧拖入图表、指标、表格或文本' : '本分区暂无内容'}</span></div>
   }
   const singleBlock = section.blocks.length === 1
   return <div className={`report-render-grid ${singleBlock ? 'is-single-block' : ''} ${interaction.drag ? 'is-dragging' : ''}`.trim()} ref={gridRef} style={{
@@ -324,9 +351,10 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
 function DesktopPage(props: ReportPageViewProps) {
   const { definition, page, manifests, editing } = props
   const canvas = canvasOf(definition)
-  const components = new Map(definition.components.map(component => [component.id, component]))
+  const components = contentComponentMap(definition, manifests)
+  const sections = contentSections(page, components)
   return <div className={`report-render-page ${editing ? 'is-editing' : ''}`.trim()}>
-    {orderedSections(page).map(section => {
+    {sections.map(section => {
       const titleOwnedByBlock = section.blocks.length === 1 && section.blocks[0]?.title === section.name
       return <section className="report-render-section"
         id={`report-section-${section.id}`} data-section-id={section.id} key={section.id}>
@@ -346,10 +374,11 @@ function DesktopPage(props: ReportPageViewProps) {
  */
 function RuntimeAutoPage(props: ReportPageViewProps & { mobile?: boolean }) {
   const { definition, page, manifests, results, designMode, onRetryBlock, interaction, mobile } = props
-  const components = new Map(definition.components.map(component => [component.id, component]))
+  const components = contentComponentMap(definition, manifests)
+  const sections = contentSections(page, components)
 
   return <div className={`report-render-page is-auto ${mobile ? 'is-mobile' : ''}`.trim()}>
-    {orderedSections(page).map(section => {
+    {sections.map(section => {
       const elements = section.blocks.flatMap(block => block.zones.flatMap(zone => zone.slots.flatMap(slot => {
         const component = slot.componentId ? components.get(slot.componentId) : undefined
         return component ? [{ block, zone, component }] : []
@@ -389,9 +418,9 @@ export function ReportPageView(props: ReportPageViewProps) {
   if (props.page.sections.length === 0) {
     return <div className={`report-render-placeholder is-page ${props.editing ? 'is-editing' : ''}`.trim()}>
       <strong>{props.editing ? '把第一个元素拖入画布' : '报告还没有内容'}</strong>
-      <span>{props.editing ? '图表、指标、文本与筛选控件会按内容类型自动排布。' : '画布中暂时没有可显示的元素。'}</span>
+      <span>{props.editing ? '报告头与筛选栏已固定，请从左侧添加图表、指标、表格或文本。' : '画布中暂时没有可显示的内容。'}</span>
       {props.editing && <ol className="report-render-placeholder-steps">
-        <li>添加元素</li><li>配置数据</li><li>在画布放置筛选</li><li>预览与发布</li>
+        <li>添加内容</li><li>配置数据</li><li>调整排版</li><li>预览与发布</li>
       </ol>}
     </div>
   }

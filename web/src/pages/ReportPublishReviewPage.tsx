@@ -9,6 +9,7 @@ import '../styles/report.css'
 import {
   reportEditorAPI, type DraftExecution, type PublicationGate, type PublicationReviewResponse, type ReportDraft,
 } from '../report/api/editor'
+import { ReportFilterStrip } from '../report/render/ReportFilterStrip'
 import { ReportPageView } from '../report/render/ReportPageView'
 import { emptyManifestIndex, indexManifests, listComponentManifests, type ManifestIndex } from '../report/render/manifests'
 import { orderedPages } from '../report/render/schema'
@@ -88,6 +89,7 @@ function PublishPreview({ draft, manifests, execution, mode }: {
   )
   return <div className={`publish-preview-document is-${mode}`}>
     <header><div><h2>{draft.definition.metadata.name}</h2><span>草稿 r{draft.revisionNo} · 发布预览</span></div></header>
+    <ReportFilterStrip filters={draft.definition.globalFilters ?? []} compact />
     {page
       ? <ReportPageView definition={draft.definition} page={page} manifests={manifests} results={results} designMode={!execution} />
       : <div className="publish-preview-empty"><Monitor size={24} /><strong>当前草稿没有可预览页面</strong><span>请返回编辑器添加章节与组件。</span></div>}

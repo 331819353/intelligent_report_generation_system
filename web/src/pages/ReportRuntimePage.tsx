@@ -15,6 +15,7 @@ import {
   type ReportShareRecord, type RuntimeExecution, type RuntimePage,
 } from '../report/api/runtime'
 import type { ReportAsset } from '../report/assets/model'
+import { ReportFilterStrip } from '../report/render/ReportFilterStrip'
 import { ReportPageView } from '../report/render/ReportPageView'
 import { emptyManifestIndex, indexManifests, listComponentManifests, type ManifestIndex } from '../report/render/manifests'
 import { describeSelections, useReportRuntimeState, type ReportExecutionInput } from '../report/render/runtime-state'
@@ -292,19 +293,6 @@ export function ReportRuntimePage() {
     () => new Map((execution?.components ?? []).map(item => [item.componentId, item])),
     [execution],
   )
-  const canvasFilterCount = useMemo(() => {
-    if (!loaded || !page) return 0
-    const componentMap = new Map(loaded.definition.components.map(component => [component.id, component]))
-    return placedComponentIDs(page).reduce((count, componentId) => {
-      const component = componentMap.get(componentId)
-      if (!component || manifests.get(component.templateRef.type, component.templateRef.version)?.renderer !== 'CONTROL') return count
-      const field = component.dataBinding?.dimensions?.[0]?.field
-      const dataContextId = component.dataBinding?.dataContextId
-      return count + Number(Boolean(field && dataContextId && filters.some(filter =>
-        filter.fieldRef.field === field && filter.fieldRef.dataContextId === dataContextId)))
-    }, 0)
-  }, [filters, loaded, manifests, page])
-
   const run = async (input: ReportExecutionInput, blockId?: string) => {
     if (!loaded || !page) return
     abortRef.current?.abort()
@@ -402,7 +390,6 @@ export function ReportRuntimePage() {
           </div>
           <div className="runtime-header-actions">
             <button className="quiet-button" type="button" disabled={refreshing} onClick={() => void run(currentInput())}><ArrowClockwise className={refreshing ? 'is-spinning' : ''} size={16} />刷新</button>
-            {canvasFilterCount > 0 && <button className="primary-button runtime-apply-button" type="button" disabled={refreshing} onClick={applyFilters}><Funnel size={16} />应用筛选</button>}
             <button className="quiet-button" type="button" disabled={!loaded?.versionId} onClick={() => setCreateDecisionOpen(true)}><ShieldCheck size={17} />形成决策</button>
             <button className="quiet-button" type="button" disabled={!assetMeta?.allowedActions.includes('EDIT')} onClick={() => navigate(`/reports/${reportId}?mode=edit`)}><NotePencil size={17} />编辑</button>
             <button className="quiet-button" type="button" disabled={!loaded?.definition.runtimePolicy?.exportEnabled || !assetMeta?.allowedActions.includes('EXPORT')} onClick={() => setExportOpen(true)}><DownloadSimple size={17} />导出</button>
@@ -418,6 +405,9 @@ export function ReportRuntimePage() {
           </div>
         </div>
       </header>
+
+      {!loading && loaded && <ReportFilterStrip filters={filters} values={runtimeState.filterValues}
+        onChange={runtimeState.setFilterValue} onApply={applyFilters} applying={refreshing} />}
 
       {loading && <div className="runtime-report-feedback"><SpinnerGap className="is-spinning" size={25} /><strong>正在加载不可变发布制品</strong><p>随后会按当前查看者权限执行可见组件。</p></div>}
       {!loading && loadError && !loaded && <div className="runtime-report-feedback is-error"><WarningCircle size={25} /><strong>报告加载失败</strong><p>{loadError}</p><button type="button" onClick={() => window.location.reload()}>重新加载</button></div>}
@@ -435,7 +425,6 @@ export function ReportRuntimePage() {
           {page
             ? <ReportPageView definition={loaded.definition} page={page} manifests={manifests}
               results={results} onRetryBlock={blockId => void run(currentInput(), blockId)}
-              inlineFilters={{ definitions: filters, values: runtimeState.filterValues, onChange: runtimeState.setFilterValue }}
               interaction={{ roleFor: runtimeState.roleFor, onSelect: selectComponent }} />
             : <div className="runtime-report-level-empty"><WarningCircle size={24} /><strong>发布版本没有可显示页面</strong><p>请联系报告 Owner 检查不可变 Definition。</p></div>}
         </main>

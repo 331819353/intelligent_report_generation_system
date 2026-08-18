@@ -1,7 +1,7 @@
 import {
   ArrowDown, ArrowLeft, ArrowUp, ArrowUDownLeft, ArrowUDownRight, BracketsCurly, CaretDown, CaretRight, Check,
   CheckCircle, CirclesFour, Database, DotsThreeVertical, Eye, Funnel, Info, MagicWand,
-  NotePencil, PencilSimple, Plus, ShieldCheck, Sparkle, SpinnerGap, Trash, WarningCircle, X,
+  LockSimple, NotePencil, PencilSimple, Plus, ShieldCheck, Sparkle, SpinnerGap, Trash, WarningCircle, X,
 } from '@phosphor-icons/react'
 import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
@@ -15,6 +15,7 @@ import {
 } from '../report/api/editor'
 import { reportAssetsAPI } from '../report/api/assets'
 import type { ReportAsset } from '../report/assets/model'
+import { ReportFilterStrip } from '../report/render/ReportFilterStrip'
 import { ReportPageView } from '../report/render/ReportPageView'
 import { InteractionPanel } from '../report/designer/InteractionPanel'
 import { EvidencePanel } from '../report/designer/EvidencePanel'
@@ -677,6 +678,7 @@ export function ReportEditorPage() {
   const [jsonOpen, setJsonOpen] = useState(false)
   const [sidePanel, setSidePanel] = useState<'ai' | 'data' | 'appearance' | 'interaction'>('data')
   const [reportInspectorView, setReportInspectorView] = useState<'overview' | 'datasets' | 'filters'>('overview')
+  const [designFilterValues, setDesignFilterValues] = useState<Record<string, unknown>>({})
   const [editorView, setEditorView] = useState<'edit' | 'preview'>('edit')
   const [lastReceipt, setLastReceipt] = useState<{ from: number; to: number; count: number; source: string } | null>(null)
   const [renamingSectionId, setRenamingSectionId] = useState('')
@@ -724,7 +726,8 @@ export function ReportEditorPage() {
     page: draft ? orderedPages(draft.definition)[0]?.id ?? '' : '',
     bindings: draft?.definition.components.map(component => [component.id, component.dataBinding]) ?? [],
     filters: draft?.definition.globalFilters ?? [],
-  }), [draft])
+    filterValues: designFilterValues,
+  }), [designFilterValues, draft])
 
   const executing = Boolean(draft) && settledSignature !== dataSignature
 
@@ -734,7 +737,7 @@ export function ReportEditorPage() {
     const page = draft ? orderedPages(draft.definition)[0] : undefined
     if (!page) return undefined
     const controller = new AbortController()
-    void reportEditorAPI.executeDraft(reportId, { pageId: page.id }, { signal: controller.signal })
+    void reportEditorAPI.executeDraft(reportId, { pageId: page.id, filterValues: designFilterValues }, { signal: controller.signal })
       .then(result => {
         if (controller.signal.aborted) return
         setExecution(result); setExecutionError('')
@@ -789,18 +792,21 @@ export function ReportEditorPage() {
 
   const page = useMemo<Page | undefined>(() => draft ? orderedPages(draft.definition)[0] : undefined, [draft])
   const sections = useMemo(() => page ? orderedSections(page) : [], [page])
+  const contentComponents = useMemo(() => draft?.definition.components.filter(component =>
+    component.templateRef.type !== 'filter-control' &&
+    manifests.get(component.templateRef.type, component.templateRef.version)?.renderer !== 'CONTROL') ?? [], [draft, manifests])
   const activeSection = sections.find(section => section.id === activeSectionId) ?? sections[0]
   const selectedComponent = useMemo(
-    () => draft?.definition.components.find(component => component.id === selectedComponentId),
-    [draft, selectedComponentId],
+    () => contentComponents.find(component => component.id === selectedComponentId),
+    [contentComponents, selectedComponentId],
   )
 
   useEffect(() => {
     if (newMode || selectionInitialized || !draft) return
     setSelectionInitialized(true)
-    const firstComponent = draft.definition.components[0]
+    const firstComponent = contentComponents[0]
     if (firstComponent) setSelectedComponentId(firstComponent.id)
-  }, [draft, newMode, selectionInitialized])
+  }, [contentComponents, draft, newMode, selectionInitialized])
   const selectedCard = useMemo(
     () => page && selectedComponentId ? findComponentBlock(page, selectedComponentId) : undefined,
     [page, selectedComponentId],
@@ -1002,75 +1008,34 @@ export function ReportEditorPage() {
   }
 
   const createFilter = async (filterDraft: FilterDraft) => {
-    if (!draft || !page || !canEdit) return
+    if (!draft || !canEdit) return
     setFilterBusy(true); setFilterError('')
-    const filterId = crypto.randomUUID()
-    const operations = createFilterOperations(draft.definition, filterDraft, () => filterId)
-    const controlManifest = manifests.list().find(manifest => manifest.renderer === 'CONTROL')
-    if (!controlManifest) {
-      setFilterError('筛选控件清单尚未加载，请稍后重试。')
-      setFilterBusy(false)
-      return
-    }
-    const placement = addComponentOperations({
-      definition: draft.definition, page, sectionId: activeSection?.id,
-      manifest: controlManifest, title: filterDraft.field,
-      dataContextId: filterDraft.dataContextId, fields: fieldsOf(filterDraft.dataContextId),
-      sectionName: `${sectionNoun} 1`, newId: () => crypto.randomUUID(),
-    })
-    operations.push(...placement.operations, {
-      op: 'DATA_BINDING_UPDATE', targetId: placement.componentId,
-      payload: {
-        mode: 'DATASET_FIELD',
-        dataBinding: {
-          bindingMode: 'DATASET_FIELD', dataContextId: filterDraft.dataContextId,
-          dimensions: [{ role: 'DIMENSION', field: filterDraft.field }], measures: [],
-        },
-      },
-    })
-    const saved = await commit(operations, '筛选器已放入画布并生成新修订', setFilterError)
-    if (saved) setSelectedComponentId(placement.componentId)
+    await commit(createFilterOperations(draft.definition, filterDraft, () => crypto.randomUUID()), '报告筛选已更新', setFilterError)
     setFilterBusy(false)
   }
 
   const updateFilter = async (filter: GlobalFilter, filterDraft: FilterDraft) => {
     if (!draft || !canEdit) return
     setFilterBusy(true); setFilterError('')
-    const operations = updateFilterOperations(filter, filterDraft)
-    draft.definition.components.filter(component => {
-      const manifest = manifests.get(component.templateRef.type, component.templateRef.version)
-      return manifest?.renderer === 'CONTROL' &&
-        component.dataBinding?.dataContextId === filter.fieldRef.dataContextId &&
-        component.dataBinding?.dimensions?.[0]?.field === filter.fieldRef.field
-    }).forEach(component => operations.push({
-      op: 'DATA_BINDING_UPDATE', targetId: component.id,
-      payload: {
-        mode: 'DATASET_FIELD',
-        dataBinding: {
-          bindingMode: 'DATASET_FIELD', dataContextId: filterDraft.dataContextId,
-          dimensions: [{ role: 'DIMENSION', field: filterDraft.field }], measures: [],
-        },
-      },
-    }))
-    await commit(operations, '画布筛选规则已更新', setFilterError)
+    await commit(updateFilterOperations(filter, filterDraft), '报告筛选规则已更新', setFilterError)
     setFilterBusy(false)
   }
 
   const deleteFilter = async (filterId: string) => {
-    if (!draft || !page || !canEdit) return
+    if (!draft || !canEdit) return
     setFilterBusy(true); setFilterError('')
     const filter = draft.definition.globalFilters?.find(item => item.id === filterId)
     const linkedControls = filter ? draft.definition.components.filter(component => {
       const manifest = manifests.get(component.templateRef.type, component.templateRef.version)
-      return manifest?.renderer === 'CONTROL' &&
+      return (component.templateRef.type === 'filter-control' || manifest?.renderer === 'CONTROL') &&
         component.dataBinding?.dataContextId === filter.fieldRef.dataContextId &&
         component.dataBinding?.dimensions?.[0]?.field === filter.fieldRef.field
     }) : []
     const operations = [
       ...deleteFilterOperations(filterId),
-      ...linkedControls.flatMap(component => removeComponentOperations(page, component.id)),
+      ...(page ? linkedControls.flatMap(component => removeComponentOperations(page, component.id)) : []),
     ]
-    const saved = await commit(operations, '筛选规则与画布控件已移除', setFilterError)
+    const saved = await commit(operations, '报告筛选已移除', setFilterError)
     if (saved && linkedControls.some(component => component.id === selectedComponentId)) setSelectedComponentId('')
     setFilterBusy(false)
   }
@@ -1422,7 +1387,7 @@ export function ReportEditorPage() {
             onDrop={dropFromPalette}>
             <article className="report-editor-paper report-editor-live-paper" onClick={event => { if (editorView !== 'edit' || (event.target as HTMLElement).closest('.report-render-block')) return; setSelectedComponentId('') }}>
               <header className="report-editor-document-header">
-                <div><h2>{draft.definition.metadata.name}</h2></div>
+                <div><h2>{draft.definition.metadata.name}</h2>{editorView === 'edit' && <span className="report-editor-fixed-label"><LockSimple size={12} />固定报告头</span>}</div>
                 <div className="report-editor-document-meta">
                   <span>报告类型：{reportTypeLabels[draft.definition.metadata.reportType]?.name ?? draft.definition.metadata.reportType}</span>
                   <span>当前修订：r{draft.revisionNo}</span>
@@ -1439,6 +1404,9 @@ export function ReportEditorPage() {
                 </div>
                 {draft.definition.metadata.description && <p className="report-editor-description">{draft.definition.metadata.description}</p>}
               </header>
+              <ReportFilterStrip filters={draft.definition.globalFilters ?? []} values={designFilterValues}
+                onChange={(filterId, value) => setDesignFilterValues(current => ({ ...current, [filterId]: value }))}
+                onConfigure={editorView === 'edit' ? () => { setSelectedComponentId(''); setSidePanel('data'); setReportInspectorView('filters') } : undefined} />
               {/* 首次执行返回前按设计态呈现；之后组件状态一律来自真实执行结果。 */}
               <ReportPageView definition={draft.definition} page={page} manifests={manifests} results={results}
                 designMode={!execution}
@@ -1501,7 +1469,7 @@ export function ReportEditorPage() {
                   </button>
                   <button type="button" onClick={() => setReportInspectorView('filters')}>
                     <span className="report-inspector-overview-icon"><Funnel size={18} /></span>
-                    <span><strong>画布筛选</strong><small>{reportFilterCount > 0 ? `${reportFilterCount} 个已配置` : '尚未配置'}</small></span>
+                    <span><strong>报告筛选</strong><small>{reportFilterCount > 0 ? `${reportFilterCount} 个已配置` : '固定显示在报告头下方'}</small></span>
                     <CaretRight size={16} />
                   </button>
                 </div>
@@ -1515,10 +1483,10 @@ export function ReportEditorPage() {
                 <DataContextPanel definition={draft.definition} candidates={contexts} busy={dataBusy || !canEdit} error={dataError}
                   onAdd={candidate => void addDataContext(candidate)} onRemove={dataContextId => void removeDataContext(dataContextId)} />
               </section>}
-              {reportInspectorView === 'filters' && <section className="report-inspector-detail" aria-label="画布筛选配置">
+              {reportInspectorView === 'filters' && <section className="report-inspector-detail" aria-label="报告筛选配置">
                 <header>
                   <button type="button" aria-label="返回报告配置" onClick={() => setReportInspectorView('overview')}><ArrowLeft size={17} /></button>
-                  <div><h2>画布筛选</h2><span>{reportFilterCount} 个已配置</span></div>
+                  <div><h2>报告筛选</h2><span>{reportFilterCount} 个已配置 · 固定区域</span></div>
                 </header>
                 <FilterPanel definition={draft.definition} candidates={contexts} fieldsOf={fieldsOf} selectedBlockId={selectedCardId}
                   busy={filterBusy || !canEdit} error={filterError}
@@ -1580,7 +1548,7 @@ export function ReportEditorPage() {
           阻断问题与证据校验结论由发布评审的确定性门禁给出，这里不预判。 */}
       <footer className="report-editor-statusbar">
         <span><strong>r{draft.revisionNo}</strong> 每次修改即自动保存为新修订，可撤销</span>
-        <span>{sections.length} 个{sectionNoun} · {draft.definition.components.length} 个画布元素 · {draft.definition.components.filter(component => component.dataBinding).length} 个已绑定数据 · {(draft.definition.globalFilters ?? []).length} 个画布筛选</span>
+        <span>{sections.length} 个{sectionNoun} · {contentComponents.length} 个内容元素 · {contentComponents.filter(component => component.dataBinding).length} 个已绑定数据 · {(draft.definition.globalFilters ?? []).length} 个报告筛选</span>
         {lastReceipt && <span>上次 AI 应用：r{lastReceipt.from} → r{lastReceipt.to}，{lastReceipt.count} 项</span>}
         <span className="report-editor-statusbar-hint">{selectedComponent ? '已选中组件：Delete 删除 · Esc 取消选中' : '发布前检查在「预览与发布」中进行'}</span>
       </footer>
