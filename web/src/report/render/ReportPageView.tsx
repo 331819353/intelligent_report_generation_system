@@ -1,4 +1,5 @@
 import { type CSSProperties, useRef, useState } from 'react'
+import { Copy, Trash } from '@phosphor-icons/react'
 import { ReportBlockBoundary, ReportComponentBoundary, ComponentStateView } from '../runtime/ComponentStateView.tsx'
 import { useMobileViewport } from './use-mobile-viewport.ts'
 import { BlockHandles, SlotHandles } from './BlockInteraction.tsx'
@@ -268,7 +269,8 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
   if (section.blocks.length === 0) {
     return <div className="report-render-placeholder is-section"><span>{editing ? '空分区：从左侧拖入图表、指标、文本或筛选控件' : '本分区暂无内容'}</span></div>
   }
-  return <div className={`report-render-grid ${interaction.drag ? 'is-dragging' : ''}`.trim()} ref={gridRef} style={{
+  const singleBlock = section.blocks.length === 1
+  return <div className={`report-render-grid ${singleBlock ? 'is-single-block' : ''} ${interaction.drag ? 'is-dragging' : ''}`.trim()} ref={gridRef} style={{
     gridTemplateColumns: `repeat(${canvas.desktop.columns}, minmax(0, 1fr))`,
     gridAutoRows: `${canvas.desktop.baseRowHeight}px`,
     columnGap: `${canvas.desktop.gapX}px`,
@@ -283,7 +285,7 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
         <div className={`report-render-block is-${block.type.toLocaleLowerCase()} ${dragging ? 'is-dragging' : ''} ${selected ? 'is-selected' : ''}`.trim()}
           data-block-id={block.id}
           style={{
-            gridColumn: `${rect.x + 1} / span ${Math.max(rect.w, 1)}`,
+            gridColumn: singleBlock ? '1 / -1' : `${rect.x + 1} / span ${Math.max(rect.w, 1)}`,
             gridRow: `${rect.y - originY + 1} / span ${Math.max(rect.h, 1)}`,
           }}
           onClick={editing && onSelectComponent && componentIds[0]
@@ -309,9 +311,9 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
             onNudge={(next, mode) => editing.onLayoutChange(section.id, block.id, next, mode)} />}
           {editing && (editing.onDuplicateBlock || editing.onDeleteBlock) && <div className="report-block-toolbar" role="toolbar" aria-label="画布元素操作">
             {editing.onDuplicateBlock && <button type="button" title="复制元素" aria-label="复制元素"
-              onClick={event => { event.stopPropagation(); editing.onDuplicateBlock?.(section.id, block.id) }}>⧉</button>}
+              onClick={event => { event.stopPropagation(); editing.onDuplicateBlock?.(section.id, block.id) }}><Copy size={14} /></button>}
             {editing.onDeleteBlock && <button type="button" className="is-danger" title="删除元素" aria-label="删除元素"
-              onClick={event => { event.stopPropagation(); editing.onDeleteBlock?.(section.id, block.id) }}>✕</button>}
+              onClick={event => { event.stopPropagation(); editing.onDeleteBlock?.(section.id, block.id) }}><Trash size={14} /></button>}
           </div>}
         </div>
       </ReportBlockBoundary>

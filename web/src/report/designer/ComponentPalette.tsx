@@ -1,4 +1,5 @@
-import { ChartBar, ChartLine, ChartPieSlice, DotsSixVertical, Funnel, Gauge, Image as ImageIcon, Info, ListBullets, Sparkle, Table, TextT } from '@phosphor-icons/react'
+import { ChartBar, ChartLine, ChartPieSlice, Funnel, Gauge, Image as ImageIcon, Info, ListBullets, MagnifyingGlass, SlidersHorizontal, Sparkle, Table, TextT } from '@phosphor-icons/react'
+import { useMemo, useState } from 'react'
 import type { ComponentManifest } from '../render/manifests.ts'
 import { manifestRef, paletteDragType } from './operations.ts'
 
@@ -26,15 +27,47 @@ export function ComponentPalette({ manifests, disabled, onPick }: {
   disabled: boolean
   onPick: (manifest: ComponentManifest) => void
 }) {
-  const groups = (Object.keys(categoryLabels) as ComponentManifest['category'][])
-    .map(category => ({ category, items: manifests.filter(item => item.category === category) }))
-    .filter(group => group.items.length > 0)
+  const [query, setQuery] = useState('')
+  const [filterOpen, setFilterOpen] = useState(false)
+  const [category, setCategory] = useState<ComponentManifest['category'] | ''>('')
+  const filtered = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase()
+    return manifests.filter(manifest => (!category || manifest.category === category) && (!normalized ||
+      manifest.displayName.toLocaleLowerCase().includes(normalized) ||
+      manifest.type.toLocaleLowerCase().includes(normalized) ||
+      categoryLabels[manifest.category].includes(normalized)))
+  }, [category, manifests, query])
+  const unique = (items: ComponentManifest[]) => Array.from(new Map(items.map(item => [manifestRef(item), item])).values())
+  const favoriteTypes = ['line-trend', 'bar-comparison', 'data-table', 'insight-text', 'image']
+  const favorites = unique(favoriteTypes
+    .map(type => filtered.find(item => item.type === type))
+    .filter((item): item is ComponentManifest => Boolean(item)))
+  const recent = unique(filtered.filter(item => !favorites.includes(item)).slice(0, 5))
+  const essentials = unique(filtered.filter(item =>
+    item.category === 'CONTENT' || item.category === 'CONTROL' || item.category === 'TABLE').slice(0, 8))
+  const sections = query.trim()
+    ? [{ label: '搜索结果', items: filtered }]
+    : [
+        { label: '收藏', items: favorites },
+        { label: '最近使用', items: recent },
+        { label: '基础元素', items: essentials },
+      ].filter(section => section.items.length > 0)
   return <div className="report-palette" aria-label="组件面板">
-    <header><strong>画布元素</strong><small>拖入画布或点击添加，位置会自动排布</small></header>
-    {groups.map(group => <section key={group.category}>
-      <h3>{categoryLabels[group.category]}</h3>
+    <header><strong>内容</strong><small>拖入报告或点击添加</small></header>
+    <div className="report-palette-search">
+      <MagnifyingGlass size={16} />
+      <input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索元素" aria-label="搜索画布元素" />
+      <button type="button" aria-label="筛选元素" aria-expanded={filterOpen} title="按类型筛选" onClick={() => setFilterOpen(open => !open)}><SlidersHorizontal size={16} /></button>
+    </div>
+    {filterOpen && <div className="report-palette-filters" aria-label="元素类型筛选">
+      <button type="button" className={!category ? 'is-active' : ''} onClick={() => setCategory('')}>全部</button>
+      {(Object.keys(categoryLabels) as ComponentManifest['category'][]).map(item => <button type="button" key={item}
+        className={category === item ? 'is-active' : ''} onClick={() => setCategory(item)}>{categoryLabels[item]}</button>)}
+    </div>}
+    {sections.map(section => <section key={section.label}>
+      <h3>{section.label}</h3>
       <div className="report-palette-grid">
-        {group.items.map(manifest => <button type="button" key={manifestRef(manifest)} className="report-palette-item"
+        {section.items.map(manifest => <button type="button" key={`${section.label}:${manifestRef(manifest)}`} className="report-palette-item"
           draggable={!disabled} disabled={disabled}
           title={`${manifest.displayName} · 维度 ${manifest.dataContract.dimensions.min}～${manifest.dataContract.dimensions.max}，度量 ${manifest.dataContract.measures.min}～${manifest.dataContract.measures.max}`}
           onDragStart={event => {
@@ -42,13 +75,13 @@ export function ComponentPalette({ manifests, disabled, onPick }: {
             event.dataTransfer.effectAllowed = 'copy'
           }}
           onClick={() => onPick(manifest)}>
-          <span className="report-palette-grip"><DotsSixVertical size={12} /></span>
           <span className="report-palette-icon">{paletteIcon(manifest)}</span>
           <strong>{manifest.displayName}</strong>
-          <small>{manifest.recommendedSize.w}×{manifest.recommendedSize.h}</small>
+          <small>{categoryLabels[manifest.category]}</small>
         </button>)}
       </div>
     </section>)}
-    {manifests.length === 0 && <p className="report-interaction-note"><Info size={15} />组件清单尚未加载。</p>}
+    {manifests.length === 0 && <p className="report-interaction-note"><Info size={15} />元素清单尚未加载。</p>}
+    {manifests.length > 0 && filtered.length === 0 && <p className="report-interaction-note"><Info size={15} />没有匹配的元素。</p>}
   </div>
 }

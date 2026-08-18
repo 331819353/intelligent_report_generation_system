@@ -1,6 +1,6 @@
 import {
   ArrowDown, ArrowLeft, ArrowUp, ArrowUDownLeft, ArrowUDownRight, BracketsCurly, CaretDown, CaretRight, Check,
-  CheckCircle, CirclesFour, Info, MagicWand,
+  CheckCircle, CirclesFour, DotsThreeVertical, Eye, Info, MagicWand,
   NotePencil, PencilSimple, Plus, ShieldCheck, Sparkle, SpinnerGap, Trash, WarningCircle, X,
 } from '@phosphor-icons/react'
 import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from 'react'
@@ -313,10 +313,10 @@ function pruneOptions(options: ComponentOptions, manifest: ComponentManifest): C
  * 卡片配置面板（右侧内联）：数据集 → 展示类型 → 指标（度量）与维度 → 过滤字段 → 样式。
  * 保存走 COMPONENT_REPLACE / COMPONENT_UPDATE / DATA_BINDING_UPDATE 受控 Operation。
  */
-function CardInspector({ component, manifest: currentManifest, manifests, reportContexts, contextNameOf, fieldsOf, defaultContextId, canAI, onSuggest, busy, error, onClose, onSave, onDelete, filterPanel }: {
+function CardInspector({ mode, component, manifest: currentManifest, manifests, reportContexts, contextNameOf, fieldsOf, defaultContextId, canAI, onSuggest, busy, error, onClose, onSave, filterPanel }: {
+  mode: 'data' | 'appearance'
   component?: EditorComponent
   manifest?: ComponentManifest
-  onDelete: () => void
   /** 作用于该卡片的过滤字段面板（由页面注入，避免面板自持草稿状态）。 */
   filterPanel: ReactNode
   /** 可切换的展示类型（组件清单）。 */
@@ -435,11 +435,12 @@ function CardInspector({ component, manifest: currentManifest, manifests, report
 
   return <section className="report-card-inspector" aria-labelledby="manual-editor-title">
       <header>
-        <div><span className="eyebrow">卡片配置</span><h2 id="manual-editor-title">{component?.options.title || component?.templateRef.type || '组件'}</h2></div>
+        <div><h2 id="manual-editor-title">{mode === 'data' ? '数据绑定' : '外观设置'}</h2><span>{component?.options.title || component?.templateRef.type || '画布元素'}</span></div>
         <button type="button" aria-label="取消选中" onClick={onClose}><X size={18} /></button>
       </header>
       <div className="report-editor-manual-form">
-        <h4 className="report-inspector-group">数据</h4>
+        {mode === 'data' && <>
+        <h4 className="report-inspector-group">数据源</h4>
         {!semanticBound && reportContexts.length > 0 && <label>数据集
           <select aria-label="卡片数据集" value={dataContextId} onChange={event => changeContext(event.target.value)}>
             {reportContexts.map(context => <option key={context.id} value={context.id}>{contextNameOf(context.id)}</option>)}
@@ -480,7 +481,9 @@ function CardInspector({ component, manifest: currentManifest, manifests, report
           {!measuresValid && <p className="report-editor-inline-error"><WarningCircle size={15} />指标数量不符合要求</p>}
           {!dimensionsValid && <p className="report-editor-inline-error"><WarningCircle size={15} />维度数量不符合要求</p>}
         </div>}
+        </>}
 
+        {mode === 'appearance' && <>
         <h4 className="report-inspector-group">内容</h4>
         <label>标题<input value={options.title ?? ''} placeholder="卡片标题" onChange={event => setOption('title', event.target.value)} /></label>
         <label>副标题<input value={options.subtitle ?? ''} placeholder="可选" onChange={event => setOption('subtitle', event.target.value)} /></label>
@@ -518,19 +521,19 @@ function CardInspector({ component, manifest: currentManifest, manifests, report
             </label>
           })}
         </div>}
+        </>}
         {error && <div className="report-editor-inline-error"><WarningCircle size={15} />{error}</div>}
       </div>
       <footer>
-        <button className="quiet-button is-danger" type="button" disabled={busy} onClick={onDelete}><Trash size={15} />删除卡片</button>
         <button className="primary-button" type="button" disabled={busy || !options.title?.trim() || !bindingValid}
           onClick={() => onSave({
             options: { ...(manifest ? pruneOptions(options, manifest) : options), title: options.title?.trim(), subtitle: options.subtitle?.trim() },
             binding: bindable ? { dimensions, measures } : undefined,
             dataContextId: bindable ? dataContextId : undefined,
             replaceWith: replacing ? manifest : undefined,
-          })}>{busy ? '正在保存…' : '保存'}</button>
+          })}>{busy ? '正在应用…' : '应用'}</button>
       </footer>
-      {filterPanel}
+      {mode === 'data' && filterPanel}
     </section>
 }
 
@@ -639,6 +642,7 @@ export function ReportEditorPage() {
   const [scopeMode, setScopeMode] = useState<'page' | 'section'>('page')
   const [activeSectionId, setActiveSectionId] = useState('')
   const [selectedComponentId, setSelectedComponentId] = useState('')
+  const [selectionInitialized, setSelectionInitialized] = useState(false)
   const [aiPreview, setAIPreview] = useState<AIPreviewResponse | undefined>()
   const [previewing, setPreviewing] = useState(false)
   const [applying, setApplying] = useState(false)
@@ -661,7 +665,8 @@ export function ReportEditorPage() {
   const [filterBusy, setFilterBusy] = useState(false)
   const [filterError, setFilterError] = useState('')
   const [jsonOpen, setJsonOpen] = useState(false)
-  const [sidePanel, setSidePanel] = useState<'ai' | 'data'>('data')
+  const [sidePanel, setSidePanel] = useState<'ai' | 'data' | 'appearance' | 'interaction'>('data')
+  const [editorView, setEditorView] = useState<'edit' | 'preview'>('edit')
   const [lastReceipt, setLastReceipt] = useState<{ from: number; to: number; count: number; source: string } | null>(null)
   const [renamingSectionId, setRenamingSectionId] = useState('')
   const [renamingTitle, setRenamingTitle] = useState(false)
@@ -778,6 +783,13 @@ export function ReportEditorPage() {
     () => draft?.definition.components.find(component => component.id === selectedComponentId),
     [draft, selectedComponentId],
   )
+
+  useEffect(() => {
+    if (newMode || selectionInitialized || !draft) return
+    setSelectionInitialized(true)
+    const firstComponent = draft.definition.components[0]
+    if (firstComponent) setSelectedComponentId(firstComponent.id)
+  }, [draft, newMode, selectionInitialized])
   const selectedCard = useMemo(
     () => page && selectedComponentId ? findComponentBlock(page, selectedComponentId) : undefined,
     [page, selectedComponentId],
@@ -1318,25 +1330,34 @@ export function ReportEditorPage() {
   if (!draft || !page) return <AppShell className="report-editor-shell" lockBusinessDomain defaultSidebarCollapsed><div className="report-editor-loading is-error"><WarningCircle size={28} /><strong>报告编辑器无法打开</strong><p>{loadError || '当前草稿没有可编辑页面。'}</p><button type="button" onClick={() => navigate('/reports')}>返回报告工作台</button></div></AppShell>
 
   return <AppShell className="report-editor-shell" lockBusinessDomain defaultSidebarCollapsed>
-    <div className="report-editor-workspace">
+    <div className={`report-editor-workspace is-${editorView}-view`}>
       <header className="report-editor-header">
-        <div>
-          <button type="button" onClick={() => navigate('/reports')}><ArrowLeft size={15} />返回报告工作台</button>
+        <div className="report-editor-header-leading">
+          <img className="report-editor-brand" src="/haier-logo.svg" alt="Haier 海尔" />
+          <span className="report-editor-header-divider" aria-hidden="true" />
+          <button className="report-editor-back" type="button" aria-label="返回报告工作台" title="返回报告工作台" onClick={() => navigate('/reports')}><ArrowLeft size={19} /></button>
           <div className="report-editor-title">
             {renamingTitle
               ? <input className="report-editor-title-input" autoFocus defaultValue={draft.definition.metadata.name} maxLength={80} aria-label="报告名称"
                 onBlur={event => void renameReport(event.target.value)}
                 onKeyDown={event => { if (event.key === 'Enter') (event.target as HTMLInputElement).blur(); if (event.key === 'Escape') setRenamingTitle(false) }} />
               : <h1 title={canEdit ? '点击重命名' : ''} onClick={() => canEdit && setRenamingTitle(true)}>{draft.definition.metadata.name}{canEdit && <PencilSimple size={13} />}</h1>}
-            <span>{reportTypeLabels[draft.definition.metadata.reportType]?.name ?? draft.definition.metadata.reportType} · 草稿 r{draft.revisionNo}</span><small>已自动保存 {dateTime(draft.updatedAt).split(' ').at(-1)}</small>
+            <span><CheckCircle size={14} weight="fill" />草稿已自动保存 {dateTime(draft.updatedAt).split(' ').at(-1)}</span>
           </div>
         </div>
+        <div className="report-editor-view-switch" role="tablist" aria-label="编辑器视图">
+          <button type="button" role="tab" aria-selected={editorView === 'edit'} className={editorView === 'edit' ? 'is-active' : ''}
+            onClick={() => setEditorView('edit')}>编辑</button>
+          <button type="button" role="tab" aria-selected={editorView === 'preview'} className={editorView === 'preview' ? 'is-active' : ''}
+            onClick={() => { setEditorView('preview'); setSelectedComponentId('') }}>预览</button>
+        </div>
         <div className="report-editor-header-actions">
-          <button className="quiet-button" type="button" onClick={() => setJsonOpen(true)}><BracketsCurly size={16} />定义 JSON</button>
           <button type="button" aria-label="撤销" disabled={!canEdit || applying} onClick={() => void undoRedo(false)}><ArrowUDownLeft size={20} /></button>
           <button type="button" aria-label="重做" disabled={!canEdit || applying} onClick={() => void undoRedo(true)}><ArrowUDownRight size={20} /></button>
-          <button className="quiet-button" type="button" disabled={!canEdit || manifests.list().length === 0} title="添加图表、指标、文本或筛选，系统会自动安排画布位置" onClick={() => { setComponentError(''); setComponentLibraryOpen(true) }}><Plus size={16} />添加元素</button>
-          <button className="quiet-button" type="button" disabled={!canPublish || Boolean(aiPreview)} title={aiPreview ? '请先应用或退回当前 AI 方案' : ''} onClick={() => navigate(`/reports/${reportId}/publish-review`)}><ShieldCheck size={16} />预览与发布</button>
+          <button className={`report-editor-ai-trigger ${sidePanel === 'ai' ? 'is-active' : ''}`} type="button" disabled={!canAIEdit}
+            aria-label="AI 改稿" title="AI 改稿" onClick={() => { setEditorView('edit'); setSidePanel('ai') }}><Sparkle size={18} weight="fill" /></button>
+          <button className="report-editor-publish primary-button" type="button" disabled={!canPublish || Boolean(aiPreview)} title={aiPreview ? '请先应用或退回当前 AI 方案' : ''} onClick={() => navigate(`/reports/${reportId}/publish-review`)}><Eye size={17} />发布</button>
+          <button className="report-editor-more" type="button" aria-label="打开报告定义" title="打开报告定义 JSON" onClick={() => setJsonOpen(true)}><DotsThreeVertical size={20} /></button>
         </div>
       </header>
 
@@ -1347,10 +1368,12 @@ export function ReportEditorPage() {
           <nav className="report-editor-outline report-editor-sidebar" aria-label="组件面板与大纲">
             <ComponentPalette manifests={manifests.list()} disabled={!canEdit}
               onPick={pickComponentForSlot} />
-            <header><strong>{sectionNoun}</strong><span>{canEdit && <>
-              <button type="button" className="report-outline-add" title={`新建${sectionNoun}`} onClick={() => void addSection()}><Plus size={13} />{sectionNoun}</button>
-            </>}</span></header>
-            <ul className="report-outline-list">
+            <details className="report-editor-structure-panel">
+              <summary><span>页面结构</span><em>{sections.length}</em><CaretRight size={14} /></summary>
+              <header><strong>{sectionNoun}</strong><span>{canEdit && <>
+                <button type="button" className="report-outline-add" title={`新建${sectionNoun}`} onClick={() => void addSection()}><Plus size={13} />新建</button>
+              </>}</span></header>
+              <ul className="report-outline-list">
               {sections.map((section, index) => <li key={section.id} className={`report-outline-item ${section.id === activeSectionId ? 'is-active' : ''}`.trim()}>
                 {renamingSectionId === section.id
                   ? <input autoFocus defaultValue={section.name} maxLength={60} aria-label={`${sectionNoun}名称`}
@@ -1371,39 +1394,44 @@ export function ReportEditorPage() {
                   <button type="button" className="is-danger" aria-label={`删除${sectionNoun}`} title={`删除${sectionNoun}`} onClick={() => { setActiveSectionId(section.id); setComponentError(''); setDeleteSectionOpen(true) }}><Trash size={12} /></button>
                 </span>}
               </li>)}
-            </ul>
-            {sections.length === 0 && <p>拖入第一张卡片即自动创建{sectionNoun}</p>}
+              </ul>
+              {sections.length === 0 && <p>添加第一个元素后自动创建{sectionNoun}</p>}
+            </details>
           </nav>
           <main className={`report-editor-canvas ${aiPreview ? 'has-ai-proposal' : ''}`.trim()}
             onDragOver={event => { if (event.dataTransfer.types.includes(paletteDragType)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' } }}
             onDrop={dropFromPalette}>
-            <article className="report-editor-paper report-editor-live-paper" onClick={event => { if ((event.target as HTMLElement).closest('.report-render-block')) return; setSelectedComponentId('') }}>
-              <header>
-                <div><h2>{draft.definition.metadata.name}</h2><ShieldCheck size={17} weight="fill" /></div>
-                <small>{sections.length ? '元素会按内容类型自动排布；筛选控件也会原位呈现在发布报告中' : '从左侧拖入第一个画布元素'}</small>
+            <article className="report-editor-paper report-editor-live-paper" onClick={event => { if (editorView !== 'edit' || (event.target as HTMLElement).closest('.report-render-block')) return; setSelectedComponentId('') }}>
+              <header className="report-editor-document-header">
+                <div><h2>{draft.definition.metadata.name}</h2></div>
+                <div className="report-editor-document-meta">
+                  <span>报告类型：{reportTypeLabels[draft.definition.metadata.reportType]?.name ?? draft.definition.metadata.reportType}</span>
+                  <span>当前修订：r{draft.revisionNo}</span>
+                  <span>数据源：{reportContexts.length} 个</span>
+                  <span aria-live="polite">
+                    {executing
+                      ? <><SpinnerGap className="is-spinning" size={13} />正在刷新预览</>
+                      : executionError
+                        ? <><WarningCircle size={13} />预览暂不可用</>
+                        : execution
+                          ? <><CheckCircle size={13} weight="fill" />数据截至 {dateTime(execution.asOf)}</>
+                          : <><Info size={13} />尚未执行预览</>}
+                  </span>
+                </div>
+                {draft.definition.metadata.description && <p className="report-editor-description">{draft.definition.metadata.description}</p>}
               </header>
-              {draft.definition.metadata.description && <p className="report-editor-description">{draft.definition.metadata.description}</p>}
-              <p className="report-editor-preview-status" aria-live="polite">
-                {executing
-                  ? <><SpinnerGap className="is-spinning" size={14} />正在按你的权限执行当前草稿…</>
-                  : executionError
-                    ? <><WarningCircle size={14} />{executionError}</>
-                    : execution
-                      ? <><CheckCircle size={14} weight="fill" />草稿预览 r{execution.revisionNo} · 数据截至 {dateTime(execution.asOf)}</>
-                      : <><Info size={14} />尚未执行草稿预览</>}
-              </p>
               {/* 首次执行返回前按设计态呈现；之后组件状态一律来自真实执行结果。 */}
               <ReportPageView definition={draft.definition} page={page} manifests={manifests} results={results}
                 designMode={!execution}
-                selectedComponentId={selectedComponentId}
-                onSelectComponent={(componentId, blockId) => {
+                selectedComponentId={editorView === 'edit' ? selectedComponentId : ''}
+                onSelectComponent={editorView === 'edit' ? (componentId, blockId) => {
                   setSelectedComponentId(componentId)
                   if (componentId) setSidePanel('data')
                   const located = findComponentBlock(page, componentId)
                   if (located) setActiveSectionId(located.section.id)
                   else if (blockId) setActiveSectionId(activeSectionId)
-                }}
-                editing={canEdit ? {
+                } : undefined}
+                editing={editorView === 'edit' && canEdit ? {
                   onLayoutChange: (sectionId, blockId, rect) => void changeLayout(sectionId, blockId, rect),
                   onSlotLayoutChange: (blockId, zoneId, slotId, rect) => void changeSlotLayout(blockId, zoneId, slotId, rect),
                   onZoneReorder: (blockId, zoneId, direction) => void reorderZone(blockId, zoneId, direction),
@@ -1419,31 +1447,28 @@ export function ReportEditorPage() {
 
         <aside className="report-editor-task-panel">
           <div className="report-editor-panel-tabs" role="tablist" aria-label="侧栏面板">
-            <button type="button" role="tab" aria-selected={sidePanel === 'data'} className={sidePanel === 'data' ? 'is-active' : ''} onClick={() => setSidePanel('data')}>{selectedComponent ? '卡片配置' : '数据与筛选'}</button>
-            <button type="button" role="tab" aria-selected={sidePanel === 'ai'} className={sidePanel === 'ai' ? 'is-active' : ''} onClick={() => setSidePanel('ai')}>AI 改稿<small>试验</small></button>
+            <button type="button" role="tab" aria-selected={sidePanel === 'data'} className={sidePanel === 'data' ? 'is-active' : ''} onClick={() => setSidePanel('data')}>数据</button>
+            <button type="button" role="tab" aria-selected={sidePanel === 'appearance'} className={sidePanel === 'appearance' ? 'is-active' : ''} onClick={() => setSidePanel('appearance')}>外观</button>
+            <button type="button" role="tab" aria-selected={sidePanel === 'interaction'} className={sidePanel === 'interaction' ? 'is-active' : ''} onClick={() => setSidePanel('interaction')}>交互</button>
+            <button type="button" role="tab" aria-label="AI 改稿" aria-selected={sidePanel === 'ai'} className={`report-editor-panel-ai ${sidePanel === 'ai' ? 'is-active' : ''}`} onClick={() => setSidePanel('ai')}><Sparkle size={15} weight="fill" /></button>
           </div>
-          {sidePanel === 'data' && <div className="report-editor-panel-body is-data">
+          {(sidePanel === 'data' || sidePanel === 'appearance') && <div className="report-editor-panel-body is-data">
             {selectedComponent ? <>
               <CardInspector
-                key={selectedComponent.id}
+                key={`${selectedComponent.id}:${sidePanel}`}
+                mode={sidePanel}
                 component={selectedComponent} manifest={selectedManifest} manifests={manifests.list()}
                 reportContexts={reportContexts} contextNameOf={contextNameOf} fieldsOf={fieldsOf} defaultContextId={currentDataContextId}
                 canAI={canAIEdit} onSuggest={suggestBinding}
                 busy={manualBusy || !canEdit} error={manualError}
                 onClose={() => setSelectedComponentId('')} onSave={result => void saveManual(result)}
-                onDelete={() => void deleteSelectedComponent()}
-                filterPanel={<FilterPanel definition={draft.definition} candidates={contexts} fieldsOf={fieldsOf} selectedBlockId={selectedCardId}
+                filterPanel={sidePanel === 'data' ? <FilterPanel definition={draft.definition} candidates={contexts} fieldsOf={fieldsOf} selectedBlockId={selectedCardId}
                   onlyBlock defaultContextId={selectedComponent.dataBinding?.dataContextId ?? currentDataContextId}
                   busy={filterBusy || !canEdit} error={filterError}
                   onCreate={filterDraft => void createFilter(filterDraft)} onUpdate={(filter, filterDraft) => void updateFilter(filter, filterDraft)}
-                  onDelete={filterId => void deleteFilter(filterId)} />}
+                  onDelete={filterId => void deleteFilter(filterId)} /> : null}
               />
-              {selectedComponent.dataBinding && <EvidencePanel key={`evidence-${selectedComponent.id}`} reportId={reportId} component={selectedComponent} canEdit={canEdit} />}
-              <InteractionPanel definition={draft.definition} manifests={manifests}
-                sourceComponentId={selectedComponent.id} busy={interactionBusy} error={interactionError}
-                onCreate={interactionDraft => void addInteraction(interactionDraft)}
-                onDelete={interactionId => void removeInteraction(interactionId)} />
-            </> : <>
+            </> : sidePanel === 'data' ? <>
               <p className="report-editor-binding-note report-editor-panel-intro"><Info size={15} />点击画布上的卡片可配置它的数据集、指标与过滤字段；下面是报告级的数据集与筛选器。</p>
               <DataContextPanel definition={draft.definition} candidates={contexts} busy={dataBusy || !canEdit} error={dataError}
                 onAdd={candidate => void addDataContext(candidate)} onRemove={dataContextId => void removeDataContext(dataContextId)} />
@@ -1451,7 +1476,16 @@ export function ReportEditorPage() {
                 busy={filterBusy || !canEdit} error={filterError}
                 onCreate={filterDraft => void createFilter(filterDraft)} onUpdate={(filter, filterDraft) => void updateFilter(filter, filterDraft)}
                 onDelete={filterId => void deleteFilter(filterId)} />
-            </>}
+            </> : <div className="report-editor-panel-empty"><Sparkle size={20} /><strong>选择一个画布元素</strong><p>选中后可调整标题、说明和图表表现。</p></div>}
+          </div>}
+          {sidePanel === 'interaction' && <div className="report-editor-panel-body is-data is-interaction">
+            {selectedComponent ? <>
+              {selectedComponent.dataBinding && <EvidencePanel key={`evidence-${selectedComponent.id}`} reportId={reportId} component={selectedComponent} canEdit={canEdit} />}
+              <InteractionPanel definition={draft.definition} manifests={manifests}
+                sourceComponentId={selectedComponent.id} busy={interactionBusy} error={interactionError}
+                onCreate={interactionDraft => void addInteraction(interactionDraft)}
+                onDelete={interactionId => void removeInteraction(interactionId)} />
+            </> : <div className="report-editor-panel-empty"><Sparkle size={20} /><strong>选择一个画布元素</strong><p>选中后可配置筛选联动、钻取和证据。</p></div>}
           </div>}
           {sidePanel === 'ai' && <div className="report-editor-panel-body is-ai">
           <header><div><h2>AI 改稿会话</h2><span>{aiPreview?.aiRunId || '等待开始'}</span></div><em className={aiPreview ? 'is-pending' : ''}>{previewing ? '思考中' : aiPreview ? '待确认' : '可输入'}</em></header>
