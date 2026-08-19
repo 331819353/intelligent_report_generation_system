@@ -539,6 +539,41 @@ func newReportDefinition(
 	}
 }
 
+const reportTemplateSlotKind = "TEMPLATE_REPORT_CONTENT"
+
+// blankReportTemplateSections gives a manually created report a polished reading
+// structure without preselecting any business component. The four empty slots are
+// real Definition slots, so manual and AI edits fill the same governed structure.
+func blankReportTemplateSections() []reportmodel.Section {
+	sectionID := askdata.ID(uuid.NewString())
+	block := func(title string, blockType reportmodel.BlockType, zoneType reportmodel.ZoneType, x, y, width, blockHeight, slotRows, order int) reportmodel.Block {
+		blockID := askdata.ID(uuid.NewString())
+		zoneID := askdata.ID(uuid.NewString())
+		slotID := askdata.ID(uuid.NewString())
+		return reportmodel.Block{
+			ID: blockID, Type: blockType, Title: title,
+			Layout: reportmodel.BlockLayout{
+				Desktop: reportmodel.DesktopBlockLayout{X: x, Y: y, W: width, H: blockHeight},
+				Mobile:  reportmodel.MobileBlockLayout{Order: order, Visible: true, HeightMode: reportmodel.MobileHeightAuto, SlotMode: reportmodel.MobileSlotStack},
+			},
+			Zones: []reportmodel.Zone{{
+				ID: zoneID, Order: 1, Type: zoneType,
+				Layout: reportmodel.ZoneLayout{HeightMode: reportmodel.ZoneHeightAuto, MinHeight: 1, Columns: width, Rows: slotRows, Overflow: reportmodel.OverflowExpand, EmptyPriority: 1},
+				Slots:  []reportmodel.Slot{{ID: slotID, Grid: reportmodel.SlotGrid{X: 0, Y: 0, W: width, H: slotRows}, CardKind: reportTemplateSlotKind}},
+			}},
+		}
+	}
+	return []reportmodel.Section{{
+		ID: sectionID, Name: "分析内容", Order: 1,
+		Blocks: []reportmodel.Block{
+			block("关键结论概览", reportmodel.BlockContent, reportmodel.ZoneInsight, 0, 0, 24, 2, 2, 1),
+			block("订单趋势分析", reportmodel.BlockChart, reportmodel.ZoneContent, 0, 2, 12, 3, 4, 2),
+			block("销售结构分析", reportmodel.BlockChart, reportmodel.ZoneContent, 12, 2, 12, 3, 4, 3),
+			block("订单明细数据", reportmodel.BlockTable, reportmodel.ZoneContent, 0, 5, 24, 2, 4, 4),
+		},
+	}}
+}
+
 // componentManifests 暴露已注册的组件模板合同（角色白名单、维度/度量上下限、
 // 默认选项）。设计器的数据绑定面板需要它才能只提交合法的绑定。
 func (handler *Handler) componentManifests(writer http.ResponseWriter, request *http.Request) {
@@ -711,6 +746,9 @@ func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Re
 		selectedContexts[0], reportmodel.CreatedManually,
 	), reportType)
 	definition.DataContexts = selectedContexts
+	if reportType == reportmodel.ReportTypeReport {
+		definition.Pages[0].Sections = blankReportTemplateSections()
+	}
 	reportRecord, draft, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
 		ID: reportID, Code: definition.Metadata.Code, Name: definition.Metadata.Name,
 		ReportType: definition.Metadata.ReportType, Definition: definition,

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { addToCardOperations, createStructuredBlockOperations, placeComponentInSlotOperations, removeComponentOperations } from './operations.ts'
+import { addToCardOperations, createStructuredBlockOperations, findCompatibleTemplateSlot, placeComponentInSlotOperations, removeComponentOperations } from './operations.ts'
 import type { Block, Page, ReportDefinition, ZoneType } from '../render/schema.ts'
 import type { ComponentManifest } from '../render/manifests.ts'
 
@@ -142,4 +142,45 @@ test('removing a component from a structured block restores its empty slot', () 
   const operations = removeComponentOperations(pageWith([block]), 'conclusion')
   assert.deepEqual(operations.map(item => item.op), ['SLOT_UPDATE', 'COMPONENT_DELETE'])
   assert.equal((operations[0].payload as { componentId: string }).componentId, '')
+})
+
+test('palette additions choose the first compatible report template slot', () => {
+  const chartManifest: ComponentManifest = { ...manifest, type: 'line-trend', category: 'CHART', renderer: 'ECHARTS' }
+  const tableManifest: ComponentManifest = { ...manifest, type: 'data-table', category: 'TABLE', renderer: 'REACT' }
+  const templateBlock = (id: string, type: Block['type']): Block => {
+    const block = card(id, [zone(`zone-${id}`, 'CONTENT', [])])
+    block.type = type
+    block.zones[0].slots = [{ id: `slot-${id}`, grid: { x: 0, y: 0, w: 12, h: 6 }, cardKind: 'TEMPLATE_REPORT_CONTENT' }]
+    return block
+  }
+  const page = pageWith([templateBlock('chart', 'CHART'), templateBlock('table', 'TABLE')])
+  assert.equal(findCompatibleTemplateSlot(page, 'section-1', chartManifest)?.slotId, 'slot-chart')
+  assert.equal(findCompatibleTemplateSlot(page, 'section-1', tableManifest)?.slotId, 'slot-table')
+})
+
+test('removing a component from a report template preserves its fillable position', () => {
+  const block = card('block-1', [zone('zone-content', 'CONTENT', ['chart'])])
+  block.type = 'CHART'
+  block.zones[0].slots[0].cardKind = 'TEMPLATE_REPORT_CONTENT'
+  const operations = removeComponentOperations(pageWith([block]), 'chart')
+  assert.deepEqual(operations.map(item => item.op), ['SLOT_UPDATE', 'COMPONENT_DELETE'])
+  assert.equal((operations[0].payload as { componentId: string }).componentId, '')
+})
+
+test('filling a compact template slot expands the block to the component minimum', () => {
+  const block = card('table-block', [zone('table-zone', 'CONTENT', [])])
+  block.type = 'TABLE'
+  block.layout.desktop = { x: 0, y: 0, w: 24, h: 2 }
+  block.zones[0].layout = { ...block.zones[0].layout, columns: 24, rows: 4 }
+  block.zones[0].slots = [{ id: 'table-slot', grid: { x: 0, y: 0, w: 24, h: 4 }, cardKind: 'TEMPLATE_REPORT_CONTENT' }]
+  const tableManifest: ComponentManifest = {
+    ...manifest, type: 'data-table', category: 'TABLE', renderer: 'REACT',
+    minSize: { w: 6, h: 4 }, recommendedSize: { w: 12, h: 8 },
+  }
+  const result = placeComponentInSlotOperations({
+    page: pageWith([block]), blockId: block.id, zoneId: 'table-zone', slotId: 'table-slot',
+    manifest: tableManifest, title: '明细', dataContextId: 'ctx', fields: [], newId,
+  })
+  assert.deepEqual(result.operations.map(item => item.op), ['COMPONENT_CREATE', 'SLOT_UPDATE', 'BLOCK_RESIZE'])
+  assert.equal((result.operations[2].payload as { h: number }).h, 4)
 })

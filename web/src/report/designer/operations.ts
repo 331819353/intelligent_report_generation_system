@@ -88,6 +88,42 @@ export function manifestFitsZone(manifest: ComponentManifest, kind: ZoneKind): b
   return manifest.category === 'CONTENT'
 }
 
+export type TemplateSlotTarget = { sectionId: string; blockId: string; zoneId: string; slotId: string }
+
+const templateSlotPrefix = 'TEMPLATE_'
+
+function manifestFitsTemplateBlock(manifest: ComponentManifest, block: Block): boolean {
+  if (block.type === 'CHART') return manifest.category === 'CHART'
+  if (block.type === 'TABLE') return manifest.category === 'TABLE'
+  if (block.type === 'CONTENT') return manifest.category === 'CONTENT'
+  if (block.type === 'KPI_GROUP') return manifest.type === 'metric-card'
+  return true
+}
+
+/**
+ * 报告展示模板的空位是内容容器，不是需要用户管理的布局节点。点击组件或把组件
+ * 拖到画布时，优先填充当前章节中类型匹配的第一个模板空位；模板填满后才回退到
+ * 自动新增画布元素。
+ */
+export function findCompatibleTemplateSlot(
+  page: Page, sectionId: string | undefined, manifest: ComponentManifest,
+): TemplateSlotTarget | undefined {
+  const sections = orderedSections(page)
+  const preferred = sections.find(section => section.id === sectionId)
+  const candidates = preferred ? [preferred, ...sections.filter(section => section.id !== preferred.id)] : sections
+  for (const section of candidates) {
+    for (const block of section.blocks) {
+      if (!manifestFitsTemplateBlock(manifest, block)) continue
+      for (const zone of block.zones.slice().sort((left, right) => (left.order ?? 0) - (right.order ?? 0))) {
+        if (!manifestFitsZone(manifest, zone.type)) continue
+        const slot = zone.slots.find(item => !item.componentId && item.cardKind?.startsWith(templateSlotPrefix))
+        if (slot) return { sectionId: section.id, blockId: block.id, zoneId: zone.id, slotId: slot.id }
+      }
+    }
+  }
+  return undefined
+}
+
 /** 结论与页眉页脚按内容高度自适应，内容区占据卡片剩余空间。 */
 function zoneLayoutFor(kind: ZoneKind, columns: number, rows: number): Zone['layout'] {
   if (kind === 'CONTENT') {
@@ -129,12 +165,19 @@ export function placeComponentInSlotOperations(input: PlaceComponentInSlotInput)
   }
   const componentId = input.newId()
   const component = buildComponent(componentId, input.manifest, input.title, input.dataContextId, input.fields)
+  const operations: EditorOperation[] = [
+    { op: 'COMPONENT_CREATE', targetId: componentId, payload: { component } },
+    { op: 'SLOT_UPDATE', targetId: slot.id, payload: { grid: slot.grid, componentId } },
+  ]
+  if (slot.cardKind?.startsWith(templateSlotPrefix) && located.block.layout.desktop.h < minimum.h) {
+    operations.push(...layoutOperations(
+      located.section, located.block.id,
+      { ...located.block.layout.desktop, h: minimum.h }, 24, minimum,
+    ))
+  }
   return {
     componentId,
-    operations: [
-      { op: 'COMPONENT_CREATE', targetId: componentId, payload: { component } },
-      { op: 'SLOT_UPDATE', targetId: slot.id, payload: { grid: slot.grid, componentId } },
-    ],
+    operations,
   }
 }
 
@@ -397,7 +440,8 @@ export function removeComponentOperations(page: Page, componentId: string): Edit
     const slot = zone?.slots.find(item => item.componentId === componentId)
     const structured = Boolean(block.title) && (['FILTER', 'INSIGHT', 'CONTENT'] as ZoneKind[])
       .every(kind => block.zones.some(item => item.type === kind))
-    if (structured && slot) {
+    const templateSlot = slot?.cardKind?.startsWith(templateSlotPrefix)
+    if ((structured || templateSlot) && slot) {
       operations.push({ op: 'SLOT_UPDATE', targetId: slot.id, payload: { grid: slot.grid, componentId: '' } })
     } else if (!zone || block.zones.length <= 1) {
       operations.push({ op: 'BLOCK_DELETE', targetId: block.id, payload: {} })

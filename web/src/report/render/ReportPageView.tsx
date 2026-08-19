@@ -1,5 +1,5 @@
 import { type CSSProperties, useRef, useState } from 'react'
-import { Copy, Trash } from '@phosphor-icons/react'
+import { ChartLineUp, Copy, Lightbulb, Table, Trash } from '@phosphor-icons/react'
 import { ReportBlockBoundary, ReportComponentBoundary, ComponentStateView } from '../runtime/ComponentStateView.tsx'
 import { useMobileViewport } from './use-mobile-viewport.ts'
 import { BlockHandles, SlotHandles } from './BlockInteraction.tsx'
@@ -65,6 +65,8 @@ export type ReportPageViewProps = {
   onSelectComponent?: (componentId: string, blockId: string) => void
   selectedComponentId?: string
   editing?: EditingHandlers
+  /** 新建页只读预览：保留模板空槽位，但不显示任何编辑把手。 */
+  templatePreview?: boolean
   /**
    * 联动上下文。传入后，声明为联动源且清单支持点击的组件即可被点击选中；
    * 具体影响范围由服务端按定义中的 Interaction 解析，渲染器不做推断。
@@ -123,6 +125,11 @@ function contentSections(page: Page, components: Map<string, ReportComponent>): 
   }))
 }
 
+function isDisplayTemplateSection(section: Section): boolean {
+  return section.blocks.some(block => block.zones.some(zone =>
+    zone.slots.some(slot => slot.cardKind?.startsWith('TEMPLATE_'))))
+}
+
 type BlockContentProps = {
   block: Block
   components: Map<string, ReportComponent>
@@ -136,6 +143,7 @@ type BlockContentProps = {
   interaction?: ReportPageViewProps['interaction']
   inlineFilters?: ReportPageViewProps['inlineFilters']
   editing?: EditingHandlers
+  templatePreview?: boolean
 }
 
 /**
@@ -189,8 +197,13 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
       const rect = slotDrag.rectFor(slot.id, slot.grid)
       const dragging = slotDrag.drag?.id === slot.id
       const acceptsDrop = Boolean(editing?.onComponentDrop && !slot.componentId)
-      const emptyLabel = zone.type === 'INSIGHT' ? '拖入结论或文本组件'
-          : zone.type === 'CONTENT' ? '拖入图表、指标或表格' : '拖入内容组件'
+      const authoring = Boolean(editing || props.templatePreview)
+      const emptyLabel = block.type === 'TABLE' ? '拖入数据表格'
+        : block.type === 'CHART' ? '拖入图表组件'
+          : zone.type === 'INSIGHT' ? '拖入智能结论或富文本'
+            : zone.type === 'CONTENT' ? '拖入图表、指标或表格' : '拖入内容组件'
+      const authoringHint = editing ? '从左侧选择或拖拽到这里' : '创建后可选择或拖拽组件填充'
+      const EmptyIcon = block.type === 'TABLE' ? Table : block.type === 'CHART' ? ChartLineUp : Lightbulb
       return <div className={`report-render-slot ${selected ? 'is-selected' : ''} ${dragging ? 'is-dragging' : ''} ${dropSlotId === slot.id ? 'is-drop-target' : ''}`.trim()}
         key={slot.id}
         data-slot-id={slot.id}
@@ -215,7 +228,7 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
           event.preventDefault(); event.stopPropagation(); setDropSlotId('')
           editing?.onComponentDrop?.(block.id, zone.id, slot.id, ref)
         } : undefined}>
-        {editing && slot.cardKind && <span className="report-slot-kind-badge">{slot.cardKind}</span>}
+        {editing && slot.cardKind && !slot.cardKind.startsWith('TEMPLATE_') && <span className="report-slot-kind-badge">{slot.cardKind}</span>}
         {component
           ? <ReportComponentBoundary fallback={<ComponentStateView state="ERROR" onAction={() => onRetryBlock?.(block.id)} />}>
             <ComponentView component={component} manifests={manifests} mobile={mobile} designMode={designMode}
@@ -229,7 +242,7 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
           </ReportComponentBoundary>
           : slot.componentId
             ? <ComponentStateView state="ERROR" boundTitle="组件在定义中缺失" />
-            : <div className="report-render-empty-slot"><strong>{zone.type}</strong><span>{editing ? emptyLabel : '待配置'}</span></div>}
+            : <div className="report-render-empty-slot"><EmptyIcon size={20} weight="duotone" /><strong>{authoring ? emptyLabel : '待配置'}</strong><span>{authoring ? authoringHint : '内容尚未配置'}</span></div>}
         {slotEditable && editing && <SlotHandles
           slotId={slot.id} rect={slot.grid} columns={columns} rows={rows} minimum={minSizeFor(slot.id)}
           onStart={(event, mode) => slotDrag.start(event, slot.id, slot.grid, mode)}
@@ -309,7 +322,7 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
       const componentIds = blockComponentIDs(block)
       const selected = Boolean(selectedComponentId) && componentIds.includes(selectedComponentId ?? '')
       return <ReportBlockBoundary key={block.id}>
-        <div className={`report-render-block is-${block.type.toLocaleLowerCase()} ${dragging ? 'is-dragging' : ''} ${selected ? 'is-selected' : ''}`.trim()}
+        <div className={`report-render-block is-${block.type.toLocaleLowerCase()} ${componentIds.length === 0 ? 'is-empty-block' : ''} ${dragging ? 'is-dragging' : ''} ${selected ? 'is-selected' : ''}`.trim()}
           data-block-id={block.id}
           style={{
             gridColumn: singleBlock ? '1 / -1' : `${rect.x + 1} / span ${Math.max(rect.w, 1)}`,
@@ -318,7 +331,7 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
           onClick={editing && onSelectComponent && componentIds[0]
             ? event => { event.stopPropagation(); onSelectComponent(componentIds[0], block.id) }
             : undefined}>
-          {editing && block.cardKind && <span className="report-block-kind-badge">{block.cardKind}</span>}
+          {editing && block.cardKind && !block.cardKind.startsWith('TEMPLATE_') && <span className="report-block-kind-badge">{block.cardKind}</span>}
           {block.title && <header className="report-render-block-head">
             {editing?.onBlockTitleChange
               ? <input key={block.title} defaultValue={block.title} maxLength={200} aria-label="元素组标题"
@@ -353,12 +366,13 @@ function DesktopPage(props: ReportPageViewProps) {
   const canvas = canvasOf(definition)
   const components = contentComponentMap(definition, manifests)
   const sections = contentSections(page, components)
-  return <div className={`report-render-page ${editing ? 'is-editing' : ''}`.trim()}>
+  return <div className={`report-render-page ${editing ? 'is-editing' : ''} ${props.templatePreview ? 'is-template-preview' : ''}`.trim()}>
     {sections.map(section => {
       const titleOwnedByBlock = section.blocks.length === 1 && section.blocks[0]?.title === section.name
+      const displayTemplate = isDisplayTemplateSection(section)
       return <section className="report-render-section"
         id={`report-section-${section.id}`} data-section-id={section.id} key={section.id}>
-        {!titleOwnedByBlock && <header className="report-render-section-head"><h2>{section.name}</h2>{section.question && <p>{section.question}</p>}</header>}
+        {!titleOwnedByBlock && !displayTemplate && <header className="report-render-section-head"><h2>{section.name}</h2>{section.question && <p>{section.question}</p>}</header>}
         <SectionGrid section={section} canvas={canvas} editing={editing} manifests={manifests} components={components}
           selectedComponentId={props.selectedComponentId} onSelectComponent={props.onSelectComponent}
           content={block => <BlockZones {...props} block={block} components={components} manifests={manifests} />} />
@@ -384,9 +398,10 @@ function RuntimeAutoPage(props: ReportPageViewProps & { mobile?: boolean }) {
         return component ? [{ block, zone, component }] : []
       })))
       if (elements.length === 0) return null
+      const displayTemplate = isDisplayTemplateSection(section)
       return <section className="report-render-section report-runtime-auto-section"
         id={`report-section-${section.id}`} data-section-id={section.id} key={section.id}>
-        <header className="report-render-section-head"><div><span /> <h2>{section.name}</h2></div>{section.question && <p>{section.question}</p>}</header>
+        {!displayTemplate && <header className="report-render-section-head"><div><span /> <h2>{section.name}</h2></div>{section.question && <p>{section.question}</p>}</header>}
         <div className="report-runtime-auto-grid">
           {elements.map(({ block, zone, component }) => {
             const manifest = manifests.get(component.templateRef.type, component.templateRef.version)
@@ -425,5 +440,5 @@ export function ReportPageView(props: ReportPageViewProps) {
     </div>
   }
   // 编辑态保留可操作的结构栅格；发布态一律提升为独立元素并自动重排。
-  return props.editing ? <DesktopPage {...props} /> : <RuntimeAutoPage {...props} mobile={mobile} />
+  return props.editing || props.templatePreview ? <DesktopPage {...props} /> : <RuntimeAutoPage {...props} mobile={mobile} />
 }

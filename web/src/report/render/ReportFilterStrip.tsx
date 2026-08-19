@@ -1,4 +1,4 @@
-import { Check, Funnel, LockSimple, SlidersHorizontal } from '@phosphor-icons/react'
+import { ArrowClockwise, Check, Funnel, LockSimple, Plus } from '@phosphor-icons/react'
 import { FilterControl } from './FilterControl.tsx'
 import type { GlobalFilter } from './schema.ts'
 
@@ -27,9 +27,11 @@ export function ReportFilterStrip({ filters, values = {}, onChange, onApply, app
         {filters.map(filter => <FilterControl key={filter.id} filter={filter} value={values[filter.id]}
           onChange={value => onChange?.(filter.id, value)} />)}
       </fieldset>
-      : <p className="report-fixed-filter-empty">尚未配置筛选条件</p>}
+      : onConfigure
+        ? <button className="report-fixed-filter-empty" type="button" onClick={onConfigure}><Plus size={14} />添加常用筛选条件</button>
+        : <p className="report-fixed-filter-empty">当前报告无需筛选</p>}
     <div className="report-fixed-filter-actions">
-      {onConfigure && <button className="quiet-button" type="button" onClick={onConfigure}><SlidersHorizontal size={14} />配置</button>}
+      {onChange && filters.length > 0 && <button className="quiet-button report-filter-reset" type="button" onClick={() => filters.forEach(filter => onChange(filter.id, undefined))}><ArrowClockwise size={14} />重置</button>}
       {onApply && filters.length > 0 && <button className="primary-button" type="button" disabled={applying} onClick={onApply}>
         <Check size={14} />{applying ? '应用中…' : '应用筛选'}
       </button>}
