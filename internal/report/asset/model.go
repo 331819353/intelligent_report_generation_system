@@ -31,6 +31,7 @@ const (
 	ActionPermissions Action = "PERMISSIONS"
 	ActionArchive     Action = "ARCHIVE"
 	ActionRestore     Action = "RESTORE"
+	ActionDelete      Action = "DELETE"
 	ActionExport      Action = "EXPORT"
 	ActionShare       Action = "SHARE"
 	ActionAIEdit      Action = "AI_EDIT"
@@ -207,6 +208,9 @@ func allowedActions(lifecycle Lifecycle, canView, canEdit, canPublish, canExport
 		} else {
 			result = append(result, ActionArchive)
 		}
+	}
+	if canManage {
+		result = append(result, ActionDelete)
 	}
 	if canExport && lifecycle != LifecycleOffline {
 		result = append(result, ActionExport)

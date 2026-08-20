@@ -280,11 +280,6 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
   onSelectComponent?: (componentId: string, blockId: string) => void
 }) {
   const gridRef = useRef<HTMLDivElement>(null)
-  // 区块的 y 坐标在整页范围内递增，而章节各自成栅格，因此按章节内最小 y
-  // 归一化，既保留章节内的相对位置，又让章节自然纵向堆叠。
-  const originY = section.blocks.length
-    ? Math.min(...section.blocks.map(block => block.layout.desktop.y))
-    : 0
 
   const minSizeFor = (blockId: string) => {
     const block = section.blocks.find(item => item.id === blockId)
@@ -293,8 +288,45 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
     }
     const componentId = block ? blockComponentIDs(block)[0] : undefined
     const component = componentId ? components.get(componentId) : undefined
-    return minimumSize(component && manifests.get(component.templateRef.type, component.templateRef.version))
+    const manifestMinimum = minimumSize(component && manifests.get(component.templateRef.type, component.templateRef.version))
+    const structuralWidth = Math.max(1, ...(block?.zones.flatMap(zone => zone.slots.map(slot => slot.grid.x + slot.grid.w)) ?? [1]))
+    const structuralHeight = Math.max(1, block?.zones.reduce((height, zone) => height + Math.max(
+      zone.layout.rows,
+      ...zone.slots.map(slot => slot.grid.y + slot.grid.h),
+    ), 0) ?? 1)
+    return { w: Math.max(manifestMinimum.w, structuralWidth), h: Math.max(manifestMinimum.h, structuralHeight) }
   }
+
+  // 旧空白模板曾声明“区块 3 行、内部槽位 4 行”，浏览器会让内部内容
+  // 溢出选中框。渲染时先把每个区块抬到组件合同/槽位结构的最小尺寸，再将
+  // 被挤到的后续区块向下避让；已有报告因此无需破坏性迁移也不会重叠。
+  const renderedRects = new Map<string, GridRect>()
+  const placed: GridRect[] = []
+  const overlaps = (left: GridRect, right: GridRect) =>
+    left.x < right.x + right.w && left.x + left.w > right.x && left.y < right.y + right.h && left.y + left.h > right.y
+  for (const block of [...section.blocks].sort((left, right) =>
+    left.layout.desktop.y - right.layout.desktop.y || left.layout.desktop.x - right.layout.desktop.x || left.id.localeCompare(right.id))) {
+    const minimum = minSizeFor(block.id)
+    const width = Math.min(Math.max(block.layout.desktop.w, minimum.w), canvas.desktop.columns)
+    const rect: GridRect = {
+      x: Math.min(Math.max(block.layout.desktop.x, 0), Math.max(canvas.desktop.columns - width, 0)),
+      y: Math.max(block.layout.desktop.y, 0),
+      w: width,
+      h: Math.max(block.layout.desktop.h, minimum.h),
+    }
+    let collision = placed.find(item => overlaps(rect, item))
+    while (collision) {
+      rect.y = collision.y + collision.h
+      collision = placed.find(item => overlaps(rect, item))
+    }
+    renderedRects.set(block.id, rect)
+    placed.push(rect)
+  }
+  // 区块的 y 坐标在整页范围内递增，而章节各自成栅格，因此按章节内最小 y
+  // 归一化，既保留章节内的相对位置，又让章节自然纵向堆叠。
+  const originY = renderedRects.size
+    ? Math.min(...Array.from(renderedRects.values(), rect => rect.y))
+    : 0
 
   const interaction = useBlockInteraction({
     metrics: {
@@ -317,7 +349,8 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
     rowGap: `${canvas.desktop.gapY}px`,
   }}>
     {section.blocks.map(block => {
-      const rect = interaction.rectFor(block.id, block.layout.desktop)
+      const baseRect = renderedRects.get(block.id) ?? block.layout.desktop
+      const rect = interaction.rectFor(block.id, baseRect)
       const dragging = interaction.drag?.blockId === block.id
       const componentIds = blockComponentIDs(block)
       const selected = Boolean(selectedComponentId) && componentIds.includes(selectedComponentId ?? '')
@@ -345,9 +378,9 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
             {section.question && <p>{section.question}</p>}
           </header>}
           {content(block)}
-          {editing && <BlockHandles blockId={block.id} rect={block.layout.desktop} columns={canvas.desktop.columns}
+          {editing && <BlockHandles blockId={block.id} rect={baseRect} columns={canvas.desktop.columns}
             minimum={minSizeFor(block.id)}
-            onStart={(event, mode) => interaction.start(event, block.id, block.layout.desktop, mode)}
+            onStart={(event, mode) => interaction.start(event, block.id, baseRect, mode)}
             onNudge={(next, mode) => editing.onLayoutChange(section.id, block.id, next, mode)} />}
           {editing && (editing.onDuplicateBlock || editing.onDeleteBlock) && <div className="report-block-toolbar" role="toolbar" aria-label="画布元素操作">
             {editing.onDuplicateBlock && <button type="button" title="复制元素" aria-label="复制元素"

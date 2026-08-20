@@ -4763,6 +4763,10 @@ body:has(.report-editor-shell) { height: 100%; overflow: hidden; }
   border-color: #8fb9eb;
   padding: clamp(16px, 2.5cqw, 28px);
 }
+.report-editor-paper .report-analysis-card:is(.is-motif-kpi-over-narrative, .is-motif-narrative-with-kpi-rail, .is-motif-evidence-sections) {
+  height: 100%;
+  min-height: 0;
+}
 .report-analysis-card:is(.is-motif-kpi-over-narrative, .is-motif-narrative-with-kpi-rail, .is-motif-evidence-sections) > .report-analysis-card-head { display: none; }
 .report-analysis-long-form { min-height: 0; flex: 1; color: #263f5b; }
 .report-analysis-long-form small { color: #8292a5; }
@@ -5058,7 +5062,7 @@ body:has(.report-editor-shell) { height: 100%; overflow: hidden; }
 .report-designed-advanced-toggle { min-height: 27px; display: inline-flex; align-items: center; gap: 4px; border: 0; border-radius: 6px; padding: 5px 7px; background: #f0f6fc; color: #52718f; font-size: 8px; cursor: pointer; }
 .report-designed-advanced-toggle svg:last-child { transition: transform .22s ease; }
 .report-designed-header.is-advanced .report-designed-advanced-toggle svg:last-child { transform: rotate(180deg); }
-.report-designed-filter-fields { min-width: 0; display: grid; grid-template-columns: repeat(4, minmax(128px, 1fr)); align-items: end; gap: 10px; margin: 0; border: 0; padding: 0; }
+.report-designed-filter-fields { grid-column: 1 / -1; min-width: 0; display: grid; grid-template-columns: repeat(4, minmax(128px, 1fr)); align-items: end; gap: 10px; margin: 0; border: 0; padding: 0; }
 .report-designed-filter-fields .report-filter-control { min-width: 0; gap: 5px; }
 .report-designed-header .report-filter-control > span { color: #67798c; font-size: 8px; font-weight: 650; }
 .report-designed-header .report-filter-control > input,
@@ -5099,7 +5103,7 @@ body:has(.report-editor-shell) { height: 100%; overflow: hidden; }
 .report-designed-header.is-style-03 .report-designed-title { min-height: 82px; padding-block: 10px 13px; }
 .report-designed-header.is-style-03 .report-designed-filter-card { border-radius: 10px; box-shadow: none; }
 .report-designed-header.is-style-03 .report-designed-advanced-panel { border-radius: 8px; background: #f8fbfe; }
-.report-designed-header.is-style-03.is-advanced .report-designed-advanced-panel { margin-inline: -5px; padding: 11px 12px 12px; }
+.report-designed-header.is-style-03.is-advanced .report-designed-advanced-panel { margin: 0; padding: 11px 12px 12px; }
 
 .report-designed-header.is-compact { gap: 8px; }
 .report-designed-header.is-compact .report-designed-title { min-height: 64px; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 9px; padding-block: 8px; }
@@ -5149,4 +5153,90 @@ body:has(.report-editor-shell) { height: 100%; overflow: hidden; }
   .report-designed-advanced-toggle svg:last-child,
   .report-header-chooser > div > button { transition: none; }
   .report-designed-header.is-applied .report-designed-filter-card { animation: none; }
+}
+
+/* Report workbench defect fixes: keep the narrow detail drawer readable and
+   make destructive actions explicit instead of hiding them in lifecycle UI. */
+.report-asset-drawer {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+.report-drawer-header { min-height: 0; }
+.report-drawer-actions {
+  flex-wrap: wrap;
+  overflow: visible;
+}
+.report-drawer-scroll {
+  height: auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.report-drawer-meta > div {
+  grid-template-columns: 88px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  padding: 8px 0;
+}
+.report-drawer-meta dt,
+.report-drawer-meta dd { line-height: 1.55; }
+.report-drawer-lower-grid {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+.report-drawer-collaboration-column { display: grid; }
+.report-drawer-permissions > div:not(.report-avatar-stack) {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.report-drawer-secondary-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px 16px;
+  border-top: 1px solid #edf2f7;
+  margin-top: 14px;
+  padding-top: 14px;
+}
+.report-modal.is-delete-report { width: min(560px, calc(100vw - 56px)); }
+.report-delete-warning {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  margin: 18px 20px 14px;
+  border: 1px solid #f3c9c5;
+  border-radius: 10px;
+  padding: 12px;
+  background: #fff6f5;
+  color: #c43f38;
+}
+.report-delete-warning p { display: grid; gap: 3px; margin: 0; }
+.report-delete-warning strong { color: #96342f; font-size: 13px; }
+.report-delete-warning span { color: #7d5a57; font-size: 12px; line-height: 1.6; }
+.report-modal.is-delete-report > .report-lifecycle-error { margin: 0 20px 12px; color: #c43f38; }
+.report-delete-form { display: grid; gap: 13px; padding: 0 20px 18px; }
+.report-delete-form label { display: grid; gap: 7px; color: #49576a; font-size: 13px; font-weight: 680; }
+.report-delete-form input,
+.report-delete-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #dce4ed;
+  border-radius: 9px;
+  padding: 9px 10px;
+  outline: 0;
+  color: #303d50;
+  background: #fff;
+  font: inherit;
+}
+.report-delete-form input { min-height: 40px; }
+.report-delete-form textarea { min-height: 82px; resize: vertical; }
+.report-delete-form input:focus,
+.report-delete-form textarea:focus { border-color: #d86d67; box-shadow: 0 0 0 3px rgb(196 63 56 / 10%); }
+
+@media (max-width: 600px) {
+  .report-modal.is-delete-report { width: 100%; }
+  .report-drawer-meta > div { grid-template-columns: 78px minmax(0, 1fr); }
 }

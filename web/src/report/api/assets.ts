@@ -70,6 +70,11 @@ export const reportAssetsAPI = {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ reason }),
     })
   },
+  delete(reportId: string, reason: string) {
+    return apiRequest<{ reportId: string; deleted: true }>(`/v1/reports/${encodeURIComponent(reportId)}`, {
+      method: 'DELETE', headers: idempotencyHeaders(), body: JSON.stringify({ reason }),
+    })
+  },
   listEvents(reportId: string) {
     return apiRequest<{ items: AssetEvent[] }>(`/v1/reports/${encodeURIComponent(reportId)}/asset-events?limit=100`)
   },

@@ -111,6 +111,7 @@ func NewHandler(
 	mux.HandleFunc("POST /api/v1/report-blueprints/expand", handler.expandBlueprint)
 	mux.HandleFunc("POST /api/v1/reports/ai/create", handler.createAI)
 	mux.HandleFunc("GET /api/v1/reports/{id}", handler.get)
+	mux.HandleFunc("DELETE /api/v1/reports/{id}", handler.deleteReport)
 	mux.HandleFunc("GET /api/v1/reports/{id}/draft", handler.getDraft)
 	mux.HandleFunc("GET /api/v1/reports/{id}/revisions", handler.listRevisions)
 	mux.HandleFunc("POST /api/v1/reports/{id}/operations", handler.operations)
@@ -545,12 +546,13 @@ func resolveHeaderStyle(raw string, reportType reportmodel.ReportType) (reportmo
 }
 
 func defaultReportFilters(candidates []reportai.DataContextCandidate) []reportmodel.GlobalFilter {
-	filters := make([]reportmodel.GlobalFilter, 0, 4)
+	const maximumHeaderFilters = 8
+	filters := make([]reportmodel.GlobalFilter, 0, maximumHeaderFilters)
 	seen := map[string]bool{}
 	appendFields := func(wantTime bool) {
 		for _, candidate := range candidates {
 			for _, field := range candidate.FieldDefinitions {
-				if len(filters) >= 4 {
+				if len(filters) >= maximumHeaderFilters {
 					return
 				}
 				role := strings.ToUpper(strings.TrimSpace(field.Role))
@@ -585,7 +587,7 @@ func defaultReportFilters(candidates []reportai.DataContextCandidate) []reportmo
 			continue
 		}
 		for _, field := range candidate.Fields {
-			if len(filters) >= 4 {
+			if len(filters) >= maximumHeaderFilters {
 				break
 			}
 			field = strings.TrimSpace(field)
@@ -640,39 +642,11 @@ func newReportDefinition(
 	}
 }
 
-const reportTemplateSlotKind = "TEMPLATE_REPORT_CONTENT"
-
-// blankReportTemplateSections gives a manually created report a polished reading
-// structure without preselecting any business component. The four empty slots are
-// real Definition slots, so manual and AI edits fill the same governed structure.
+// A blank report deliberately starts without body sections. The report header
+// and governed global filters are framework content; the first palette drop
+// creates the first section and block at its manifest-recommended size.
 func blankReportTemplateSections() []reportmodel.Section {
-	sectionID := askdata.ID(uuid.NewString())
-	block := func(title string, blockType reportmodel.BlockType, zoneType reportmodel.ZoneType, x, y, width, blockHeight, slotRows, order int) reportmodel.Block {
-		blockID := askdata.ID(uuid.NewString())
-		zoneID := askdata.ID(uuid.NewString())
-		slotID := askdata.ID(uuid.NewString())
-		return reportmodel.Block{
-			ID: blockID, Type: blockType, Title: title,
-			Layout: reportmodel.BlockLayout{
-				Desktop: reportmodel.DesktopBlockLayout{X: x, Y: y, W: width, H: blockHeight},
-				Mobile:  reportmodel.MobileBlockLayout{Order: order, Visible: true, HeightMode: reportmodel.MobileHeightAuto, SlotMode: reportmodel.MobileSlotStack},
-			},
-			Zones: []reportmodel.Zone{{
-				ID: zoneID, Order: 1, Type: zoneType,
-				Layout: reportmodel.ZoneLayout{HeightMode: reportmodel.ZoneHeightAuto, MinHeight: 1, Columns: width, Rows: slotRows, Overflow: reportmodel.OverflowExpand, EmptyPriority: 1},
-				Slots:  []reportmodel.Slot{{ID: slotID, Grid: reportmodel.SlotGrid{X: 0, Y: 0, W: width, H: slotRows}, CardKind: reportTemplateSlotKind}},
-			}},
-		}
-	}
-	return []reportmodel.Section{{
-		ID: sectionID, Name: "分析内容", Order: 1,
-		Blocks: []reportmodel.Block{
-			block("关键结论概览", reportmodel.BlockContent, reportmodel.ZoneInsight, 0, 0, 24, 2, 2, 1),
-			block("订单趋势分析", reportmodel.BlockChart, reportmodel.ZoneContent, 0, 2, 12, 3, 4, 2),
-			block("销售结构分析", reportmodel.BlockChart, reportmodel.ZoneContent, 12, 2, 12, 3, 4, 3),
-			block("订单明细数据", reportmodel.BlockTable, reportmodel.ZoneContent, 0, 5, 24, 2, 4, 4),
-		},
-	}}
+	return []reportmodel.Section{}
 }
 
 // componentManifests 暴露已注册的组件模板合同（角色白名单、维度/度量上下限、
@@ -2080,6 +2054,25 @@ func (handler *Handler) revokePermission(writer http.ResponseWriter, request *ht
 
 func (handler *Handler) archiveReport(writer http.ResponseWriter, request *http.Request) {
 	handler.transitionReport(writer, request, false)
+}
+
+func (handler *Handler) deleteReport(writer http.ResponseWriter, request *http.Request) {
+	identity, reportID, ok := handler.subject(writer, request)
+	if !ok {
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if decodeJSON(request, &body) != nil {
+		writeError(writer, http.StatusBadRequest, "REPORT_ASSET_REASON_INVALID", "report deletion reason is invalid")
+		return
+	}
+	if err := handler.assets.Delete(request.Context(), identity, reportID, body.Reason); err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"reportId": reportID, "deleted": true})
 }
 
 func (handler *Handler) restoreReport(writer http.ResponseWriter, request *http.Request) {

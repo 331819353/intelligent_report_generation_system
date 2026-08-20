@@ -54,7 +54,7 @@ func (repository *PostgresRepository) List(ctx context.Context, identity store.I
 		return Page{}, &Error{StableCode: "REPORT_ASSET_CURSOR_INVALID", Message: "报告资产游标无效", Err: err}
 	}
 	args := []any{identity.DomainID, identity.ActorID}
-	where := []string{"report.domain_id=$1"}
+	where := []string{"report.domain_id=$1", "report.deleted_at IS NULL"}
 	add := func(value any) string { args = append(args, value); return fmt.Sprintf("$%d", len(args)) }
 	if query.Scope == "mine" {
 		where = append(where, "report.owner_user_id=$2")
@@ -386,6 +386,61 @@ func (repository *PostgresRepository) Transition(ctx context.Context, identity s
 			tenant_id,report_id,event_type,actor_user_id,reason,previous_status,new_status,payload_json
 		) VALUES($1,$2,$3,$4,$5,$6,$7,'{}'::jsonb)`, identity.TenantID, reportID, eventType, identity.ActorID, reason, fromStatus, toStatus)
 		return err
+	})
+}
+
+// Delete is intentionally recoverable at the storage layer: the report and
+// immutable audit/version records remain present, while RLS and every asset
+// projection exclude the row immediately after deleted_at is set.
+func (repository *PostgresRepository) Delete(ctx context.Context, identity store.Identity, reportID askdata.ID, reason string) error {
+	var err error
+	ctx, err = repository.context(ctx, identity, reportID)
+	if err != nil {
+		return &Error{StableCode: "REPORT_ASSET_REASON_INVALID", Message: "删除请求无效", Err: err}
+	}
+	if err := validateReason(reason); err != nil {
+		return &Error{StableCode: "REPORT_ASSET_REASON_INVALID", Message: "删除原因无效", Err: err}
+	}
+	return database.WithTenantTx(ctx, repository.pool, string(identity.TenantID), func(tx pgx.Tx) error {
+		var canManage bool
+		var alreadyDeleted bool
+		if err := tx.QueryRow(ctx, `SELECT
+			(report.owner_user_id=$3 OR platform.user_is_asset_administrator()
+			 OR platform.user_is_domain_administrator(report.domain_id)),
+			report.deleted_at IS NOT NULL
+			FROM platform.reports report WHERE report.id=$1 AND report.domain_id=$2 FOR UPDATE`,
+			reportID, identity.DomainID, identity.ActorID).Scan(&canManage, &alreadyDeleted); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if !canManage {
+			return &Error{StableCode: "REPORT_ASSET_FORBIDDEN", Message: "仅报告 Owner 或管理员可删除报告"}
+		}
+		if alreadyDeleted {
+			return ErrNotFound
+		}
+		// UPDATE rows must also satisfy the report SELECT policy. Expose only
+		// this row, only to this deleting actor, and only for this transaction;
+		// once it commits the local setting disappears and the row fails closed.
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.report_asset_delete_id',$1,true)`, reportID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO platform.report_asset_events(
+			tenant_id,report_id,event_type,actor_user_id,reason,payload_json
+		) VALUES($1,$2,'DELETED',$3,$4,'{}'::jsonb)`, identity.TenantID, reportID, identity.ActorID, reason); err != nil {
+			return err
+		}
+		command, err := tx.Exec(ctx, `UPDATE platform.reports
+			SET deleted_at=clock_timestamp(),deleted_by=$2 WHERE id=$1 AND deleted_at IS NULL`, reportID, identity.ActorID)
+		if err != nil {
+			return err
+		}
+		if command.RowsAffected() != 1 {
+			return ErrNotFound
+		}
+		return nil
 	})
 }
 

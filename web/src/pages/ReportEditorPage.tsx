@@ -27,7 +27,7 @@ import {
   type ComponentManifest, type ManifestIndex,
 } from '../report/render/manifests'
 import {
-  canvasOf, defaultCanvas, findBlock, findComponentBlock, orderedPages, orderedSections,
+  canvasOf, findBlock, findComponentBlock, orderedPages, orderedSections,
   type ComponentOptions, type FieldBinding, type GlobalFilter, type Page, type ReportDefinition, type ReportHeaderStyle, type ReportType,
 } from '../report/render/schema'
 import {
@@ -130,19 +130,6 @@ function operationDetail(operation: EditorOperation, draft: ReportDraft) {
   }
 }
 
-const reportDisplayTemplatePreviewPage: Page = {
-  id: 'preview-page', name: '报告正文', order: 1,
-  sections: [{
-    id: 'preview-section', name: '分析内容', order: 1,
-    blocks: [
-      { id: 'preview-insight', type: 'CONTENT', title: '关键结论概览', layout: { desktop: { x: 0, y: 0, w: 24, h: 2 }, mobile: { order: 1, visible: true, heightMode: 'AUTO', slotMode: 'STACK' } }, zones: [{ id: 'preview-insight-zone', order: 1, type: 'INSIGHT', layout: { heightMode: 'AUTO', minHeight: 1, columns: 24, rows: 2, overflow: 'EXPAND', emptyPriority: 1 }, slots: [{ id: 'preview-insight-slot', grid: { x: 0, y: 0, w: 24, h: 2 }, cardKind: 'TEMPLATE_REPORT_CONTENT' }] }] },
-      { id: 'preview-trend', type: 'CHART', title: '订单趋势分析', layout: { desktop: { x: 0, y: 2, w: 12, h: 3 }, mobile: { order: 2, visible: true, heightMode: 'AUTO', slotMode: 'STACK' } }, zones: [{ id: 'preview-trend-zone', order: 1, type: 'CONTENT', layout: { heightMode: 'AUTO', minHeight: 1, columns: 12, rows: 4, overflow: 'EXPAND', emptyPriority: 1 }, slots: [{ id: 'preview-trend-slot', grid: { x: 0, y: 0, w: 12, h: 4 }, cardKind: 'TEMPLATE_REPORT_CONTENT' }] }] },
-      { id: 'preview-structure', type: 'CHART', title: '销售结构分析', layout: { desktop: { x: 12, y: 2, w: 12, h: 3 }, mobile: { order: 3, visible: true, heightMode: 'AUTO', slotMode: 'STACK' } }, zones: [{ id: 'preview-structure-zone', order: 1, type: 'CONTENT', layout: { heightMode: 'AUTO', minHeight: 1, columns: 12, rows: 4, overflow: 'EXPAND', emptyPriority: 1 }, slots: [{ id: 'preview-structure-slot', grid: { x: 0, y: 0, w: 12, h: 4 }, cardKind: 'TEMPLATE_REPORT_CONTENT' }] }] },
-      { id: 'preview-table', type: 'TABLE', title: '订单明细数据', layout: { desktop: { x: 0, y: 5, w: 24, h: 2 }, mobile: { order: 4, visible: true, heightMode: 'AUTO', slotMode: 'STACK' } }, zones: [{ id: 'preview-table-zone', order: 1, type: 'CONTENT', layout: { heightMode: 'AUTO', minHeight: 1, columns: 24, rows: 4, overflow: 'EXPAND', emptyPriority: 1 }, slots: [{ id: 'preview-table-slot', grid: { x: 0, y: 0, w: 24, h: 4 }, cardKind: 'TEMPLATE_REPORT_CONTENT' }] }] },
-    ],
-  }],
-}
-
 function NewReportCanvas({ name, description, reportType, headerStyle }: { name: string; description: string; reportType: ReportType; headerStyle?: ReportHeaderStyle }) {
   return <div className="report-editor-main report-editor-new-main">
     <nav className="report-editor-outline report-editor-new-outline" aria-label="报告大纲">
@@ -154,8 +141,6 @@ function NewReportCanvas({ name, description, reportType, headerStyle }: { name:
         <ReportHeader style={headerStyle || '01'} title={name.trim() || '视听产业经营分析报告'}
           description={description.trim() || '多维度洞察业务经营情况，驱动增长决策'}
           meta={[`报告类型：${reportTypeLabels[reportType].name}`, '当前修订：r0', '展示模板预览']} filters={[]} />
-        <ReportPageView definition={{ canvas: defaultCanvas, components: [] }} page={reportDisplayTemplatePreviewPage}
-          manifests={emptyManifestIndex} templatePreview />
       </article>
     </main>
   </div>
@@ -1506,8 +1491,8 @@ export function ReportEditorPage() {
                 onApply={() => notify('筛选条件已应用到报告预览')} applying={executing}
                 onConfigure={editorView === 'edit' ? () => { setSelectedComponentId(''); setSidePanel('data'); setReportInspectorView('filters') } : undefined}
                 onExport={() => notify('发布后可导出报告')} locked={editorView === 'edit'} />
-              {/* 首次执行返回前按设计态呈现；之后组件状态一律来自真实执行结果。 */}
-              <ReportPageView definition={draft.definition} page={page} manifests={manifests} results={results}
+              {/* 空白报告只显示报告头与筛选；首次拖入组件时会自动创建首个分区。 */}
+              {page.sections.length > 0 && <ReportPageView definition={draft.definition} page={page} manifests={manifests} results={results}
                 designMode={!execution}
                 selectedComponentId={editorView === 'edit' ? selectedComponentId : ''}
                 onSelectComponent={editorView === 'edit' ? (componentId, blockId) => {
@@ -1525,7 +1510,7 @@ export function ReportEditorPage() {
                   onBlockTitleChange: (sectionId, blockId, title) => void renameBlock(sectionId, blockId, title),
                   onDuplicateBlock: (_sectionId, blockId) => void duplicateBlock(blockId),
                   onDeleteBlock: (_sectionId, blockId) => void deleteBlock(blockId),
-                } : undefined} />
+                } : undefined} />}
             </article>
             {aiPreview && <span className="report-editor-preview-label">AI 方案预览，不会自动保存</span>}
           </main>

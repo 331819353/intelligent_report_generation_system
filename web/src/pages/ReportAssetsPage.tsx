@@ -1,7 +1,7 @@
 import {
   Archive, Check, ClockCounterClockwise, DotsThreeVertical, Eye, Funnel, ListBullets,
   MagnifyingGlass, NotePencil, Plus, ShareNetwork, ShieldCheck, SortAscending, SquaresFour,
-  Sparkle, UploadSimple, Users, WarningCircle, X,
+  Sparkle, Trash, UploadSimple, Users, WarningCircle, X,
 } from '@phosphor-icons/react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -284,6 +284,30 @@ function LifecycleDialog({ asset, restore = false, busy = false, error = '', onC
   </div>
 }
 
+function DeleteReportDialog({ asset, busy = false, error = '', onClose, onConfirm }: {
+  asset: ReportAsset
+  busy?: boolean
+  error?: string
+  onClose: () => void
+  onConfirm: (reason: string) => void
+}) {
+  const [confirmation, setConfirmation] = useState('')
+  const [reason, setReason] = useState('')
+  const confirmed = confirmation === asset.name && reason.trim().length > 0
+  return <div className="report-modal-backdrop" role="presentation" onMouseDown={onClose}>
+    <section className="report-modal is-delete-report" role="dialog" aria-modal="true" aria-labelledby="report-delete-title" onMouseDown={event => event.stopPropagation()}>
+      <header><div><span className="eyebrow">危险操作</span><h2 id="report-delete-title">删除“{asset.name}”</h2></div><AppButton text circle type="button" aria-label="关闭" onClick={onClose}><X size={18} /></AppButton></header>
+      <div className="report-delete-warning"><WarningCircle size={20} weight="fill" /><p><strong>报告将从工作台移除</strong><span>删除后报告、发布版本与已有分享均不可继续访问；审计记录仍会保留。</span></p></div>
+      {error && <p className="report-lifecycle-error"><WarningCircle size={15} />{error}</p>}
+      <div className="report-delete-form">
+        <label>输入报告名称以确认<input aria-label="输入报告名称以确认" value={confirmation} onChange={event => setConfirmation(event.target.value)} placeholder={asset.name} autoComplete="off" /></label>
+        <label>删除原因<textarea aria-label="删除原因" value={reason} maxLength={1000} onChange={event => setReason(event.target.value)} placeholder="请输入删除原因，便于审计追溯" /></label>
+      </div>
+      <footer><AppButton plain size="small" type="button" disabled={busy} onClick={onClose}>取消</AppButton><AppButton variant="danger" size="small" type="button" disabled={!confirmed || busy} onClick={() => onConfirm(reason.trim())}>{busy ? '正在删除…' : '永久删除报告'}</AppButton></footer>
+    </section>
+  </div>
+}
+
 function eventLabel(event: AssetEvent, asset: ReportAsset) {
   const actor = event.actorName || asset.ownerName
   const version = typeof event.payload.versionNo === 'number' ? ` v${event.payload.versionNo}` : ''
@@ -296,7 +320,7 @@ function eventLabel(event: AssetEvent, asset: ReportAsset) {
   return labels[event.eventType] ?? `${actor} 更新了报告资产`
 }
 
-function ReportAssetDrawer({ asset, events, eventsLoading, onClose, onView, onEdit, onPublish, onPermissions, onShare, onArchive, onRestore }: {
+function ReportAssetDrawer({ asset, events, eventsLoading, onClose, onView, onEdit, onPublish, onPermissions, onShare, onArchive, onRestore, onDelete }: {
   asset: ReportAsset
   events: AssetEvent[]
   eventsLoading: boolean
@@ -308,6 +332,7 @@ function ReportAssetDrawer({ asset, events, eventsLoading, onClose, onView, onEd
   onShare: () => void
   onArchive: () => void
   onRestore: () => void
+  onDelete: () => void
 }) {
   const [showAllEvents, setShowAllEvents] = useState(false)
   return <aside className="report-asset-drawer" aria-label={`${asset.name}资产详情`}>
@@ -361,6 +386,7 @@ function ReportAssetDrawer({ asset, events, eventsLoading, onClose, onView, onEd
           <div className="report-drawer-secondary-actions">
             {canRun(asset, 'SHARE') && <AppButton link size="small" type="button" onClick={onShare}><ShareNetwork size={15} />安全分享</AppButton>}
             {canRun(asset, 'ARCHIVE') && asset.lifecycle !== 'OFFLINE' && <AppButton link size="small" variant="danger" type="button" onClick={onArchive}><Archive size={15} />下架报告</AppButton>}
+            {canRun(asset, 'DELETE') && <AppButton link size="small" variant="danger" type="button" onClick={onDelete}><Trash size={15} />删除报告</AppButton>}
           </div>
         </div>
       </div>
@@ -388,6 +414,7 @@ export function ReportAssetsPage() {
   const [shareAsset, setShareAsset] = useState<ReportAsset | null>(null)
   const [archiveAsset, setArchiveAsset] = useState<ReportAsset | null>(null)
   const [restoreAsset, setRestoreAsset] = useState<ReportAsset | null>(null)
+  const [deleteAsset, setDeleteAsset] = useState<ReportAsset | null>(null)
   const [transitionBusy, setTransitionBusy] = useState(false)
   const [transitionError, setTransitionError] = useState('')
   const [toast, setToast] = useState('')
@@ -476,6 +503,21 @@ export function ReportAssetsPage() {
     }
   }
 
+  const remove = async (asset: ReportAsset, reason: string) => {
+    setTransitionBusy(true); setTransitionError('')
+    try {
+      if (!snapshot) await reportAssetsAPI.delete(asset.id, reason)
+      setAssets(items => items.filter(item => item.id !== asset.id))
+      setSelectedID('')
+      setDeleteAsset(null)
+      notify(`“${asset.name}”已删除`)
+    } catch (cause) {
+      setTransitionError(cause instanceof Error ? cause.message : '删除失败')
+    } finally {
+      setTransitionBusy(false)
+    }
+  }
+
   return <AppShell className="report-assets-shell report-workbench-shell" eyebrow="智能报告" title="报告中心" lockBusinessDomain>
     <div className={`report-workbench ${selected ? 'is-detail-open' : ''}`.trim()}>
       <section className="report-library-panel" aria-label="报告资产列表">
@@ -539,12 +581,14 @@ export function ReportAssetsPage() {
         onShare={() => setShareAsset(selected)}
         onArchive={() => { setTransitionError(''); setArchiveAsset(selected) }}
         onRestore={() => { setTransitionError(''); setRestoreAsset(selected) }}
+        onDelete={() => { setTransitionError(''); setDeleteAsset(selected) }}
       />}
     </div>
     {permissionAsset && <PermissionDialog asset={permissionAsset} snapshot={snapshot} onChanged={() => { if (!snapshot) void loadAssets() }} onClose={() => setPermissionAsset(null)} />}
     {shareAsset && <ShareDialog asset={shareAsset} snapshot={snapshot} onClose={() => setShareAsset(null)} />}
     {archiveAsset && <LifecycleDialog asset={archiveAsset} busy={transitionBusy} error={transitionError} onClose={() => setArchiveAsset(null)} onConfirm={reason => void transition(archiveAsset, reason, false)} />}
     {restoreAsset && <LifecycleDialog asset={restoreAsset} restore busy={transitionBusy} error={transitionError} onClose={() => setRestoreAsset(null)} onConfirm={reason => void transition(restoreAsset, reason, true)} />}
+    {deleteAsset && <DeleteReportDialog asset={deleteAsset} busy={transitionBusy} error={transitionError} onClose={() => setDeleteAsset(null)} onConfirm={reason => void remove(deleteAsset, reason)} />}
     {newOpen && <NewReportDialog onClose={() => setNewOpen(false)} />}
     {toast && <div className="report-toast" role="status"><Check size={16} weight="bold" />{toast}</div>}
   </AppShell>

@@ -32,6 +32,13 @@ func (service Service) Archive(ctx context.Context, identity store.Identity, rep
 	return service.Repository.Transition(ctx, identity, reportID, "ACTIVE", "ARCHIVED", reason, "ARCHIVED", "")
 }
 
+func (service Service) Delete(ctx context.Context, identity store.Identity, reportID askdata.ID, reason string) error {
+	if service.Repository == nil {
+		return errors.New("report asset service is unavailable")
+	}
+	return service.Repository.Delete(ctx, identity, reportID, reason)
+}
+
 func (service Service) Restore(ctx context.Context, identity store.Identity, reportID askdata.ID, reason string) error {
 	if service.Repository == nil {
 		return errors.New("report asset service is unavailable")

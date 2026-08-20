@@ -1,6 +1,6 @@
 export type ReportLifecycle = 'DRAFT_ONLY' | 'PUBLISHED' | 'CHANGED' | 'OFFLINE'
 export type ReportScope = 'all' | 'mine' | 'shared'
-export type ReportAction = 'VIEW' | 'EDIT' | 'PUBLISH' | 'VERSIONS' | 'PERMISSIONS' | 'ARCHIVE' | 'RESTORE' | 'EXPORT' | 'SHARE' | 'AI_EDIT'
+export type ReportAction = 'VIEW' | 'EDIT' | 'PUBLISH' | 'VERSIONS' | 'PERMISSIONS' | 'ARCHIVE' | 'RESTORE' | 'DELETE' | 'EXPORT' | 'SHARE' | 'AI_EDIT'
 
 export type ReportAsset = {
   id: string
