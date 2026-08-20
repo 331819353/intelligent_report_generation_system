@@ -1491,6 +1491,13 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 1000
+        },
+        "cardVariant": {
+          "enum": [
+            "01",
+            "02",
+            "03"
+          ]
         }
       }
     },

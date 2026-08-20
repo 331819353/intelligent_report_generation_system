@@ -1,0 +1,583 @@
+[
+  {
+    "id": 1,
+    "slug": "metric-status",
+    "type": "analysis-metric-status",
+    "name": "指标状态类",
+    "question": "现在表现怎么样？",
+    "subtypes": ["单指标 KPI", "多指标摘要", "健康度", "状态灯", "综合评分"],
+    "presentations": ["大数字", "指标组", "状态标签"],
+    "rendererKind": "metric",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "scope", "label": "指标适用范围", "description": "可选，例如地区、产品或渠道", "kind": "DIMENSION", "roles": ["LABEL", "COLOR"], "min": 0, "max": 1, "addLabel": "添加范围" },
+      { "id": "primary-metrics", "label": "核心指标", "description": "卡片需要突出展示的主要数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 3, "addLabel": "添加指标" },
+      { "id": "comparisons", "label": "变化指标", "description": "可选，例如同比或环比", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 6, "addLabel": "添加变化", "nestedUnder": "primary-metrics", "maxPerParent": 2 }
+    ]
+  },
+  {
+    "id": 2,
+    "slug": "goal-progress",
+    "type": "analysis-goal-progress",
+    "name": "目标进度类",
+    "question": "距离目标还有多远？",
+    "subtypes": ["目标达成率", "预算消耗", "配额完成", "里程碑", "阈值进度"],
+    "presentations": ["进度条", "子弹图", "仪表盘"],
+    "rendererKind": "progress",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "scope", "label": "目标范围", "description": "可选，例如团队、区域或项目", "kind": "DIMENSION", "roles": ["LABEL", "COLOR"], "min": 0, "max": 1, "addLabel": "添加范围" },
+      { "id": "actual", "label": "实际值", "description": "当前已经完成或消耗的数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择实际值" },
+      { "id": "target", "label": "目标值", "description": "目标、预算或配额上限", "kind": "MEASURE", "roles": ["Y_AXIS"], "min": 1, "max": 1, "addLabel": "选择目标值" },
+      { "id": "reference", "label": "同期进度", "description": "可选，用于说明同阶段历史进度", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 1, "addLabel": "添加同期进度" }
+    ]
+  },
+  {
+    "id": 3,
+    "slug": "comparison-gap",
+    "type": "analysis-comparison-gap",
+    "name": "对比差异类",
+    "question": "相比另一个对象表现如何？",
+    "subtypes": ["环比", "同比", "实际对目标", "预算对实际", "前后对比", "基准对比", "同业对比"],
+    "presentations": ["对比数字", "分组柱", "哑铃图"],
+    "rendererKind": "comparison",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "basis", "label": "对比对象", "description": "例如当前/同期、实际/预算或 A/B 组", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择对比对象" },
+      { "id": "current", "label": "当前数值", "description": "对比中的主数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择当前数值" },
+      { "id": "baseline", "label": "对比基准", "description": "同期、目标、预算或基准数值", "kind": "MEASURE", "roles": ["Y_AXIS"], "min": 0, "max": 1, "addLabel": "添加对比基准" },
+      { "id": "difference", "label": "差异值", "description": "可选，直接绑定已计算的差额或差率", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 1, "addLabel": "添加差异" }
+    ]
+  },
+  {
+    "id": 4,
+    "slug": "ranking",
+    "type": "analysis-ranking",
+    "name": "排名头尾类",
+    "question": "谁最好、谁最差？",
+    "subtypes": ["Top-N", "Bottom-N", "贡献榜", "增长榜", "下降榜", "升降排名", "区域排名"],
+    "presentations": ["排行榜", "排序条形图", "棒棒糖图"],
+    "rendererKind": "ranking",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "entity", "label": "排名对象", "description": "例如区域、产品、客户或人员", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择排名对象" },
+      { "id": "rank-value", "label": "排名指标", "description": "决定对象排序的数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择排名指标" },
+      { "id": "movement", "label": "排名变化", "description": "可选，例如较上期升降位数或增长率", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 1, "addLabel": "添加排名变化" }
+    ]
+  },
+  {
+    "id": 5,
+    "slug": "trend-change",
+    "type": "analysis-trend-change",
+    "name": "趋势变化类",
+    "question": "指标如何变化？",
+    "subtypes": ["单指标趋势", "多指标趋势", "累计趋势", "增速趋势", "指数化趋势", "滚动均值", "季节性", "事件影响"],
+    "presentations": ["折线图", "面积图", "迷你趋势图"],
+    "rendererKind": "trend",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "time", "label": "时间轴", "description": "日期、周、月或其他有序时间字段", "kind": "DIMENSION", "roles": ["TIME", "X_AXIS"], "min": 1, "max": 1, "addLabel": "选择时间" },
+      { "id": "series", "label": "趋势分组", "description": "可选，例如地区、渠道或产品", "kind": "DIMENSION", "roles": ["SERIES", "COLOR"], "min": 0, "max": 1, "addLabel": "添加分组" },
+      { "id": "values", "label": "趋势指标", "description": "随时间观察的业务数值", "kind": "MEASURE", "roles": ["Y_AXIS", "VALUE"], "min": 1, "max": 3, "addLabel": "添加趋势指标" },
+      { "id": "benchmark", "label": "参考线", "description": "可选，目标或基准数值", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 1, "addLabel": "添加参考线" }
+    ]
+  },
+  {
+    "id": 6,
+    "slug": "composition-share",
+    "type": "analysis-composition-share",
+    "name": "构成占比类",
+    "question": "总量由什么组成？",
+    "subtypes": ["份额占比", "产品结构", "渠道结构", "客户结构", "成本结构", "收入结构"],
+    "presentations": ["堆叠柱", "100% 堆叠", "环形图"],
+    "rendererKind": "composition",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "category", "label": "构成项", "description": "例如产品、渠道、客户类型或成本项", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL", "COLOR"], "min": 1, "max": 1, "addLabel": "选择构成项" },
+      { "id": "value", "label": "占比指标", "description": "用于计算每个构成项份额的数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择占比指标" },
+      { "id": "prior-share", "label": "历史份额", "description": "可选，用于补充说明结构变化", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 1, "addLabel": "添加历史份额" }
+    ]
+  },
+  {
+    "id": 7,
+    "slug": "structure-shift",
+    "type": "analysis-structure-shift",
+    "name": "结构变化类",
+    "question": "构成是如何变化的？",
+    "subtypes": ["Mix Shift", "份额迁移", "渠道迁移", "客户层级迁移", "品类替代"],
+    "presentations": ["堆叠面积", "100% 堆叠趋势", "坡度图"],
+    "rendererKind": "structure",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "time", "label": "变化阶段", "description": "时间、版本或前后阶段", "kind": "DIMENSION", "roles": ["TIME", "X_AXIS"], "min": 1, "max": 1, "addLabel": "选择阶段" },
+      { "id": "segment", "label": "构成项", "description": "需要观察份额迁移的分类", "kind": "DIMENSION", "roles": ["SERIES", "COLOR"], "min": 1, "max": 1, "addLabel": "选择构成项" },
+      { "id": "value", "label": "结构指标", "description": "用于计算各阶段份额的数值", "kind": "MEASURE", "roles": ["VALUE", "Y_AXIS"], "min": 1, "max": 1, "addLabel": "选择结构指标" }
+    ]
+  },
+  {
+    "id": 8,
+    "slug": "concentration",
+    "type": "analysis-concentration",
+    "name": "集中度类",
+    "question": "结果是否集中在少数对象上？",
+    "subtypes": ["帕累托", "Top 客户贡献", "长尾结构", "客户集中度", "品类集中度"],
+    "presentations": ["帕累托图", "累计曲线", "分层条形图"],
+    "rendererKind": "concentration",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "entity", "label": "分析对象", "description": "例如客户、产品、门店或品类", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择对象" },
+      { "id": "value", "label": "贡献指标", "description": "计算头部贡献与累计占比的数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择贡献指标" }
+    ]
+  },
+  {
+    "id": 9,
+    "slug": "distribution",
+    "type": "analysis-distribution",
+    "name": "分布离散类",
+    "question": "数据是如何分布的？",
+    "subtypes": ["频数分布", "区间分布", "分位数", "均值与中位数", "离散程度", "长尾", "偏态"],
+    "presentations": ["直方图", "箱线图", "密度图"],
+    "rendererKind": "distribution",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "segment", "label": "分布分组", "description": "可选，例如地区、渠道或人群", "kind": "DIMENSION", "roles": ["CATEGORY", "COLOR"], "min": 0, "max": 1, "addLabel": "添加分组" },
+      { "id": "value", "label": "分布指标", "description": "需要观察分布形状与离散程度的数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择分布指标" },
+      { "id": "reference", "label": "参考数值", "description": "可选，例如均值、中位数或阈值", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 2, "addLabel": "添加参考数值" }
+    ]
+  },
+  {
+    "id": 10,
+    "slug": "outlier-anomaly",
+    "type": "analysis-outlier-anomaly",
+    "name": "异常离群类",
+    "question": "哪些对象不正常？",
+    "subtypes": ["异常值", "突增突降", "超阈值", "偏离历史区间", "异常群体"],
+    "presentations": ["控制图", "异常点图", "告警列表"],
+    "rendererKind": "anomaly",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "observation", "label": "观察对象", "description": "时间、门店、设备或其他观测对象", "kind": "DIMENSION", "roles": ["TIME", "CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择观察对象" },
+      { "id": "actual", "label": "观测指标", "description": "用于识别异常的实际数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择观测指标" },
+      { "id": "threshold", "label": "阈值或期望值", "description": "可选，正常上限、下限或期望值", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 2, "addLabel": "添加阈值" }
+    ]
+  },
+  {
+    "id": 11,
+    "slug": "relationship",
+    "type": "analysis-relationship",
+    "name": "关系关联类",
+    "question": "两个或多个指标是否相关？",
+    "subtypes": ["相关性", "量价关系", "投入产出", "活跃与留存", "收入与成本", "规模与效率"],
+    "presentations": ["散点图", "气泡图", "相关矩阵"],
+    "rendererKind": "relationship",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "detail", "label": "每个点代表什么", "description": "可选，例如客户、产品或门店", "kind": "DIMENSION", "roles": ["DETAIL", "LABEL"], "min": 0, "max": 1, "addLabel": "添加对象" },
+      { "id": "axes", "label": "关联指标", "description": "前两个数值分别作为横轴与纵轴", "kind": "MEASURE", "roles": ["Y_AXIS"], "min": 2, "max": 2, "addLabel": "添加关联指标" },
+      { "id": "size", "label": "气泡大小", "description": "可选，用第三个数值表达规模", "kind": "MEASURE", "roles": ["SIZE"], "min": 0, "max": 1, "addLabel": "添加规模指标" }
+    ]
+  },
+  {
+    "id": 12,
+    "slug": "segment-quadrant",
+    "type": "analysis-segment-quadrant",
+    "name": "分群象限类",
+    "question": "对象可以如何分组？",
+    "subtypes": ["四象限", "客户分层", "产品分层", "价值—增长矩阵", "风险—收益矩阵", "优先级矩阵"],
+    "presentations": ["四象限", "聚类图", "分群画像"],
+    "rendererKind": "quadrant",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "entity", "label": "分群对象", "description": "例如客户、产品、项目或区域", "kind": "DIMENSION", "roles": ["DETAIL", "LABEL"], "min": 1, "max": 1, "addLabel": "选择分群对象" },
+      { "id": "axes", "label": "象限指标", "description": "前两个数值分别定义横轴和纵轴", "kind": "MEASURE", "roles": ["Y_AXIS"], "min": 2, "max": 2, "addLabel": "添加象限指标" },
+      { "id": "size", "label": "群体规模", "description": "可选，用第三个数值表达对象规模", "kind": "MEASURE", "roles": ["SIZE"], "min": 0, "max": 1, "addLabel": "添加规模指标" }
+    ]
+  },
+  {
+    "id": 13,
+    "slug": "cross-matrix",
+    "type": "analysis-cross-matrix",
+    "name": "矩阵交叉类",
+    "question": "两个维度组合后有什么规律？",
+    "subtypes": ["地区×产品", "渠道×人群", "星期×时段", "功能×用户类型", "风险×影响"],
+    "presentations": ["热力图", "交叉表", "矩阵气泡图"],
+    "rendererKind": "matrix",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "rows", "label": "行维度", "description": "矩阵纵向展开的分类", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择行维度" },
+      { "id": "columns", "label": "列维度", "description": "矩阵横向展开的分类", "kind": "DIMENSION", "roles": ["SERIES", "COLOR"], "min": 1, "max": 1, "addLabel": "选择列维度" },
+      { "id": "value", "label": "单元格指标", "description": "决定每个交叉单元格颜色或大小的数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择单元格指标" }
+    ]
+  },
+  {
+    "id": 14,
+    "slug": "funnel-conversion",
+    "type": "analysis-funnel-conversion",
+    "name": "漏斗转化类",
+    "question": "用户在哪一步流失？",
+    "subtypes": ["营销漏斗", "注册漏斗", "购买漏斗", "销售漏斗", "审批漏斗", "步骤转化"],
+    "presentations": ["漏斗图", "阶段条形图", "转化表"],
+    "rendererKind": "funnel",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "stage", "label": "漏斗阶段", "description": "按业务顺序排列的各个步骤", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择阶段" },
+      { "id": "volume", "label": "阶段数量", "description": "每个阶段的用户、线索、订单或金额", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择阶段数量" }
+    ]
+  },
+  {
+    "id": 15,
+    "slug": "path-flow",
+    "type": "analysis-path-flow",
+    "name": "路径流向类",
+    "question": "用户或资金如何流动？",
+    "subtypes": ["用户路径", "渠道流向", "资金流向", "来源去向", "状态迁移"],
+    "presentations": ["桑基图", "路径图", "流向图"],
+    "rendererKind": "flow",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "source", "label": "来源维度", "description": "流动从哪里开始", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择来源" },
+      { "id": "target", "label": "去向维度", "description": "流动最终到达哪里", "kind": "DIMENSION", "roles": ["SERIES", "COLOR"], "min": 1, "max": 1, "addLabel": "选择去向" },
+      { "id": "volume", "label": "流量指标", "description": "路径上的用户数、金额或事件数", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择流量指标" }
+    ]
+  },
+  {
+    "id": 16,
+    "slug": "cohort-retention",
+    "type": "analysis-cohort-retention",
+    "name": "队列留存类",
+    "question": "不同批次用户后续表现如何？",
+    "subtypes": ["注册队列", "首购队列", "留存", "复购", "流失", "队列收入"],
+    "presentations": ["Cohort 热力图", "留存曲线"],
+    "rendererKind": "cohort",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "cohort", "label": "队列批次", "description": "注册、首购或首次活跃批次", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择队列批次" },
+      { "id": "age", "label": "队列年龄", "description": "首次发生后的第 N 周、月或阶段", "kind": "DIMENSION", "roles": ["TIME", "X_AXIS"], "min": 1, "max": 1, "addLabel": "选择队列年龄" },
+      { "id": "retention", "label": "留存指标", "description": "留存率、复购率、收入或活跃人数", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择留存指标" }
+    ]
+  },
+  {
+    "id": 17,
+    "slug": "lifecycle",
+    "type": "analysis-lifecycle",
+    "name": "生命周期类",
+    "question": "对象处于生命周期哪个阶段？",
+    "subtypes": ["新增", "成长", "成熟", "衰退", "沉默", "流失", "召回"],
+    "presentations": ["生命周期曲线", "阶段分布"],
+    "rendererKind": "lifecycle",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "stage", "label": "生命周期阶段", "description": "对象所在的新增、成长、成熟或衰退阶段", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择生命周期阶段" },
+      { "id": "population", "label": "阶段规模", "description": "每个阶段的对象数量或业务价值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择阶段规模" },
+      { "id": "transition", "label": "阶段变化", "description": "可选，例如转移率或较上期变化", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 1, "addLabel": "添加阶段变化" }
+    ]
+  },
+  {
+    "id": 18,
+    "slug": "contribution-attribution",
+    "type": "analysis-contribution-attribution",
+    "name": "贡献归因类",
+    "question": "哪些对象贡献了结果？",
+    "subtypes": ["增量贡献", "收入贡献", "渠道贡献", "区域贡献", "产品贡献", "增长贡献"],
+    "presentations": ["贡献排名", "堆叠条形图"],
+    "rendererKind": "contribution",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "contributor", "label": "贡献对象", "description": "例如产品、渠道、区域或客户群", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择贡献对象" },
+      { "id": "contribution", "label": "贡献数值", "description": "各对象对总结果或总变化的贡献", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择贡献数值" }
+    ]
+  },
+  {
+    "id": 19,
+    "slug": "change-decomposition",
+    "type": "analysis-change-decomposition",
+    "name": "变化拆解类",
+    "question": "指标为什么从 A 变成 B？",
+    "subtypes": ["收入桥", "利润桥", "成本桥", "用户变化拆解", "预算差异拆解"],
+    "presentations": ["瀑布图", "桥接图"],
+    "rendererKind": "waterfall",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "driver", "label": "变化项目", "description": "起点、终点及中间正负影响项", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择变化项目" },
+      { "id": "change", "label": "变化数值", "description": "每个项目带来的增减数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择变化数值" }
+    ]
+  },
+  {
+    "id": 20,
+    "slug": "driver-factors",
+    "type": "analysis-driver-factors",
+    "name": "驱动因素类",
+    "question": "哪些因素最影响结果？",
+    "subtypes": ["驱动因素排名", "特征重要性", "敏感因素", "弹性", "关键影响因素"],
+    "presentations": ["驱动条形图", "影响矩阵"],
+    "rendererKind": "drivers",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "factor", "label": "影响因素", "description": "价格、频次、渠道或模型特征", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择影响因素" },
+      { "id": "impact", "label": "影响强度", "description": "因素对结果影响的大小与方向", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择影响强度" },
+      { "id": "confidence", "label": "稳定性或置信度", "description": "可选，说明因素影响是否稳定", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 1, "addLabel": "添加置信度" }
+    ]
+  },
+  {
+    "id": 21,
+    "slug": "root-cause",
+    "type": "analysis-root-cause",
+    "name": "根因诊断类",
+    "question": "问题根源在哪里？",
+    "subtypes": ["维度下钻", "问题树", "异常归因", "结构性原因", "数据原因", "业务原因"],
+    "presentations": ["诊断树", "分解树", "下钻表"],
+    "rendererKind": "root-cause",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "cause", "label": "原因节点", "description": "问题树中的原因名称", "kind": "DIMENSION", "roles": ["LABEL"], "min": 1, "max": 1, "addLabel": "选择原因节点" },
+      { "id": "parent", "label": "父级原因", "description": "可选，用于还原根因层级", "kind": "DIMENSION", "roles": ["DETAIL"], "min": 0, "max": 1, "addLabel": "添加父级原因" },
+      { "id": "impact", "label": "原因影响", "description": "每个原因对问题的影响大小", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择原因影响" },
+      { "id": "confidence", "label": "证据置信度", "description": "可选，说明诊断证据强度", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 1, "addLabel": "添加置信度" }
+    ]
+  },
+  {
+    "id": 22,
+    "slug": "forecast",
+    "type": "analysis-forecast",
+    "name": "预测类",
+    "question": "未来可能怎样？",
+    "subtypes": ["趋势预测", "销量预测", "收入预测", "容量预测", "需求预测"],
+    "presentations": ["预测折线", "置信区间"],
+    "rendererKind": "forecast",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "time", "label": "预测时间轴", "description": "历史与未来的日期或期间", "kind": "DIMENSION", "roles": ["TIME", "X_AXIS"], "min": 1, "max": 1, "addLabel": "选择时间" },
+      { "id": "actual", "label": "历史实际", "description": "预测开始前的实际业务数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择历史实际" },
+      { "id": "forecast", "label": "预测值", "description": "未来期间的预测结果", "kind": "MEASURE", "roles": ["Y_AXIS"], "min": 1, "max": 1, "addLabel": "选择预测值" },
+      { "id": "interval", "label": "预测区间", "description": "可选，置信区间下界与上界", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 2, "addLabel": "添加区间边界" }
+    ]
+  },
+  {
+    "id": 23,
+    "slug": "scenario",
+    "type": "analysis-scenario",
+    "name": "情景模拟类",
+    "question": "不同假设下结果怎样？",
+    "subtypes": ["乐观/基准/悲观", "价格变化", "转化率变化", "预算变化", "资源配置"],
+    "presentations": ["情景对比", "参数表", "模拟曲线"],
+    "rendererKind": "scenario",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "scenario", "label": "情景名称", "description": "例如乐观、基准和保守", "kind": "DIMENSION", "roles": ["SERIES", "COLOR"], "min": 1, "max": 1, "addLabel": "选择情景" },
+      { "id": "stage", "label": "模拟阶段", "description": "可选，用于展示各情景随阶段展开", "kind": "DIMENSION", "roles": ["TIME", "X_AXIS"], "min": 0, "max": 1, "addLabel": "添加模拟阶段" },
+      { "id": "result", "label": "模拟结果", "description": "各情景下需要比较的结果数值", "kind": "MEASURE", "roles": ["VALUE", "Y_AXIS"], "min": 1, "max": 1, "addLabel": "选择模拟结果" }
+    ]
+  },
+  {
+    "id": 24,
+    "slug": "sensitivity",
+    "type": "analysis-sensitivity",
+    "name": "敏感性类",
+    "question": "哪个假设对结果影响最大？",
+    "subtypes": ["单因素敏感性", "双因素敏感性", "盈亏平衡", "临界值"],
+    "presentations": ["龙卷风图", "敏感性矩阵"],
+    "rendererKind": "sensitivity",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "factor", "label": "假设因素", "description": "价格、成本、转化率或其他输入假设", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 2, "addLabel": "添加假设因素" },
+      { "id": "baseline", "label": "基准结果", "description": "当前基准假设对应的结果", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择基准结果" },
+      { "id": "impact", "label": "变化影响", "description": "输入变化后结果的增减范围", "kind": "MEASURE", "roles": ["Y_AXIS"], "min": 1, "max": 2, "addLabel": "添加变化影响" },
+      { "id": "threshold", "label": "临界值", "description": "可选，盈亏平衡或关键阈值", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 1, "addLabel": "添加临界值" }
+    ]
+  },
+  {
+    "id": 25,
+    "slug": "risk-probability",
+    "type": "analysis-risk-probability",
+    "name": "风险概率类",
+    "question": "发生风险的可能性和影响多大？",
+    "subtypes": ["风险概率", "损失区间", "置信度", "预警概率", "风险敞口"],
+    "presentations": ["风险矩阵", "概率分布", "区间图"],
+    "rendererKind": "risk",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "risk", "label": "风险对象", "description": "风险事件、项目、区域或业务单元", "kind": "DIMENSION", "roles": ["DETAIL", "LABEL"], "min": 1, "max": 1, "addLabel": "选择风险对象" },
+      { "id": "probability", "label": "发生概率", "description": "风险发生可能性的数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择发生概率" },
+      { "id": "impact", "label": "影响程度", "description": "风险发生后的影响或损失", "kind": "MEASURE", "roles": ["Y_AXIS"], "min": 1, "max": 1, "addLabel": "选择影响程度" },
+      { "id": "exposure", "label": "风险敞口", "description": "可选，用气泡大小表达暴露规模", "kind": "MEASURE", "roles": ["SIZE"], "min": 0, "max": 1, "addLabel": "添加风险敞口" }
+    ]
+  },
+  {
+    "id": 26,
+    "slug": "experiment-evaluation",
+    "type": "analysis-experiment-evaluation",
+    "name": "实验评估类",
+    "question": "方案是否有效？",
+    "subtypes": ["A/B 测试", "实验组对照组", "提升率", "显著性", "置信区间", "样本量"],
+    "presentations": ["对比卡", "误差线", "区间图"],
+    "rendererKind": "experiment",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "group", "label": "实验分组", "description": "对照组、实验组或多个方案组", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择实验分组" },
+      { "id": "outcome", "label": "实验指标", "description": "用于判断方案效果的核心结果", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择实验指标" },
+      { "id": "interval", "label": "置信区间", "description": "可选，置信区间下界与上界", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 2, "addLabel": "添加区间边界" },
+      { "id": "sample", "label": "样本量", "description": "可选，各实验组的样本数量", "kind": "MEASURE", "roles": ["SIZE"], "min": 0, "max": 1, "addLabel": "添加样本量" }
+    ]
+  },
+  {
+    "id": 27,
+    "slug": "geospatial",
+    "type": "analysis-geospatial",
+    "name": "地理空间类",
+    "question": "指标在哪里发生？",
+    "subtypes": ["区域分布", "城市表现", "门店分布", "热点", "覆盖范围", "跨区域流动"],
+    "presentations": ["分级地图", "点地图", "热力地图"],
+    "rendererKind": "geospatial",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "region", "label": "地理区域", "description": "国家、省市、片区、商圈或门店", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择地理区域" },
+      { "id": "value", "label": "区域指标", "description": "各区域需要用颜色或点大小表达的数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择区域指标" },
+      { "id": "comparison", "label": "区域变化", "description": "可选，例如较基准变化或区域份额", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 1, "addLabel": "添加区域变化" }
+    ]
+  },
+  {
+    "id": 28,
+    "slug": "operations-monitoring",
+    "type": "analysis-operations-monitoring",
+    "name": "运营监控类",
+    "question": "当前运营是否正常？",
+    "subtypes": ["SLA", "成功率", "错误率", "库存", "容量", "延迟", "工单", "积压"],
+    "presentations": ["状态卡", "控制图", "监控趋势"],
+    "rendererKind": "monitoring",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "time", "label": "监控时间", "description": "可选，用于展示短期监控趋势", "kind": "DIMENSION", "roles": ["TIME", "X_AXIS"], "min": 0, "max": 1, "addLabel": "添加监控时间" },
+      { "id": "current", "label": "当前状态指标", "description": "SLA、成功率、延迟、库存或容量", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 2, "addLabel": "添加状态指标" },
+      { "id": "threshold", "label": "运行阈值", "description": "可选，SLA、容量或告警阈值", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 2, "addLabel": "添加运行阈值" },
+      { "id": "incident", "label": "事件数量", "description": "可选，错误、事故或积压数量", "kind": "MEASURE", "roles": ["SIZE"], "min": 0, "max": 1, "addLabel": "添加事件数量" }
+    ]
+  },
+  {
+    "id": 29,
+    "slug": "pipeline-inventory",
+    "type": "analysis-pipeline-inventory",
+    "name": "管道存量类",
+    "question": "当前积压和推进情况怎样？",
+    "subtypes": ["销售管道", "招聘管道", "项目池", "工单池", "订单池", "库存账龄"],
+    "presentations": ["阶段堆叠", "账龄表", "漏斗"],
+    "rendererKind": "pipeline",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "stage", "label": "管道阶段", "description": "线索、商机、报价或其他当前状态", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL"], "min": 1, "max": 1, "addLabel": "选择管道阶段" },
+      { "id": "volume", "label": "阶段存量", "description": "每个阶段当前积压的数量或金额", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择阶段存量" },
+      { "id": "capacity", "label": "阶段容量", "description": "可选，每个阶段可承载的上限", "kind": "MEASURE", "roles": ["Y_AXIS"], "min": 0, "max": 1, "addLabel": "添加阶段容量" },
+      { "id": "aging", "label": "账龄或积压变化", "description": "可选，超期数量、账龄或较上期变化", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 2, "addLabel": "添加积压说明" }
+    ]
+  },
+  {
+    "id": 30,
+    "slug": "calendar-rhythm",
+    "type": "analysis-calendar-rhythm",
+    "name": "日历节奏类",
+    "question": "哪些日期或时段表现特殊？",
+    "subtypes": ["日历热力", "星期×小时", "活动周期", "出勤", "内容发布频率"],
+    "presentations": ["日历热力图", "时段矩阵"],
+    "rendererKind": "calendar",
+    "category": "CHART",
+    "bindingGroups": [
+      { "id": "calendar", "label": "日期或周期", "description": "日期、星期、月份或活动周期", "kind": "DIMENSION", "roles": ["TIME", "X_AXIS"], "min": 1, "max": 1, "addLabel": "选择日期周期" },
+      { "id": "slot", "label": "时段维度", "description": "可选，例如小时、班次或发布时段", "kind": "DIMENSION", "roles": ["SERIES", "COLOR"], "min": 0, "max": 1, "addLabel": "添加时段" },
+      { "id": "value", "label": "节奏指标", "description": "每个日期或时段对应的数量、金额或活跃度", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择节奏指标" }
+    ]
+  },
+  {
+    "id": 31,
+    "slug": "detail-query",
+    "type": "analysis-detail-query",
+    "name": "明细查询类",
+    "question": "具体对象和数值是什么？",
+    "subtypes": ["客户明细", "订单明细", "异常明细", "产品明细", "完整排名"],
+    "presentations": ["明细表", "可分页表格"],
+    "rendererKind": "detail",
+    "category": "TABLE",
+    "bindingGroups": [
+      { "id": "details", "label": "明细字段", "description": "名称、编号、时间、分类或状态字段", "kind": "DIMENSION", "roles": ["DIMENSION", "TIME", "LABEL", "DETAIL"], "min": 1, "max": 8, "addLabel": "添加明细字段" },
+      { "id": "values", "label": "数值字段", "description": "金额、数量、比率或变化字段", "kind": "MEASURE", "roles": ["VALUE", "TOOLTIP"], "min": 1, "max": 8, "addLabel": "添加数值字段" }
+    ]
+  },
+  {
+    "id": 32,
+    "slug": "event-timeline",
+    "type": "analysis-event-timeline",
+    "name": "日志时间线类",
+    "question": "事情按什么顺序发生？",
+    "subtypes": ["事件记录", "版本发布", "故障过程", "项目节点", "营销活动"],
+    "presentations": ["时间线", "事件列表"],
+    "rendererKind": "timeline",
+    "category": "CONTENT",
+    "bindingGroups": [
+      { "id": "event", "label": "事件名称", "description": "版本、故障、节点或活动名称", "kind": "DIMENSION", "roles": ["LABEL", "CATEGORY"], "min": 1, "max": 1, "addLabel": "选择事件名称" },
+      { "id": "time", "label": "发生时间", "description": "事件发生的时间或顺序字段", "kind": "DIMENSION", "roles": ["TIME"], "min": 1, "max": 1, "addLabel": "选择发生时间" },
+      { "id": "duration", "label": "持续时长", "description": "可选，事件持续时间或阶段间隔", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择持续时长" },
+      { "id": "status", "label": "状态数值", "description": "可选，进度、状态码或影响范围", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 1, "addLabel": "添加状态数值" }
+    ]
+  },
+  {
+    "id": 33,
+    "slug": "insight-conclusion",
+    "type": "analysis-insight-conclusion",
+    "name": "洞察结论类",
+    "question": "从数据中得到什么结论？",
+    "subtypes": ["核心发现", "关键变化", "机会点", "风险点", "观察结论"],
+    "presentations": ["文字摘要", "重点数字", "标注"],
+    "rendererKind": "insight",
+    "category": "CONTENT",
+    "bindingGroups": [
+      { "id": "scope", "label": "结论范围", "description": "可选，例如地区、产品、渠道或人群", "kind": "DIMENSION", "roles": ["LABEL", "DETAIL"], "min": 0, "max": 2, "addLabel": "添加结论范围" },
+      { "id": "evidence", "label": "证据指标", "description": "支撑结论的核心业务数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 3, "addLabel": "添加证据指标" },
+      { "id": "comparison", "label": "对比证据", "description": "可选，用同比、环比或贡献补充证据", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 2, "addLabel": "添加对比证据" }
+    ]
+  },
+  {
+    "id": 34,
+    "slug": "recommendation-action",
+    "type": "analysis-recommendation-action",
+    "name": "建议行动类",
+    "question": "接下来应该做什么？",
+    "subtypes": ["行动建议", "策略建议", "优先事项", "负责人", "截止时间", "监控指标"],
+    "presentations": ["行动清单", "任务卡"],
+    "rendererKind": "action",
+    "category": "CONTENT",
+    "bindingGroups": [
+      { "id": "action", "label": "行动事项", "description": "需要推进的建议、任务或策略", "kind": "DIMENSION", "roles": ["LABEL"], "min": 1, "max": 1, "addLabel": "选择行动事项" },
+      { "id": "owner-status", "label": "负责人或状态", "description": "可选，负责人、优先级、状态或截止节点", "kind": "DIMENSION", "roles": ["DETAIL", "CATEGORY"], "min": 0, "max": 2, "addLabel": "添加负责人或状态" },
+      { "id": "impact", "label": "预期影响", "description": "用于排序和跟踪行动价值的数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 2, "addLabel": "添加影响指标" }
+    ]
+  },
+  {
+    "id": 35,
+    "slug": "data-explanation",
+    "type": "analysis-data-explanation",
+    "name": "数据说明类",
+    "question": "这些数据是否可信、如何理解？",
+    "subtypes": ["指标定义", "统计口径", "样本量", "数据质量", "缺失值", "刷新时间", "来源"],
+    "presentations": ["注释卡", "质量状态", "来源信息"],
+    "rendererKind": "data-info",
+    "category": "CONTENT",
+    "bindingGroups": [
+      { "id": "metric", "label": "说明对象", "description": "需要解释的指标、字段或数据来源", "kind": "DIMENSION", "roles": ["LABEL", "DETAIL"], "min": 1, "max": 2, "addLabel": "添加说明对象" },
+      { "id": "quality", "label": "质量指标", "description": "样本量、完整率、准确率或其他质量数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 3, "addLabel": "添加质量指标" },
+      { "id": "reference", "label": "质量阈值", "description": "可选，用于判断质量状态的基准", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 1, "addLabel": "添加质量阈值" }
+    ]
+  },
+  {
+    "id": 36,
+    "slug": "scope-filter",
+    "type": "analysis-scope-filter",
+    "name": "范围筛选类",
+    "question": "当前报告看的是什么范围？",
+    "subtypes": ["时间范围", "地区", "产品", "渠道", "人群", "组织", "口径版本"],
+    "presentations": ["筛选摘要", "标签", "条件栏"],
+    "rendererKind": "scope",
+    "category": "CONTENT",
+    "bindingGroups": [
+      { "id": "filters", "label": "范围字段", "description": "时间、地区、产品、渠道、人群或组织", "kind": "DIMENSION", "roles": ["DIMENSION", "TIME", "CATEGORY", "LABEL", "DETAIL"], "min": 1, "max": 5, "addLabel": "添加范围字段" },
+      { "id": "result-count", "label": "结果数量", "description": "当前范围内的对象数、记录数或业务总量", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择结果数量" }
+    ]
+  }
+]

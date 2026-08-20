@@ -18,6 +18,26 @@ import { findFreeRect, resolveLayout, resolveSlotPlacement } from './placement.t
 /** 组件面板拖拽载荷的 MIME 类型；画布按它识别“从组件面板拖来的卡片”。 */
 export const paletteDragType = 'application/x-report-component'
 
+export type PaletteComponentPayload = {
+  ref: string
+  options?: Partial<ComponentOptions>
+}
+
+export function encodePalettePayload(manifest: ComponentManifest, options?: Partial<ComponentOptions>) {
+  return JSON.stringify({ ref: manifestRef(manifest), ...(options ? { options } : {}) } satisfies PaletteComponentPayload)
+}
+
+export function decodePalettePayload(payload: string): PaletteComponentPayload | undefined {
+  if (!payload) return undefined
+  try {
+    const decoded = JSON.parse(payload) as PaletteComponentPayload
+    if (typeof decoded.ref === 'string' && decoded.ref.includes('@')) return decoded
+  } catch {
+    // Existing drag payloads were the raw type@version reference.
+  }
+  return payload.includes('@') ? { ref: payload } : undefined
+}
+
 export function manifestRef(manifest: ComponentManifest) {
   return `${manifest.type}@${manifest.version}`
 }
@@ -141,6 +161,7 @@ export type PlaceComponentInSlotInput = {
   title: string
   dataContextId: string
   fields: DataContextField[]
+  initialOptions?: Partial<ComponentOptions>
   newId: () => string
 }
 
@@ -164,7 +185,7 @@ export function placeComponentInSlotOperations(input: PlaceComponentInSlotInput)
     return { operations: [], componentId: '', error: `槽位至少需要 ${minimum.w}×${minimum.h}` }
   }
   const componentId = input.newId()
-  const component = buildComponent(componentId, input.manifest, input.title, input.dataContextId, input.fields)
+  const component = buildComponent(componentId, input.manifest, input.title, input.dataContextId, input.fields, input.initialOptions)
   const operations: EditorOperation[] = [
     { op: 'COMPONENT_CREATE', targetId: componentId, payload: { component } },
     { op: 'SLOT_UPDATE', targetId: slot.id, payload: { grid: slot.grid, componentId } },
@@ -250,6 +271,7 @@ export type AddToCardInput = {
   title: string
   dataContextId: string
   fields: DataContextField[]
+  initialOptions?: Partial<ComponentOptions>
   newId: () => string
 }
 
@@ -260,7 +282,7 @@ export type AddToCardInput = {
  * 否则同一种排版会有两种表示方式。
  */
 export function addToCardOperations(input: AddToCardInput): { operations: EditorOperation[]; componentId: string } {
-  const { page, blockId, zoneKind, manifest, title, dataContextId, fields, newId } = input
+  const { page, blockId, zoneKind, manifest, title, dataContextId, fields, initialOptions, newId } = input
   const located = findBlock(page, blockId)
   if (!located) return { operations: [], componentId: '' }
   const block = located.block
@@ -270,7 +292,7 @@ export function addToCardOperations(input: AddToCardInput): { operations: Editor
 
   const width = Math.max(block.layout.desktop.w, 1)
   const height = Math.max(recommendedSize(manifest).h, minimumSize(manifest).h)
-  const component = buildComponent(componentId, manifest, title, dataContextId, fields)
+  const component = buildComponent(componentId, manifest, title, dataContextId, fields, initialOptions)
 
   const zone: Zone = {
     // New regions go beneath what the card already shows.
@@ -337,7 +359,7 @@ export function defaultBinding(
 /** 组件构造在「新建卡片」与「加入卡片」之间共用，避免两处默认值漂移。 */
 function buildComponent(
   componentId: string, manifest: ComponentManifest, title: string,
-  dataContextId: string, fields: DataContextField[],
+  dataContextId: string, fields: DataContextField[], initialOptions?: Partial<ComponentOptions>,
 ): ReportComponent {
   const { dimensions, measures } = defaultBinding(manifest, fields)
   return {
@@ -346,7 +368,7 @@ function buildComponent(
     ...(dimensions.length || measures.length
       ? { dataBinding: { bindingMode: 'DATASET_FIELD' as const, dataContextId, dimensions, measures } }
       : {}),
-    options: { ...(manifest.defaultOptions as ComponentOptions), title },
+    options: { ...(manifest.defaultOptions as ComponentOptions), ...initialOptions, title },
   }
 }
 
@@ -359,6 +381,7 @@ export type AddComponentInput = {
   title: string
   dataContextId: string
   fields: DataContextField[]
+  initialOptions?: Partial<ComponentOptions>
   newId: () => string
   /** 拖放落点（网格坐标）；给定时卡片放在落点，与之重叠的卡片按碰撞规则下移。 */
   preferredRect?: { x: number; y: number }
@@ -372,7 +395,7 @@ export type AddComponentInput = {
  * 内可以并排放置，拖拽才有意义。
  */
 export function addComponentOperations(input: AddComponentInput): { operations: EditorOperation[]; sectionId: string; componentId: string } {
-  const { definition, page, manifest, title, dataContextId, fields, newId } = input
+  const { definition, page, manifest, title, dataContextId, fields, initialOptions, newId } = input
   const columns = canvasOf(definition).desktop.columns
   const componentId = newId()
   const blockId = newId()
@@ -380,7 +403,7 @@ export function addComponentOperations(input: AddComponentInput): { operations: 
   const slotId = newId()
 
   const size = recommendedSize(manifest)
-  const component = buildComponent(componentId, manifest, title, dataContextId, fields)
+  const component = buildComponent(componentId, manifest, title, dataContextId, fields, initialOptions)
 
   const sections = orderedSections(page)
   const target = sections.find(section => section.id === input.sectionId) ?? sections.at(-1)

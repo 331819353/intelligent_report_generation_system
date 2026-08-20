@@ -23,7 +23,7 @@ import { DataContextPanel, DefinitionJSONDialog, FilterPanel } from '../report/d
 import { ComponentPalette } from '../report/designer/ComponentPalette'
 import { ComponentBindingEditor } from '../report/designer/ComponentBindingEditor'
 import {
-  editorBindingsValid, emptyManifestIndex, indexManifests, latestComponentManifests, listComponentManifests, minimumSize,
+  editorBindingGroups, editorBindingsValid, emptyManifestIndex, indexManifests, latestComponentManifests, listComponentManifests, minimumSize,
   type ComponentManifest, type ManifestIndex,
 } from '../report/render/manifests'
 import {
@@ -36,7 +36,7 @@ import {
   findCompatibleTemplateSlot, placeComponentInSlotOperations,
   removeBlockOperations, removeComponentOperations, removeDataContextOperations, renameSectionOperations,
   renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations,
-  paletteDragType, zoneKindForManifest, zoneKindLabels, zoneReorderOperations,
+  decodePalettePayload, paletteDragType, zoneKindForManifest, zoneKindLabels, zoneReorderOperations,
   type FilterDraft, type InteractionDraft,
 } from '../report/designer/operations'
 
@@ -48,11 +48,12 @@ const reportTypeLabels: Record<ReportType, { name: string; hint: string }> = {
 const optionLabels: Record<string, string> = {
   showLegend: '显示图例', showLabel: '显示数值标签', smooth: '平滑曲线', colorPaletteRef: '配色方案', nullPolicy: '空值处理',
   animation: '动画效果', orientation: '方向', topN: '只显示前 N 项', numberFormat: '数字格式', tablePageSize: '每页行数',
-  mobileLegendMode: '移动端图例', insightRole: '结论类型', imageAssetId: '图片素材 ID',
+  mobileLegendMode: '移动端图例', insightRole: '结论类型', imageAssetId: '图片素材 ID', cardVariant: '卡片版式',
 }
 const optionEnumLabels: Record<string, string> = {
   ZERO: '按 0 处理', HIDE: '隐藏', GAP: '断开', HORIZONTAL: '横向', VERTICAL: '纵向', VISIBLE: '显示', HIDDEN: '隐藏', SCROLL: '可滚动',
   SUMMARY: '总结', TREND: '趋势', COMPARISON: '对比', ANOMALY: '异常', ACTION: '建议',
+  '01': '聚焦式', '02': '组合式', '03': '叙事式',
 }
 type PartialDecision = 'retain' | 'exclude'
 
@@ -329,6 +330,66 @@ export type ManualEditResult = {
 
 type BindingSuggestion = { dimensions: FieldBinding[]; measures: FieldBinding[]; rationale?: string }
 
+type FilterFieldSummary = {
+  dataset: string
+  field: string
+  scope: string
+}
+
+/**
+ * 把卡片的作者表单翻译成一份可核验的数据合同摘要。这里展示的是当前真实绑定，
+ * 而不是模板示例值；未填写的合同角色会明确标成「待配置」。
+ */
+function BindingMappingSummary({ manifest, dataset, fields, dimensions, measures, filters }: {
+  manifest: ComponentManifest
+  dataset: string
+  fields: DataContextField[]
+  dimensions: FieldBinding[]
+  measures: FieldBinding[]
+  filters: FilterFieldSummary[]
+}) {
+  const groups = editorBindingGroups(manifest)
+  const fieldLabel = (code: string) => {
+    const field = fields.find(item => item.code === code)
+    return field?.name && field.name !== code ? `${field.name} · ${code}` : code
+  }
+  const bindingsFor = (kind: 'DIMENSION' | 'MEASURE') => kind === 'DIMENSION' ? dimensions : measures
+
+  return <section className="report-binding-map" aria-label="字段映射总览">
+    <header>
+      <div><strong>字段映射总览</strong><small>应用后，卡片将严格按以下数据合同查询</small></div>
+      <span>{groups.length} 类字段角色</span>
+    </header>
+    <div className="report-binding-map-row is-dataset">
+      <span><Database size={14} />数据集</span>
+      <strong>{dataset || '待选择数据集'}</strong>
+    </div>
+    {groups.map(group => {
+      const bindings = bindingsFor(group.kind).filter(binding => group.roles.includes(binding.role))
+      return <div className="report-binding-map-row" key={group.id}>
+        <span>{group.kind === 'MEASURE' ? '指标字段' : '维度字段'}<small>{group.label}</small></span>
+        <div className="report-binding-map-values">
+          {bindings.length > 0
+            ? bindings.map((binding, index) => <strong key={`${binding.role}-${binding.field}-${index}`} className={binding.field ? '' : 'is-empty'}>
+                {binding.field ? fieldLabel(binding.field) : '待配置'}
+              </strong>)
+            : <strong className="is-empty">{group.min > 0 ? '待配置' : '可选'}</strong>}
+        </div>
+      </div>
+    })}
+    <div className="report-binding-map-row is-filter">
+      <span><Funnel size={14} />过滤字段<small>报告级 / 卡片级</small></span>
+      <div className="report-binding-map-values">
+        {filters.length > 0
+          ? filters.map((filter, index) => <strong key={`${filter.dataset}-${filter.field}-${filter.scope}-${index}`}>
+              {filter.field}<small>{filter.dataset} · {filter.scope}</small>
+            </strong>)
+          : <strong className="is-empty">未设置（可选）</strong>}
+      </div>
+    </div>
+  </section>
+}
+
 /** 只保留组件清单 optionSchema 声明的表现属性；标题/副标题/富文本是所有清单共有的基础项。 */
 function pruneOptions(options: ComponentOptions, manifest: ComponentManifest): ComponentOptions {
   const allowed = new Set(['title', 'subtitle', 'richText', ...Object.keys(manifest.optionSchema.properties ?? {})])
@@ -346,7 +407,7 @@ function pruneOptions(options: ComponentOptions, manifest: ComponentManifest): C
  * 卡片配置面板（右侧内联）：数据集 → 展示类型 → 指标（度量）与维度 → 过滤字段 → 样式。
  * 保存走 COMPONENT_REPLACE / COMPONENT_UPDATE / DATA_BINDING_UPDATE 受控 Operation。
  */
-function CardInspector({ mode, component, manifest: currentManifest, manifests, reportContexts, contextNameOf, fieldsOf, defaultContextId, canAI, onSuggest, busy, error, onClose, onSave, filterPanel, filterCount }: {
+function CardInspector({ mode, component, manifest: currentManifest, manifests, reportContexts, contextNameOf, fieldsOf, defaultContextId, canAI, onSuggest, busy, error, onClose, onSave, filterPanel, filterCount, filterFields }: {
   mode: 'data' | 'appearance'
   component?: EditorComponent
   manifest?: ComponentManifest
@@ -354,6 +415,8 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
   filterPanel: ReactNode
   /** 当前卡片可见的报告级与卡片级过滤字段数量。 */
   filterCount: number
+  /** 当前实际生效的过滤字段，用于和数据集、指标、维度一起形成完整映射。 */
+  filterFields: FilterFieldSummary[]
   /** 可切换的展示类型（组件清单）。 */
   manifests: ComponentManifest[]
   /** 报告内已声明的数据集。 */
@@ -495,6 +558,8 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
           <ComponentBindingEditor manifest={manifest} dimensions={dimensions} measures={measures}
             dimensionFields={dimensionFields} measureFields={measureFields}
             onDimensionsChange={setDimensions} onMeasuresChange={setMeasures} />
+          <BindingMappingSummary manifest={manifest} dataset={contextNameOf(dataContextId)} fields={fields}
+            dimensions={dimensions} measures={measures} filters={filterFields} />
           {!bindingValid && <p className="report-editor-inline-error"><WarningCircle size={15} />请完成该组件要求的核心字段配置</p>}
           {manifest.editorProfile && <section className="report-profile-result">
             <span><Eye size={17} /></span>
@@ -833,12 +898,21 @@ export function ReportEditorPage() {
   const fieldsOf = (dataContextId: string): DataContextField[] => fieldsByContext.get(dataContextId) ?? []
   const reportContexts = draft?.definition.dataContexts ?? []
   const reportFilterCount = draft?.definition.globalFilters?.length ?? 0
-  const selectedFilterCount = draft?.definition.globalFilters?.filter(filter =>
-    filter.scope.type === 'REPORT' || (filter.scope.type === 'BLOCK' && filter.scope.targetIds.includes(selectedCardId)),
-  ).length ?? 0
   const contextNameOf = (dataContextId: string) =>
     reportContexts.find(context => context.id === dataContextId)?.alias ||
     contexts.find(item => item.dataContext.id === dataContextId)?.name || dataContextId
+  const selectedFilters = draft?.definition.globalFilters?.filter(filter =>
+    filter.scope.type === 'REPORT' || (filter.scope.type === 'BLOCK' && filter.scope.targetIds.includes(selectedCardId)),
+  ) ?? []
+  const selectedFilterCount = selectedFilters.length
+  const selectedFilterFields: FilterFieldSummary[] = selectedFilters.map(filter => {
+    const field = fieldsOf(filter.fieldRef.dataContextId).find(item => item.code === filter.fieldRef.field)
+    return {
+      dataset: contextNameOf(filter.fieldRef.dataContextId),
+      field: field?.name && field.name !== field.code ? `${field.name} · ${field.code}` : filter.fieldRef.field,
+      scope: filter.scope.type === 'REPORT' ? '报告级' : '卡片级',
+    }
+  })
   const selectedManifest = selectedComponent
     ? manifests.get(selectedComponent.templateRef.type, selectedComponent.templateRef.version)
     : undefined
@@ -1057,17 +1131,18 @@ export function ReportEditorPage() {
    * block/zone/slot 结构供服务端校验，但作者只需要面对可拖动的独立元素。
    */
   const dropFromPalette = (event: DragEvent<HTMLElement>) => {
-    const ref = event.dataTransfer.getData(paletteDragType)
-    if (!ref) return
+    const payload = decodePalettePayload(event.dataTransfer.getData(paletteDragType))
+    if (!payload) return
     event.preventDefault()
-    const [type, version] = ref.split('@')
+    const [type, version] = payload.ref.split('@')
     const manifest = manifests.get(type, version)
     if (!manifest) { setActionError('组件清单不存在或已经更新'); return }
-    void addCanvasComponent(manifest)
+    void addCanvasComponent(manifest, manifest.displayName, currentDataContextId, payload.options)
   }
 
   const addCanvasComponent = async (
     manifest: ComponentManifest, title = manifest.displayName, dataContextId = currentDataContextId,
+    initialOptions?: Partial<ComponentOptions>,
   ) => {
     if (!draft || !page || !canEdit) return
     setComponentBusy(true); setComponentError(''); setActionError('')
@@ -1075,7 +1150,7 @@ export function ReportEditorPage() {
     if (templateTarget) {
       const result = placeComponentInSlotOperations({
         page, ...templateTarget, manifest, title, dataContextId,
-        fields: fieldsOf(dataContextId), newId: () => crypto.randomUUID(),
+        fields: fieldsOf(dataContextId), initialOptions, newId: () => crypto.randomUUID(),
       })
       if (result.error) {
         setActionError(result.error); setComponentError(result.error); setComponentBusy(false)
@@ -1092,6 +1167,7 @@ export function ReportEditorPage() {
     const result = addComponentOperations({
       definition: draft.definition, page, sectionId: activeSection?.id,
       manifest, title, dataContextId, fields: fieldsOf(dataContextId),
+      initialOptions,
       sectionName: `${sectionNoun} 1`, newId: () => crypto.randomUUID(),
     })
     const saved = await commit(result.operations, `${manifest.displayName}已加入画布并自动排布`, setActionError)
@@ -1108,13 +1184,15 @@ export function ReportEditorPage() {
   ) => {
     if (!draft || !page || !canEdit) return
     setComponentBusy(true); setComponentError(''); setActionError('')
-    const [type, version] = ref.split('@')
+    const payload = decodePalettePayload(ref)
+    if (!payload) { setActionError('组件拖拽信息无效'); setComponentBusy(false); return }
+    const [type, version] = payload.ref.split('@')
     const manifest = manifests.get(type, version)
     if (!manifest) { setActionError('组件清单不存在或已经更新'); setComponentBusy(false); return }
     const contextID = configuredContextId || currentDataContextId
     const result = placeComponentInSlotOperations({
       page, blockId, zoneId, slotId, manifest, title: configuredTitle || manifest.displayName,
-      dataContextId: contextID, fields: fieldsOf(contextID), newId: () => crypto.randomUUID(),
+      dataContextId: contextID, fields: fieldsOf(contextID), initialOptions: payload.options, newId: () => crypto.randomUUID(),
     })
     if (result.error) { setActionError(result.error); setComponentError(result.error); setComponentBusy(false); return }
     const saved = await commit(result.operations, `${manifest.displayName}已放入现有元素组`, setActionError)
@@ -1122,8 +1200,8 @@ export function ReportEditorPage() {
     setComponentBusy(false)
   }
 
-  const pickComponentForSlot = (manifest: ComponentManifest, title = manifest.displayName, dataContextId = currentDataContextId) => {
-    void addCanvasComponent(manifest, title, dataContextId)
+  const pickComponentForSlot = (manifest: ComponentManifest, options?: Partial<ComponentOptions>, title = manifest.displayName, dataContextId = currentDataContextId) => {
+    void addCanvasComponent(manifest, title, dataContextId, options)
   }
 
   const deleteSelectedComponent = async () => {
@@ -1481,7 +1559,7 @@ export function ReportEditorPage() {
                 component={selectedComponent} manifest={selectedManifest} manifests={manifests.list()}
                 reportContexts={reportContexts} contextNameOf={contextNameOf} fieldsOf={fieldsOf} defaultContextId={currentDataContextId}
                 canAI={canAIEdit} onSuggest={suggestBinding}
-                busy={manualBusy || !canEdit} error={manualError} filterCount={selectedFilterCount}
+                busy={manualBusy || !canEdit} error={manualError} filterCount={selectedFilterCount} filterFields={selectedFilterFields}
                 onClose={() => setSelectedComponentId('')} onSave={result => void saveManual(result)}
                 filterPanel={sidePanel === 'data' ? <FilterPanel definition={draft.definition} candidates={contexts} fieldsOf={fieldsOf} selectedBlockId={selectedCardId}
                   onlyBlock defaultContextId={selectedComponent.dataBinding?.dataContextId ?? currentDataContextId}
@@ -1593,7 +1671,7 @@ export function ReportEditorPage() {
       sectionName={activeSection?.name ?? ''}
       busy={componentBusy} error={componentError}
       onClose={() => setComponentLibraryOpen(false)}
-      onAdd={(manifest, title, dataContextId) => pickComponentForSlot(manifest, title, dataContextId)} />}
+      onAdd={(manifest, title, dataContextId) => pickComponentForSlot(manifest, undefined, title, dataContextId)} />}
     {deleteSectionOpen && activeSection && <div className="report-modal-backdrop" role="presentation" onMouseDown={() => setDeleteSectionOpen(false)}>
       <section className="report-modal report-delete-section-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-section-title" onMouseDown={event => event.stopPropagation()}>
         <header><div><span className="eyebrow">结构变更</span><h2 id="delete-section-title">删除“{activeSection.name}”</h2></div><button type="button" aria-label="关闭" onClick={() => setDeleteSectionOpen(false)}><X size={18} /></button></header>

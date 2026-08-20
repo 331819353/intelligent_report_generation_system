@@ -1,0 +1,92 @@
+{
+  "type": "analysis-pipeline-inventory",
+  "version": "1.0.0",
+  "renderer": "REACT",
+  "displayName": "管道存量卡",
+  "category": "CHART",
+  "minSize": {
+    "w": 6,
+    "h": 4
+  },
+  "recommendedSize": {
+    "w": 12,
+    "h": 6
+  },
+  "dataContract": {
+    "dimensions": {
+      "min": 1,
+      "max": 1
+    },
+    "measures": {
+      "min": 1,
+      "max": 4
+    },
+    "timeField": {
+      "required": false
+    },
+    "roles": [
+      "CATEGORY",
+      "LABEL",
+      "VALUE",
+      "Y_AXIS",
+      "TOOLTIP"
+    ]
+  },
+  "stackingRequiresAdditive": false,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "cardVariant"
+    ],
+    "properties": {
+      "title": {
+        "type": "string"
+      },
+      "subtitle": {
+        "type": "string"
+      },
+      "cardVariant": {
+        "type": "string",
+        "description": "卡片版式",
+        "enum": [
+          "01",
+          "02",
+          "03"
+        ]
+      },
+      "showLegend": {
+        "type": "boolean",
+        "description": "显示图例"
+      },
+      "showLabel": {
+        "type": "boolean",
+        "description": "显示数值标签"
+      },
+      "numberFormat": {
+        "type": "string",
+        "description": "数字格式"
+      },
+      "topN": {
+        "type": "integer",
+        "description": "最多显示对象数",
+        "minimum": 1,
+        "maximum": 100
+      }
+    }
+  },
+  "defaultOptions": {
+    "cardVariant": "01",
+    "showLegend": true,
+    "showLabel": true,
+    "topN": 10
+  },
+  "mobilePolicy": {
+    "supported": true,
+    "defaultLegendMode": "HIDDEN",
+    "labelDegradation": "ELLIPSIS"
+  },
+  "supportedInteractions": [
+    "CLICK_FILTER"
+  ]
+}

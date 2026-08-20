@@ -1,87 +1,139 @@
-import { ChartBar, ChartLine, ChartPieSlice, Gauge, Image as ImageIcon, Info, ListBullets, MagnifyingGlass, SlidersHorizontal, Sparkle, Table, TextT } from '@phosphor-icons/react'
-import { useMemo, useState } from 'react'
+import {
+  ArrowsClockwise, ArrowsLeftRight, CalendarDots, ChartBar, ChartBarHorizontal, ChartDonut,
+  ChartLineUp, ChartScatter, ClockCounterClockwise, Flask, Funnel, Gauge, GitBranch, GridFour,
+  Info, Kanban, Lightbulb, ListChecks, MagnifyingGlass, MapTrifold, Path, Pulse, Ranking,
+  SlidersHorizontal, Table, Target, TreeStructure, UsersThree, Warning,
+} from '@phosphor-icons/react'
+import { useMemo, useState, type ReactNode } from 'react'
+import {
+  analysisCardCatalog, analysisCardOption, analysisCardVariants, isAnalysisCardManifest,
+  type AnalysisCardCatalogItem, type AnalysisCardVariant, type AnalysisRendererKind,
+} from '../analysis/catalog.ts'
 import type { ComponentManifest } from '../render/manifests.ts'
-import { manifestRef, paletteDragType } from './operations.ts'
+import type { ComponentOptions } from '../render/schema.ts'
+import { encodePalettePayload, paletteDragType } from './operations.ts'
 
-const categoryLabels: Record<ComponentManifest['category'], string> = {
-  CHART: '图表', TABLE: '表格', CONTENT: '内容', CONTROL: '控件',
+const groups = [
+  { id: 'overview', label: '概览与变化', range: [1, 6] },
+  { id: 'structure', label: '结构与关系', range: [7, 13] },
+  { id: 'journey', label: '流程与生命周期', range: [14, 17] },
+  { id: 'diagnosis', label: '归因与诊断', range: [18, 21] },
+  { id: 'decision', label: '预测与决策', range: [22, 26] },
+  { id: 'operations', label: '运营与表达', range: [27, 36] },
+] as const
+
+function familyIcon(kind: AnalysisRendererKind, size = 17): ReactNode {
+  const props = { size, weight: 'duotone' as const }
+  switch (kind) {
+    case 'metric': return <Gauge {...props} />
+    case 'progress': return <Target {...props} />
+    case 'comparison': return <ArrowsLeftRight {...props} />
+    case 'ranking': return <Ranking {...props} />
+    case 'trend': case 'forecast': return <ChartLineUp {...props} />
+    case 'composition': case 'contribution': return <ChartDonut {...props} />
+    case 'structure': case 'waterfall': return <ChartBar {...props} />
+    case 'concentration': case 'drivers': case 'sensitivity': return <ChartBarHorizontal {...props} />
+    case 'distribution': case 'relationship': case 'quadrant': case 'risk': return <ChartScatter {...props} />
+    case 'matrix': case 'cohort': return <GridFour {...props} />
+    case 'funnel': return <Funnel {...props} />
+    case 'flow': return <Path {...props} />
+    case 'lifecycle': return <ArrowsClockwise {...props} />
+    case 'root-cause': return <TreeStructure {...props} />
+    case 'scenario': return <GitBranch {...props} />
+    case 'experiment': return <Flask {...props} />
+    case 'geospatial': return <MapTrifold {...props} />
+    case 'monitoring': return <Pulse {...props} />
+    case 'pipeline': return <Kanban {...props} />
+    case 'calendar': return <CalendarDots {...props} />
+    case 'detail': return <Table {...props} />
+    case 'timeline': return <ClockCounterClockwise {...props} />
+    case 'insight': return <Lightbulb {...props} />
+    case 'action': return <ListChecks {...props} />
+    case 'data-info': return <Info {...props} />
+    case 'scope': return <SlidersHorizontal {...props} />
+    default: return <UsersThree {...props} />
+  }
 }
 
-function paletteIcon(manifest: ComponentManifest) {
-  const type = manifest.type
-  if (type.startsWith('line') || type.startsWith('area')) return <ChartLine size={18} weight="duotone" />
-  if (type.startsWith('bar') || type === 'waterfall-chart') return <ChartBar size={18} weight="duotone" />
-  if (type.startsWith('pie') || type.startsWith('funnel')) return <ChartPieSlice size={18} weight="duotone" />
-  if (type === 'metric-card') return <Gauge size={18} weight="duotone" />
-  if (type === 'data-table' || type === 'hierarchy-table') return <Table size={18} weight="duotone" />
-  if (type === 'insight-text') return <Sparkle size={18} weight="duotone" />
-  if (type === 'rich-text') return <TextT size={18} weight="duotone" />
-  if (type === 'image') return <ImageIcon size={18} weight="duotone" />
-  return <ListBullets size={18} weight="duotone" />
+function AnalysisCardThumbnail({ item, variant }: { item: AnalysisCardCatalogItem; variant: AnalysisCardVariant }) {
+  return <span className={`report-analysis-thumb is-${item.rendererKind} is-variant-${variant}`} aria-hidden="true">
+    <img src={`/analysis-card-gallery/${String(item.id).padStart(2, '0')}-${item.slug}/${variant}.webp`} alt="" loading="lazy" />
+  </span>
 }
 
-/** 内容面板：报告头与筛选栏由系统固定，这里只提供作者可以编排的正文元素。 */
+function FallbackPalette({ manifests, disabled, onPick }: {
+  manifests: ComponentManifest[]
+  disabled: boolean
+  onPick: (manifest: ComponentManifest, options?: Partial<ComponentOptions>) => void
+}) {
+  return <section className="report-palette-fallback">
+    <p><Warning size={14} />新版分析卡片合同尚未加载，暂时显示兼容组件。</p>
+    {manifests.filter(manifest => manifest.renderer !== 'CONTROL').map(manifest => <button type="button" key={`${manifest.type}@${manifest.version}`}
+      disabled={disabled} onClick={() => onPick(manifest)}>{manifest.displayName}</button>)}
+  </section>
+}
+
+/** 按业务问题组织的分析卡片库；每个语义类型固定提供三种可复用版式。 */
 export function ComponentPalette({ manifests, disabled, onPick }: {
   manifests: ComponentManifest[]
   disabled: boolean
-  onPick: (manifest: ComponentManifest) => void
+  onPick: (manifest: ComponentManifest, options?: Partial<ComponentOptions>) => void
 }) {
   const [query, setQuery] = useState('')
   const [filterOpen, setFilterOpen] = useState(false)
-  const [category, setCategory] = useState<ComponentManifest['category'] | ''>('')
-  const designable = useMemo(() => manifests.filter(manifest => manifest.renderer !== 'CONTROL'), [manifests])
-  const filtered = useMemo(() => {
-    const normalized = query.trim().toLocaleLowerCase()
-    return designable.filter(manifest => (!category || manifest.category === category) && (!normalized ||
-      manifest.displayName.toLocaleLowerCase().includes(normalized) ||
-      manifest.type.toLocaleLowerCase().includes(normalized) ||
-      categoryLabels[manifest.category].includes(normalized)))
-  }, [category, designable, query])
-  const unique = (items: ComponentManifest[]) => Array.from(new Map(items.map(item => [manifestRef(item), item])).values())
-  const favoriteTypes = ['metric-card', 'waterfall-chart', 'hierarchy-table', 'line-trend', 'data-table', 'insight-text']
-  const favorites = unique(favoriteTypes
-    .map(type => filtered.find(item => item.type === type))
-    .filter((item): item is ComponentManifest => Boolean(item)))
-  const recent = unique(filtered.filter(item => !favorites.includes(item)).slice(0, 5))
-  const essentials = unique(filtered.filter(item =>
-    item.category === 'CONTENT' || item.category === 'TABLE').slice(0, 8))
-  const sections = query.trim()
-    ? [{ label: '搜索结果', items: filtered }]
-    : [
-        { label: '收藏', items: favorites },
-        { label: '最近使用', items: recent },
-        { label: '基础元素', items: essentials },
-      ].filter(section => section.items.length > 0)
-  return <div className="report-palette" aria-label="组件面板">
-    <header><strong>内容</strong><small>只编排报告正文</small></header>
+  const [group, setGroup] = useState('')
+  const analysisManifests = useMemo(() => new Map(manifests.filter(isAnalysisCardManifest).map(item => [item.type, item])), [manifests])
+  const normalized = query.trim().toLocaleLowerCase()
+  const visible = useMemo(() => analysisCardCatalog.filter(item => {
+    const selectedGroup = groups.find(candidate => candidate.id === group)
+    const inGroup = !selectedGroup || (item.id >= selectedGroup.range[0] && item.id <= selectedGroup.range[1])
+    const matches = !normalized || [item.name, item.question, ...item.subtypes, ...item.presentations]
+      .some(value => value.toLocaleLowerCase().includes(normalized))
+    return inGroup && matches && analysisManifests.has(item.type)
+  }), [analysisManifests, group, normalized])
+
+  return <div className="report-palette" aria-label="分析卡片库">
+    <header><strong>分析卡片</strong><small>36 类业务问题 · 每类 3 种版式</small></header>
     <div className="report-palette-search">
       <MagnifyingGlass size={16} />
-      <input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索元素" aria-label="搜索画布元素" />
-      <button type="button" aria-label="筛选元素" aria-expanded={filterOpen} title="按类型筛选" onClick={() => setFilterOpen(open => !open)}><SlidersHorizontal size={16} /></button>
+      <input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索问题、类型或图形" aria-label="搜索分析卡片" />
+      <button type="button" aria-label="筛选分析卡片" aria-expanded={filterOpen} title="按分析阶段筛选" onClick={() => setFilterOpen(open => !open)}><SlidersHorizontal size={16} /></button>
     </div>
-    {filterOpen && <div className="report-palette-filters" aria-label="元素类型筛选">
-      <button type="button" className={!category ? 'is-active' : ''} onClick={() => setCategory('')}>全部</button>
-      {(['CHART', 'TABLE', 'CONTENT'] as ComponentManifest['category'][]).map(item => <button type="button" key={item}
-        className={category === item ? 'is-active' : ''} onClick={() => setCategory(item)}>{categoryLabels[item]}</button>)}
+    {filterOpen && <div className="report-palette-filters" aria-label="分析阶段筛选">
+      <button type="button" className={!group ? 'is-active' : ''} onClick={() => setGroup('')}>全部</button>
+      {groups.map(item => <button type="button" key={item.id} className={group === item.id ? 'is-active' : ''}
+        onClick={() => setGroup(item.id)}>{item.label}</button>)}
     </div>}
-    {sections.map(section => <section key={section.label}>
-      <h3>{section.label}</h3>
-      <div className="report-palette-grid">
-        {section.items.map(manifest => <button type="button" key={`${section.label}:${manifestRef(manifest)}`} className="report-palette-item"
-          draggable={!disabled} disabled={disabled}
-          title={`${manifest.displayName} · 维度 ${manifest.dataContract.dimensions.min}～${manifest.dataContract.dimensions.max}，度量 ${manifest.dataContract.measures.min}～${manifest.dataContract.measures.max}`}
-          onDragStart={event => {
-            event.dataTransfer.setData(paletteDragType, manifestRef(manifest))
-            event.dataTransfer.effectAllowed = 'copy'
-          }}
-          onClick={() => onPick(manifest)}>
-          <span className="report-palette-icon">{paletteIcon(manifest)}</span>
-          <strong>{manifest.displayName}</strong>
-          <small>{categoryLabels[manifest.category]}</small>
-        </button>)}
-      </div>
-    </section>)}
-    {designable.length === 0 && <p className="report-interaction-note"><Info size={15} />内容元素清单尚未加载。</p>}
-    {designable.length > 0 && filtered.length === 0 && <p className="report-interaction-note"><Info size={15} />没有匹配的内容元素。</p>}
+    {analysisManifests.size === 0
+      ? <FallbackPalette manifests={manifests} disabled={disabled} onPick={onPick} />
+      : <div className="report-analysis-categories">
+        {visible.map(item => {
+          const manifest = analysisManifests.get(item.type)
+          if (!manifest) return null
+          return <section className="report-analysis-category" key={item.type}>
+            <header>
+              <span>{familyIcon(item.rendererKind)}</span>
+              <div><strong>{String(item.id).padStart(2, '0')} · {item.name}</strong><small>{item.question}</small></div>
+            </header>
+            <div className="report-analysis-variants" aria-label={`${item.name}版式`}>
+              {analysisCardVariants.map(variant => {
+                const options = analysisCardOption(variant.id)
+                return <button type="button" key={variant.id} className={`is-variant-${variant.id}`}
+                  draggable={!disabled} disabled={disabled}
+                  title={`${variant.name}：${variant.description}。${item.presentations.join(' / ')}`}
+                  onDragStart={event => {
+                    event.dataTransfer.setData(paletteDragType, encodePalettePayload(manifest, options))
+                    event.dataTransfer.effectAllowed = 'copy'
+                  }}
+                  onClick={() => onPick(manifest, options)}>
+                  <AnalysisCardThumbnail item={item} variant={variant.id} />
+                  <span>{variant.name}</span>
+                </button>
+              })}
+            </div>
+          </section>
+        })}
+      </div>}
+    {analysisManifests.size > 0 && visible.length === 0 && <p className="report-interaction-note"><Info size={15} />没有匹配的分析卡片。</p>}
   </div>
 }

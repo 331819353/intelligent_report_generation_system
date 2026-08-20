@@ -5,6 +5,8 @@ import { init, use as registerEChartsComponents } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { CaretDown, CaretLeft, CaretRight, Image as ImageIcon, Info } from '@phosphor-icons/react'
 import { ComponentStateView } from '../runtime/ComponentStateView.tsx'
+import { AnalysisCardView } from '../analysis/AnalysisCardView.tsx'
+import { analysisCardDefinition } from '../analysis/catalog.ts'
 import { componentPresentation, type ReportComponentState } from '../runtime/state.ts'
 import { buildChartOption, formatNumber, resolveColumns, singleMetric, type QueryResult } from './chart-option.ts'
 import { FilterControl } from './FilterControl.tsx'
@@ -228,6 +230,7 @@ export function ComponentView({
   component, manifests, item, mobile, designMode, onRetry, onSelect, selected, dimmed, inlineFilter,
 }: ComponentViewProps) {
   const manifest = manifests.get(component.templateRef.type, component.templateRef.version)
+  const isAnalysisCard = Boolean(analysisCardDefinition(component.templateRef.type))
   const result = item?.result
   const state = item?.state ?? (designMode ? 'EMPTY' : 'LOADING')
 
@@ -275,6 +278,9 @@ export function ComponentView({
     if (manifest.renderer === 'ECHARTS' && option) {
       return <EChartsView option={option} onPick={pick} label={`${component.options.title || manifest.displayName}图表`} />
     }
+    if (manifest.renderer === 'REACT' && analysisCardDefinition(component.templateRef.type)) {
+      return <AnalysisCardView component={component} result={result} mobile={mobile} onPick={pick} />
+    }
     if (manifest.category === 'TABLE') return <TableView component={component} result={result} />
     if (component.templateRef.type === 'metric-card') return <MetricView component={component} result={result} />
     return <TableView component={component} result={result} />
@@ -286,16 +292,19 @@ export function ComponentView({
   const classes = ['report-render-component']
   if (manifest) classes.push(`is-category-${manifest.category.toLocaleLowerCase()}`)
   classes.push(`is-type-${component.templateRef.type}`)
+  if (isAnalysisCard) {
+    classes.push('is-analysis-card', `is-analysis-variant-${component.options.cardVariant ?? '01'}`)
+  }
   if (selected) classes.push('is-selected-source')
   if (dimmed) classes.push('is-dimmed')
   return <article className={classes.join(' ')} data-component-id={component.id}>
-    <header className="report-render-component-head">
+    {!isAnalysisCard && <header className="report-render-component-head">
       <div>
         <h3>{state === 'NO_PERMISSION' ? '受限组件' : component.options.title || manifest?.displayName || component.templateRef.type}</h3>
         {state !== 'NO_PERMISSION' && component.options.subtitle && <p>{component.options.subtitle}</p>}
       </div>
       {item && state !== 'READY' && <span className={`report-state-chip is-${String(state).toLocaleLowerCase()}`}>{componentPresentation(String(state)).label}</span>}
-    </header>
+    </header>}
     <div className="report-render-component-body">{failed
       ? <ComponentStateView state={state} boundTitle={state === 'NO_PERMISSION' ? undefined : component.options.title} errorCode={item?.errorCode} onAction={onRetry} />
       : body()}</div>

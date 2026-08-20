@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { addToCardOperations, createStructuredBlockOperations, findCompatibleTemplateSlot, placeComponentInSlotOperations, removeComponentOperations } from './operations.ts'
+import {
+  addToCardOperations, createStructuredBlockOperations, decodePalettePayload, encodePalettePayload,
+  findCompatibleTemplateSlot, placeComponentInSlotOperations, removeComponentOperations,
+} from './operations.ts'
 import type { Block, Page, ReportDefinition, ZoneType } from '../render/schema.ts'
 import type { ComponentManifest } from '../render/manifests.ts'
 
@@ -183,4 +186,14 @@ test('filling a compact template slot expands the block to the component minimum
   })
   assert.deepEqual(result.operations.map(item => item.op), ['COMPONENT_CREATE', 'SLOT_UPDATE', 'BLOCK_RESIZE'])
   assert.equal((result.operations[2].payload as { h: number }).h, 4)
+})
+
+test('analysis palette payload preserves the selected visual variant', () => {
+  const payload = encodePalettePayload(manifest, { cardVariant: '03' })
+  assert.deepEqual(decodePalettePayload(payload), {
+    ref: 'insight-text@1.0.0',
+    options: { cardVariant: '03' },
+  })
+  // Existing raw ref payloads remain supported for old drafts and cached browser sessions.
+  assert.deepEqual(decodePalettePayload('insight-text@1.0.0'), { ref: 'insight-text@1.0.0' })
 })

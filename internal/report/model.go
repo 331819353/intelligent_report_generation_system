@@ -475,6 +475,7 @@ type ComponentOptions struct {
 	ImageAssetID     *askdata.ID      `json:"imageAssetId,omitempty"`
 	InsightRole      string           `json:"insightRole,omitempty"`
 	TablePageSize    *int             `json:"tablePageSize,omitempty"`
+	CardVariant      string           `json:"cardVariant,omitempty"`
 }
 
 type Orientation string
@@ -1190,6 +1191,9 @@ func (options ComponentOptions) validate() error {
 	}
 	if options.MobileLegendMode != "" && options.MobileLegendMode != MobileLegendVisible && options.MobileLegendMode != MobileLegendHidden && options.MobileLegendMode != MobileLegendScroll {
 		return errors.New("options.mobileLegendMode is invalid")
+	}
+	if options.CardVariant != "" && options.CardVariant != "01" && options.CardVariant != "02" && options.CardVariant != "03" {
+		return errors.New("options.cardVariant is invalid")
 	}
 	if options.ImageAssetID != nil {
 		if err := options.ImageAssetID.Validate(); err != nil {

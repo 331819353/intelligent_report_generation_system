@@ -1,0 +1,89 @@
+{
+  "type": "analysis-recommendation-action",
+  "version": "1.0.0",
+  "renderer": "REACT",
+  "displayName": "建议行动卡",
+  "category": "CONTENT",
+  "minSize": {
+    "w": 6,
+    "h": 3
+  },
+  "recommendedSize": {
+    "w": 12,
+    "h": 5
+  },
+  "dataContract": {
+    "dimensions": {
+      "min": 1,
+      "max": 3
+    },
+    "measures": {
+      "min": 1,
+      "max": 2
+    },
+    "timeField": {
+      "required": false
+    },
+    "roles": [
+      "LABEL",
+      "DETAIL",
+      "CATEGORY",
+      "VALUE"
+    ]
+  },
+  "stackingRequiresAdditive": false,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "cardVariant"
+    ],
+    "properties": {
+      "title": {
+        "type": "string"
+      },
+      "subtitle": {
+        "type": "string"
+      },
+      "cardVariant": {
+        "type": "string",
+        "description": "卡片版式",
+        "enum": [
+          "01",
+          "02",
+          "03"
+        ]
+      },
+      "showLegend": {
+        "type": "boolean",
+        "description": "显示图例"
+      },
+      "showLabel": {
+        "type": "boolean",
+        "description": "显示数值标签"
+      },
+      "numberFormat": {
+        "type": "string",
+        "description": "数字格式"
+      },
+      "topN": {
+        "type": "integer",
+        "description": "最多显示对象数",
+        "minimum": 1,
+        "maximum": 100
+      }
+    }
+  },
+  "defaultOptions": {
+    "cardVariant": "01",
+    "showLegend": true,
+    "showLabel": true,
+    "topN": 10
+  },
+  "mobilePolicy": {
+    "supported": true,
+    "defaultLegendMode": "HIDDEN",
+    "labelDegradation": "ELLIPSIS"
+  },
+  "supportedInteractions": []
+}

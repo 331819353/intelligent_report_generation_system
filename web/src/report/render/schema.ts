@@ -76,6 +76,7 @@ export type ComponentOptions = {
   imageAssetId?: string
   insightRole?: string
   tablePageSize?: number
+  cardVariant?: '01' | '02' | '03'
 }
 
 export type ReportComponent = {
