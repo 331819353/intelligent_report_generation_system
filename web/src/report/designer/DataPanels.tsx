@@ -1,9 +1,9 @@
-import { useMemo, useState } from 'react'
-import { Check, Copy, Database, Funnel, Info, Plus, Trash, WarningCircle, X } from '@phosphor-icons/react'
-import type { DataContextCandidate, DataContextField } from '../api/editor.ts'
+import { useEffect, useMemo, useState } from 'react'
+import { ArrowClockwise, Check, Copy, Database, Funnel, Info, Plus, SpinnerGap, Trash, WarningCircle, X } from '@phosphor-icons/react'
+import { reportEditorAPI, type DataContextCandidate, type DataContextField, type FilterOptionResult } from '../api/editor.ts'
 import type { GlobalFilter, ReportDefinition } from '../render/schema.ts'
 import { orderedPages, orderedSections } from '../render/schema.ts'
-import { dataContextInUse, parseFilterOptions, suggestedFilterType, type FilterDraft } from './operations.ts'
+import { dataContextInUse, suggestedFilterType, type FilterDraft } from './operations.ts'
 
 /**
  * 报告级“数据集 / 筛选器 / 定义 JSON”三块面板。
@@ -30,7 +30,52 @@ const editableFilterTypes: GlobalFilter['type'][] = [
   'MULTI_SELECT', 'SINGLE_SELECT', 'SEARCH_SELECT', 'DATE', 'DATE_RANGE', 'RELATIVE_TIME', 'NUMBER_RANGE', 'PARAMETER_INPUT',
 ]
 
-const optionFilterTypes = new Set<GlobalFilter['type']>(['SINGLE_SELECT', 'MULTI_SELECT', 'SELECT'])
+const optionFilterTypes = new Set<GlobalFilter['type']>(['SINGLE_SELECT', 'MULTI_SELECT', 'SEARCH_SELECT', 'SELECT'])
+
+type OptionLoadState = FilterOptionResult & { key: string; loading: boolean; error: string }
+
+function ExistingFilterOptions({ filter, label, busy, onUpdate }: {
+  filter: GlobalFilter
+  label: string
+  busy: boolean
+  onUpdate: (filter: GlobalFilter, draft: FilterDraft) => void
+}) {
+  const [loading, setLoading] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const options = filter.options ?? []
+
+  const refresh = async () => {
+    setLoading(true)
+    setLoadError('')
+    try {
+      const result = await reportEditorAPI.listFilterOptions(filter.fieldRef.dataContextId, filter.fieldRef.field)
+      if (result.values.length === 0) {
+        setLoadError('该字段当前没有可用值。')
+        return
+      }
+      onUpdate(filter, {
+        dataContextId: filter.fieldRef.dataContextId, field: filter.fieldRef.field, type: filter.type,
+        label, options: result.values,
+        scope: filter.scope.type === 'REPORT' ? { type: 'REPORT' } : { type: 'BLOCK', targetIds: filter.scope.targetIds },
+      })
+    } catch (caught) {
+      setLoadError(caught instanceof Error ? caught.message : '字段去重值读取失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return <div className="report-filter-option-editor">
+    <div className="report-filter-option-status">
+      <span><strong>{options.length}</strong> 个字段去重值{options.length === 0 ? ' · 尚未读取' : ''}</span>
+      <button type="button" disabled={busy || loading} onClick={() => void refresh()}>
+        {loading ? <SpinnerGap className="spin" size={13} /> : <ArrowClockwise size={13} />}{options.length === 0 ? '读取并保存' : '刷新'}
+      </button>
+    </div>
+    {options.length > 0 && <p>{options.slice(0, 6).map(option => <em key={option}>{option}</em>)}{options.length > 6 && <i>+{options.length - 6}</i>}</p>}
+    {loadError && <small><WarningCircle size={12} />{loadError}</small>}
+  </div>
+}
 
 export function DataContextPanel({ definition, candidates, busy, error, onAdd, onRemove }: {
   definition: ReportDefinition
@@ -102,8 +147,8 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
   const fieldMeta = fields.find(item => item.code === effectiveField)
   const [type, setType] = useState<GlobalFilter['type'] | ''>('')
   const effectiveType = type || suggestedFilterType(fieldMeta)
-  const [optionsText, setOptionsText] = useState('')
-  const [optionDrafts, setOptionDrafts] = useState<Record<string, string>>({})
+  const [optionReload, setOptionReload] = useState(0)
+  const [optionState, setOptionState] = useState<OptionLoadState>({ key: '', values: [], truncated: false, scannedRows: 0, loading: false, error: '' })
   const [scopeMode, setScopeMode] = useState<'REPORT' | 'BLOCK'>(onlyBlock && selectedBlockId ? 'BLOCK' : 'REPORT')
   const [targets, setTargets] = useState<string[]>([])
   // 新增表单默认收起：已有筛选器时面板先展示现状，点“添加”再展开表单。
@@ -119,18 +164,39 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
   const fieldMetaOf = (filter: GlobalFilter) => fieldsOf(filter.fieldRef.dataContextId).find(item => item.code === filter.fieldRef.field)
   const filterLabel = (filter: GlobalFilter) => filter.label?.trim() || fieldMetaOf(filter)?.name || filter.fieldRef.field
   const chosenTargets = scopeMode === 'BLOCK' ? (targets.length ? targets : selectedBlockId ? [selectedBlockId] : []) : []
-  const parsedOptions = parseFilterOptions(optionsText)
   const needsOptions = optionFilterTypes.has(effectiveType)
-  const ready = Boolean(contextId && effectiveField) && (!needsOptions || parsedOptions.length > 0) && (scopeMode === 'REPORT' || chosenTargets.length > 0)
+  const optionKey = `${contextId}\u0000${effectiveField}\u0000${effectiveType}`
+  const loadedOptions = optionState.key === optionKey ? optionState.values : []
+  const optionsLoading = optionState.key === optionKey && optionState.loading
+  const optionError = optionState.key === optionKey ? optionState.error : ''
+  const ready = Boolean(contextId && effectiveField) && (!needsOptions || loadedOptions.length > 0) && (scopeMode === 'REPORT' || chosenTargets.length > 0)
+
+  useEffect(() => {
+    if (!needsOptions || !contextId || !effectiveField) return
+    const controller = new AbortController()
+    const key = optionKey
+    queueMicrotask(() => {
+      if (controller.signal.aborted) return
+      setOptionState({ key, values: [], truncated: false, scannedRows: 0, loading: true, error: '' })
+      void reportEditorAPI.listFilterOptions(contextId, effectiveField, { signal: controller.signal }).then(result => {
+        if (!controller.signal.aborted) setOptionState({ key, ...result, loading: false, error: '' })
+      }).catch(caught => {
+        if (!controller.signal.aborted) setOptionState({
+          key, values: [], truncated: false, scannedRows: 0, loading: false,
+          error: caught instanceof Error ? caught.message : '字段去重值读取失败',
+        })
+      })
+    })
+    return () => controller.abort()
+  }, [contextId, effectiveField, needsOptions, optionKey, optionReload])
 
   const submit = () => {
     onCreate({
       dataContextId: contextId, field: effectiveField, type: effectiveType,
       label: fieldMeta?.name || effectiveField,
-      ...(needsOptions ? { options: parsedOptions } : {}),
+      ...(needsOptions ? { options: loadedOptions } : {}),
       scope: scopeMode === 'REPORT' ? { type: 'REPORT' } : { type: 'BLOCK', targetIds: chosenTargets },
     })
-    setOptionsText('')
     setAdding(false)
   }
 
@@ -138,10 +204,6 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
     <header><strong><Funnel size={15} /> {onlyBlock ? '过滤字段' : '筛选器'}</strong><small>{onlyBlock ? '作用于这张卡片；输入控件固定显示在报告头下方' : '筛选栏属于报告固定结构，不参与正文布局'}</small></header>
     {filters.length > 0 && <ul className="report-interaction-list">
       {filters.map(filter => {
-        const storedOptions = filter.options ?? []
-        const optionText = optionDrafts[filter.id] ?? storedOptions.join('，')
-        const nextOptions = parseFilterOptions(optionText)
-        const optionsChanged = nextOptions.join('\u0000') !== storedOptions.join('\u0000')
         return <li className="report-filter-item" key={filter.id}>
           <div className="report-filter-item-head">
             <span>
@@ -159,18 +221,7 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
               <button type="button" aria-label="删除筛选器" disabled={busy} onClick={() => onDelete(filter.id)}><Trash size={14} /></button>
             </span>
           </div>
-          {optionFilterTypes.has(filter.type) && <div className="report-filter-option-editor">
-            <label htmlFor={`filter-options-${filter.id}`}>候选值{storedOptions.length === 0 && <em>必填</em>}</label>
-            <div><input id={`filter-options-${filter.id}`} value={optionText} placeholder="例如：是，否"
-              onChange={event => setOptionDrafts(current => ({ ...current, [filter.id]: event.target.value }))} />
-              <button type="button" disabled={busy || nextOptions.length === 0 || !optionsChanged}
-                onClick={() => onUpdate(filter, {
-                  dataContextId: filter.fieldRef.dataContextId, field: filter.fieldRef.field, type: filter.type,
-                  label: filterLabel(filter), options: nextOptions,
-                  scope: filter.scope.type === 'REPORT' ? { type: 'REPORT' } : { type: 'BLOCK', targetIds: filter.scope.targetIds },
-                })}><Check size={13} />保存值</button></div>
-            {storedOptions.length === 0 && <small><WarningCircle size={12} />单选/多选必须先配置真实候选值，运行页才会显示选择框。</small>}
-          </div>}
+          {optionFilterTypes.has(filter.type) && <ExistingFilterOptions filter={filter} label={filterLabel(filter)} busy={busy} onUpdate={onUpdate} />}
         </li>
       })}
     </ul>}
@@ -190,14 +241,20 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
         </select>
       </label>
       <label>类型
-        <select value={effectiveType} onChange={event => { setType(event.target.value as GlobalFilter['type']); setOptionsText('') }}>
+        <select value={effectiveType} onChange={event => setType(event.target.value as GlobalFilter['type'])}>
           {editableFilterTypes.map(item => <option key={item} value={item}>{filterTypeLabels[item]}</option>)}
         </select>
       </label>
-      {needsOptions && <label>候选值（必填）
-        <input value={optionsText} onChange={event => setOptionsText(event.target.value)} placeholder="例如：是，否；支持逗号、分号或换行" />
-        <small>这里填写数据字段中的真实值；未配置时不能创建选择型筛选。</small>
-      </label>}
+      {needsOptions && <div className="report-filter-option-reader">
+        <div><span>字段去重值</span><button type="button" disabled={optionsLoading} onClick={() => setOptionReload(current => current + 1)}>
+          {optionsLoading ? <SpinnerGap className="spin" size={13} /> : <ArrowClockwise size={13} />}刷新
+        </button></div>
+        {optionsLoading ? <p><SpinnerGap className="spin" size={14} />正在读取当前用户可见的数据值…</p>
+          : optionError ? <p className="is-error"><WarningCircle size={14} />{optionError}</p>
+            : loadedOptions.length > 0 ? <><p className="is-values">{loadedOptions.slice(0, 8).map(option => <em key={option}>{option}</em>)}{loadedOptions.length > 8 && <i>+{loadedOptions.length - 8}</i>}</p>
+              <small>已从字段读取 {loadedOptions.length} 个去重值{optionState.truncated ? '（高基数字段，仅保留前 100 项）' : ''}。</small></>
+              : <p className="is-error"><WarningCircle size={14} />该字段当前没有可用值，不能创建选择型筛选。</p>}
+      </div>}
       <label>作用范围
         <select value={scopeMode} onChange={event => setScopeMode(event.target.value as 'REPORT' | 'BLOCK')}>
           <option value="REPORT">全报告（所有绑定该数据集的卡片）</option>

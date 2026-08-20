@@ -161,6 +161,12 @@ export type DataContextField = {
   aggregation: string
 }
 
+export type FilterOptionResult = {
+  values: string[]
+  truncated: boolean
+  scannedRows: number
+}
+
 /**
  * 组件清单由 render/manifests 统一定义（含 renderer 与 optionSchema），
  * 编辑器与渲染器读取的是同一个注册表，不再各自维护一份裁剪过的合同类型。
@@ -242,6 +248,14 @@ export const reportEditorAPI = {
   },
   listDataContexts() {
     return apiRequest<{ items: DataContextCandidate[] }>('/v1/report-data-contexts')
+  },
+  /**
+   * 读取当前用户可见数据行中某个逻辑字段的去重值。数据集和版本由服务端根据
+   * dataContextId 解析，客户端不能传物理表或 SQL。
+   */
+  listFilterOptions(dataContextId: string, field: string, options: { signal?: AbortSignal } = {}) {
+    const query = new URLSearchParams({ dataContextId, field })
+    return apiRequest<FilterOptionResult>(`/v1/report-filter-options?${query.toString()}`, { signal: options.signal })
   },
   listComponentManifests() {
     return apiRequest<{ items: ComponentManifest[] }>('/v1/report-component-manifests')

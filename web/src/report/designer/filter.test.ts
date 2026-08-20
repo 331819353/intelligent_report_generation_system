@@ -1,12 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { createFilterOperations, parseFilterOptions, updateFilterOperations } from './operations.ts'
+import { createFilterOperations, updateFilterOperations } from './operations.ts'
 import type { GlobalFilter, ReportDefinition } from '../render/schema.ts'
-
-test('filter options accept Chinese separators, trim values and remove duplicates', () => {
-  assert.deepEqual(parseFilterOptions(' 是，否\n是; 待确认 '), ['是', '否', '待确认'])
-})
 
 test('a created select filter persists its governed label and options separately from defaults', () => {
   const definition = { metadata: { id: 'report-1' } } as ReportDefinition

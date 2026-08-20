@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -50,6 +51,10 @@ type AIOptions struct {
 	Kinds            *cardkind.Registry
 	Methods          *insight.Registry
 	Runtime          runtime.QueryExecutor
+	// FilterOptions reads distinct field values through the governed dataset
+	// runtime. The handler resolves dataset/version identity from Contexts, so
+	// clients can only request fields visible in their current catalog.
+	FilterOptions runtime.FilterOptionLoader
 	// Measures supplies governed dataset metadata (declared units) that a
 	// derived Evidence Bundle must carry.
 	Measures reportinsight.MeasureContract
@@ -106,6 +111,7 @@ func NewHandler(
 	mux.HandleFunc("GET /api/v1/report-templates", handler.reportTemplates)
 	mux.HandleFunc("POST /api/v1/report-templates/{templateId}/instantiate", handler.instantiateTemplate)
 	mux.HandleFunc("GET /api/v1/report-data-contexts", handler.dataContexts)
+	mux.HandleFunc("GET /api/v1/report-filter-options", handler.filterOptions)
 	mux.HandleFunc("GET /api/v1/report-component-manifests", handler.componentManifests)
 	mux.HandleFunc("GET /api/v1/report-card-kinds", handler.cardKinds)
 	mux.HandleFunc("POST /api/v1/report-blueprints/expand", handler.expandBlueprint)
@@ -284,6 +290,7 @@ func (handler *Handler) createAI(writer http.ResponseWriter, request *http.Reque
 		}
 	}
 	base := applyCreationPresentation(newAIReportDefinition(reportID, selection.ReportName, body.Intent, selected.DataContext), reportType, headerStyle, []reportai.DataContextCandidate{selected})
+	base = handler.hydrateDefaultFilterOptions(request.Context(), identity, base)
 	reportRecord, initial, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
 		ID: reportID, Code: base.Metadata.Code, Name: base.Metadata.Name,
 		ReportType: base.Metadata.ReportType, Definition: base,
@@ -424,6 +431,7 @@ func (handler *Handler) createAIFromBlueprint(writer http.ResponseWriter, reques
 		return
 	}
 	base := applyCreationPresentation(newAIReportDefinition(reportID, selection.ReportName, body.Intent, selected.DataContext), reportType, headerStyle, []reportai.DataContextCandidate{selected})
+	base = handler.hydrateDefaultFilterOptions(request.Context(), identity, base)
 	reportRecord, initial, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
 		ID: reportID, Code: base.Metadata.Code, Name: base.Metadata.Name, ReportType: base.Metadata.ReportType, Definition: base,
 	})
@@ -606,6 +614,48 @@ func defaultReportFilters(candidates []reportai.DataContextCandidate) []reportmo
 	return filters
 }
 
+// hydrateDefaultFilterOptions snapshots the current distinct values into
+// server-created select filters. This keeps a newly created report immediately
+// usable while preserving the immutable dataset/version and viewer policy that
+// produced the choices. Authors can refresh the snapshot later in the editor.
+func (handler *Handler) hydrateDefaultFilterOptions(ctx context.Context, identity store.Identity, definition reportmodel.ReportDefinition) reportmodel.ReportDefinition {
+	if handler.ai.FilterOptions == nil {
+		return definition
+	}
+	contexts := make(map[askdata.ID]reportmodel.DataContext, len(definition.DataContexts))
+	for _, dataContext := range definition.DataContexts {
+		contexts[dataContext.ID] = dataContext
+	}
+	viewerContext := runtime.WithViewerIdentity(ctx, identity)
+	for index := range definition.GlobalFilters {
+		filter := &definition.GlobalFilters[index]
+		if len(filter.Options) != 0 {
+			continue
+		}
+		switch filter.Type {
+		case reportmodel.FilterSingleSelect, reportmodel.FilterMultiSelect, reportmodel.FilterSearchSelect, reportmodel.FilterSelect:
+		default:
+			continue
+		}
+		dataContext, exists := contexts[filter.FieldRef.DataContextID]
+		if !exists {
+			continue
+		}
+		result, err := handler.ai.FilterOptions.LoadFilterOptions(viewerContext, runtime.FilterOptionRequest{
+			DatasetID: dataContext.DatasetID, DatasetVersionID: dataContext.DatasetVersionID,
+			DataContextID: dataContext.ID, Field: filter.FieldRef.Field, Limit: runtime.MaxFilterOptionValues,
+		})
+		if err != nil {
+			slog.Warn("hydrate report filter options failed", "data_context_id", dataContext.ID, "field", filter.FieldRef.Field, "error", err)
+			continue
+		}
+		if len(result.Values) != 0 {
+			filter.Options = result.Values
+		}
+	}
+	return definition
+}
+
 func applyCreationPresentation(definition reportmodel.ReportDefinition, reportType reportmodel.ReportType, headerStyle reportmodel.ReportHeaderStyle, candidates []reportai.DataContextCandidate) reportmodel.ReportDefinition {
 	definition = applyReportType(definition, reportType)
 	definition.Metadata.HeaderStyle = headerStyle
@@ -739,6 +789,7 @@ func (handler *Handler) expandBlueprint(writer http.ResponseWriter, request *htt
 		writeError(writer, http.StatusUnprocessableEntity, "REPORT_BLUEPRINT_REJECTED", err.Error())
 		return
 	}
+	definition = handler.hydrateDefaultFilterOptions(request.Context(), identity, definition)
 	reportRecord, draft, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
 		ID: reportID, Code: definition.Metadata.Code, Name: definition.Metadata.Name, ReportType: definition.Metadata.ReportType, Definition: definition,
 	})
@@ -766,6 +817,61 @@ func (handler *Handler) dataContexts(writer http.ResponseWriter, request *http.R
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"items": candidates})
+}
+
+// filterOptions returns the distinct values of one governed dataset field.
+// dataContextId and field are only selectors into the server-side catalog; the
+// physical dataset/version identity and current row/column policy are never
+// accepted from the browser.
+func (handler *Handler) filterOptions(writer http.ResponseWriter, request *http.Request) {
+	identity, ok := handler.identity(writer, request)
+	if !ok {
+		return
+	}
+	if handler.ai.Contexts == nil || handler.ai.FilterOptions == nil {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_FILTER_OPTIONS_UNAVAILABLE", "governed filter options are unavailable")
+		return
+	}
+	contextID := askdata.ID(strings.TrimSpace(request.URL.Query().Get("dataContextId")))
+	field := strings.TrimSpace(request.URL.Query().Get("field"))
+	if contextID.Validate() != nil || field == "" {
+		writeError(writer, http.StatusBadRequest, "REPORT_FILTER_OPTIONS_INVALID", "dataContextId and field are required")
+		return
+	}
+	candidates, err := handler.ai.Contexts.Candidates(request.Context(), identity, 30)
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	var selected *reportai.DataContextCandidate
+	for index := range candidates {
+		if candidates[index].DataContext.ID != contextID {
+			continue
+		}
+		for _, allowed := range candidates[index].Fields {
+			if allowed == field {
+				selected = &candidates[index]
+				break
+			}
+		}
+		break
+	}
+	if selected == nil {
+		writeError(writer, http.StatusForbidden, "REPORT_FILTER_FIELD_FORBIDDEN", "the requested filter field is not available to this actor")
+		return
+	}
+	result, err := handler.ai.FilterOptions.LoadFilterOptions(
+		runtime.WithViewerIdentity(request.Context(), identity),
+		runtime.FilterOptionRequest{
+			DatasetID: selected.DataContext.DatasetID, DatasetVersionID: selected.DataContext.DatasetVersionID,
+			DataContextID: contextID, Field: field, Limit: runtime.MaxFilterOptionValues,
+		},
+	)
+	if err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_FILTER_OPTIONS_FAILED", "field values could not be read from the governed dataset")
+		return
+	}
+	writeJSON(writer, http.StatusOK, result)
 }
 
 // createBlank 在不调用任何模型的情况下创建一份空白报告草稿。它是报告主链的
@@ -850,6 +956,7 @@ func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Re
 		selectedContexts[0], reportmodel.CreatedManually,
 	), reportType, headerStyle, selectedCandidates)
 	definition.DataContexts = selectedContexts
+	definition = handler.hydrateDefaultFilterOptions(request.Context(), identity, definition)
 	if reportType == reportmodel.ReportTypeReport {
 		definition.Pages[0].Sections = blankReportTemplateSections()
 	}
@@ -945,6 +1052,7 @@ func (handler *Handler) instantiateTemplate(writer http.ResponseWriter, request 
 		return
 	}
 	definition = applyCreationPresentation(definition, reportType, headerStyle, []reportai.DataContextCandidate{selected})
+	definition = handler.hydrateDefaultFilterOptions(request.Context(), identity, definition)
 	reportRecord, draft, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
 		ID: reportID, Code: definition.Metadata.Code, Name: definition.Metadata.Name,
 		ReportType: definition.Metadata.ReportType, Definition: definition,

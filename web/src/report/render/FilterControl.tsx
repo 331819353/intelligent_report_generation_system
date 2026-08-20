@@ -118,17 +118,31 @@ export function FilterControl({ filter, value, onChange }: {
       }
       return <div className="report-filter-control is-multi">
         <span>{label}</span>
-        <div>{options.map(option => <label key={option}>
-          <input type="checkbox" checked={selected.includes(option)}
-            onChange={event => {
-              const next = event.target.checked
-                ? [...selected, option]
-                : selected.filter(item => item !== option)
-              onChange(next.length ? next : undefined)
-            }} />
-          {option}
-        </label>)}</div>
+        <details className="report-filter-multi-select">
+          <summary>{selected.length > 0 ? `已选 ${selected.length} 项` : '全部'}</summary>
+          <div>{options.map(option => <label key={option}>
+            <input type="checkbox" checked={selected.includes(option)}
+              onChange={event => {
+                const next = event.target.checked
+                  ? [...selected, option]
+                  : selected.filter(item => item !== option)
+                onChange(next.length ? next : undefined)
+              }} />
+            {option}
+          </label>)}</div>
+        </details>
       </div>
+    }
+
+    case 'SEARCH_SELECT': {
+      const options = filter.options ?? []
+      const listId = `report-filter-options-${filter.id}`
+      return <label className="report-filter-control">
+        <span>{label}</span>
+        <input list={options.length > 0 ? listId : undefined} value={typeof value === 'string' ? value : ''}
+          placeholder="全部" onChange={event => onChange(event.target.value || undefined)} />
+        {options.length > 0 && <datalist id={listId}>{options.map(option => <option key={option} value={option} />)}</datalist>}
+      </label>
     }
 
     case 'SINGLE_SELECT':
@@ -146,7 +160,7 @@ export function FilterControl({ filter, value, onChange }: {
     }
   }
 
-  // SEARCH_SELECT、PARAMETER_INPUT 以及历史定义中没有候选值的单选：自由输入。
+  // PARAMETER_INPUT 以及历史定义中没有候选值的单选：自由输入。
   // PARAMETER_INPUT 保留数字语义，其余按字符串提交。
   return <label className="report-filter-control">
     <span>{label}</span>

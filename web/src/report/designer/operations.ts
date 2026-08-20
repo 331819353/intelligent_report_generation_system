@@ -690,11 +690,6 @@ export type FilterDraft = {
   scope: { type: 'REPORT' } | { type: 'BLOCK'; targetIds: string[] }
 }
 
-/** 候选值允许按逗号、中文逗号、分号或换行录入，并在进入定义前去重。 */
-export function parseFilterOptions(raw: string): string[] {
-  return [...new Set(raw.split(/[\n,，;；]+/).map(item => item.trim()).filter(Boolean))]
-}
-
 /** 按字段的语义类型建议筛选器类型：时间字段用日期区间，度量用数值区间，其余多选。 */
 export function suggestedFilterType(field: DataContextField | undefined): GlobalFilter['type'] {
   if (!field) return 'MULTI_SELECT'

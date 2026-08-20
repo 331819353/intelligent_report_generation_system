@@ -34,6 +34,9 @@ type VersionQueryInput struct {
 	Predicates []VersionPredicate
 	Parameters map[string]any
 	MaxRows    int
+	// Distinct asks the runtime to group by the sole requested field. It is used
+	// for bounded filter option discovery and never changes the stored version.
+	Distinct bool
 	// Rollup asks the runtime to return rows grouped to Dimensions with Measures
 	// aggregated by their governed function, when the version's grain is finer
 	// than Dimensions and its DSL does not already aggregate. The database then
@@ -74,7 +77,7 @@ func (s *Service) PreviewVersionQueryWithRollup(
 ) (dataset.PreviewResult, VersionRollupContract, error) {
 	if s == nil || tenantID == "" || actorID == "" || datasetID == "" || versionID == "" ||
 		input.MaxRows < 1 || input.MaxRows > 10_000 || len(input.Fields) == 0 || len(input.Fields) > 64 ||
-		len(input.Predicates) > MaxVersionQueryPredicates {
+		len(input.Predicates) > MaxVersionQueryPredicates || input.Distinct && (len(input.Fields) != 1 || input.Rollup != nil) {
 		return dataset.PreviewResult{}, VersionRollupContract{}, fmt.Errorf("version query input contract: %w", dataset.ErrPreviewInvalid)
 	}
 	version, err := s.datasets.GetVersion(ctx, tenantID, datasetID, versionID)
@@ -132,7 +135,17 @@ func (s *Service) PreviewVersionQueryWithRollup(
 	}
 	contract := rollupContractOf(document)
 	snapshot := runtimeSnapshot{DatasetID: datasetID, VersionID: version.ID, ExactVersion: true}
-	if grouped, ok := runtimeRollupDocument(document, contract, input.Rollup); ok {
+	if input.Distinct {
+		grouped, groupErr := dataset.BuildRuntimeDistinct(document, input.Fields[0])
+		if groupErr != nil {
+			return dataset.PreviewResult{}, VersionRollupContract{}, fmt.Errorf("build version distinct field query: %w", dataset.ErrPreviewUnsupported)
+		}
+		prepared, prepareErr := dataset.PrepareDocument(grouped)
+		if prepareErr != nil {
+			return dataset.PreviewResult{}, VersionRollupContract{}, fmt.Errorf("normalize version distinct field query: %w: %v", dataset.ErrInvalidDocument, prepareErr)
+		}
+		snapshot.PlanHash, snapshot.DSL, snapshot.Document = prepared.PlanHash, prepared.DSLJSON, &prepared.Document
+	} else if grouped, ok := runtimeRollupDocument(document, contract, input.Rollup); ok {
 		// The roll-up is pushed into the query: the private execution document
 		// is validated and planned in memory so its runtime marker survives.
 		prepared, err := dataset.PrepareDocument(grouped)

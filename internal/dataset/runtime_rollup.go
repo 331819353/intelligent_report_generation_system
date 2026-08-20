@@ -23,6 +23,38 @@ var runtimeRollupFunctions = map[string]bool{
 	"SUM": true, "AVG": true, "MIN": true, "MAX": true, "COUNT": true, "COUNT_DISTINCT": true,
 }
 
+// BuildRuntimeDistinct derives a private one-field grouped query used by
+// report filter option discovery. Grouping by the governed logical expression
+// makes the database return unique values without reading thousands of detail
+// rows into the API process. The stored dataset version is never modified.
+func BuildRuntimeDistinct(document Document, fieldCode string) (Document, error) {
+	fieldCode = strings.TrimSpace(fieldCode)
+	var selected *Field
+	for index := range document.Fields {
+		if document.Fields[index].Code == fieldCode {
+			copy := document.Fields[index]
+			selected = &copy
+			break
+		}
+	}
+	if selected == nil || expressionHasWindow(selected.Expression) || expressionContainsAggregateExpression(selected.Expression) {
+		return Document{}, fmt.Errorf("%w: field %q cannot be grouped for filter options", ErrRuntimeRollupUnsupported, fieldCode)
+	}
+
+	rewritten := document
+	rewritten.Fields = []Field{*selected}
+	rewritten.Distinct = false
+	rewritten.GroupBy = []string{selected.ID}
+	rewritten.GroupByMode = ""
+	rewritten.GroupingSets = nil
+	rewritten.Having = nil
+	rewritten.FactContract = nil
+	rewritten.AnalysisContract = nil
+	rewritten.Sorts = []Sort{{FieldID: selected.ID, Direction: "ASC", Nulls: "LAST"}}
+	rewritten.OutputGrain = OutputGrain{Description: "运行时筛选候选值去重", KeyFields: []string{fieldCode}}
+	return AsRuntimeRollupExecution(rewritten), nil
+}
+
 // BuildRuntimeRollup derives a private, server-side execution document from a
 // PUBLISHED detail-grain version: it projects only the requested dimensions,
 // wraps every requested measure in its governed aggregate function and groups
