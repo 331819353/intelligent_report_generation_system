@@ -882,6 +882,13 @@ export function ReportEditorPage() {
   const fieldsOf = (dataContextId: string): DataContextField[] => fieldsByContext.get(dataContextId) ?? []
   const reportContexts = draft?.definition.dataContexts ?? []
   const reportFilterCount = draft?.definition.globalFilters?.length ?? 0
+  // 旧草稿没有持久化 label 时也立即使用当前受治理目录中的中文业务名展示；
+  // 新建和筛选器后续保存会把同一名称写回定义，发布制品不再依赖技术字段码。
+  const displayedGlobalFilters = (draft?.definition.globalFilters ?? []).map(filter => {
+    if (filter.label?.trim()) return filter
+    const name = fieldsByContext.get(filter.fieldRef.dataContextId)?.find(item => item.code === filter.fieldRef.field)?.name
+    return name ? { ...filter, label: name } : filter
+  })
   const contextNameOf = (dataContextId: string) =>
     reportContexts.find(context => context.id === dataContextId)?.alias ||
     contexts.find(item => item.dataContext.id === dataContextId)?.name || dataContextId
@@ -1486,7 +1493,7 @@ export function ReportEditorPage() {
                   `当前修订：r${draft.revisionNo}`, `数据源：${reportContexts.length} 个`,
                   executing ? '正在刷新预览' : executionError ? '预览暂不可用' : execution ? `数据截至 ${dateTime(execution.asOf)}` : '尚未执行预览',
                 ]}
-                filters={draft.definition.globalFilters ?? []} values={designFilterValues}
+                filters={displayedGlobalFilters} values={designFilterValues}
                 onChange={(filterId, value) => setDesignFilterValues(current => ({ ...current, [filterId]: value }))}
                 onApply={() => notify('筛选条件已应用到报告预览')} applying={executing}
                 onConfigure={editorView === 'edit' ? () => { setSelectedComponentId(''); setSidePanel('data'); setReportInspectorView('filters') } : undefined}

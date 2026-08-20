@@ -3,7 +3,7 @@ import { Check, Copy, Database, Funnel, Info, Plus, Trash, WarningCircle, X } fr
 import type { DataContextCandidate, DataContextField } from '../api/editor.ts'
 import type { GlobalFilter, ReportDefinition } from '../render/schema.ts'
 import { orderedPages, orderedSections } from '../render/schema.ts'
-import { dataContextInUse, suggestedFilterType, type FilterDraft } from './operations.ts'
+import { dataContextInUse, parseFilterOptions, suggestedFilterType, type FilterDraft } from './operations.ts'
 
 /**
  * 报告级“数据集 / 筛选器 / 定义 JSON”三块面板。
@@ -29,6 +29,8 @@ const filterTypeLabels: Record<GlobalFilter['type'], string> = {
 const editableFilterTypes: GlobalFilter['type'][] = [
   'MULTI_SELECT', 'SINGLE_SELECT', 'SEARCH_SELECT', 'DATE', 'DATE_RANGE', 'RELATIVE_TIME', 'NUMBER_RANGE', 'PARAMETER_INPUT',
 ]
+
+const optionFilterTypes = new Set<GlobalFilter['type']>(['SINGLE_SELECT', 'MULTI_SELECT', 'SELECT'])
 
 export function DataContextPanel({ definition, candidates, busy, error, onAdd, onRemove }: {
   definition: ReportDefinition
@@ -100,6 +102,8 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
   const fieldMeta = fields.find(item => item.code === effectiveField)
   const [type, setType] = useState<GlobalFilter['type'] | ''>('')
   const effectiveType = type || suggestedFilterType(fieldMeta)
+  const [optionsText, setOptionsText] = useState('')
+  const [optionDrafts, setOptionDrafts] = useState<Record<string, string>>({})
   const [scopeMode, setScopeMode] = useState<'REPORT' | 'BLOCK'>(onlyBlock && selectedBlockId ? 'BLOCK' : 'REPORT')
   const [targets, setTargets] = useState<string[]>([])
   // 新增表单默认收起：已有筛选器时面板先展示现状，点“添加”再展开表单。
@@ -112,37 +116,63 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
     return { id: block.id, name: component?.options.title || component?.templateRef.type || block.id, sectionName: section.name }
   }))), [definition])
   const contextName = (id: string) => contexts.find(context => context.id === id)?.alias || candidates.find(item => item.dataContext.id === id)?.name || id
+  const fieldMetaOf = (filter: GlobalFilter) => fieldsOf(filter.fieldRef.dataContextId).find(item => item.code === filter.fieldRef.field)
+  const filterLabel = (filter: GlobalFilter) => filter.label?.trim() || fieldMetaOf(filter)?.name || filter.fieldRef.field
   const chosenTargets = scopeMode === 'BLOCK' ? (targets.length ? targets : selectedBlockId ? [selectedBlockId] : []) : []
-  const ready = Boolean(contextId && effectiveField) && (scopeMode === 'REPORT' || chosenTargets.length > 0)
+  const parsedOptions = parseFilterOptions(optionsText)
+  const needsOptions = optionFilterTypes.has(effectiveType)
+  const ready = Boolean(contextId && effectiveField) && (!needsOptions || parsedOptions.length > 0) && (scopeMode === 'REPORT' || chosenTargets.length > 0)
 
   const submit = () => {
     onCreate({
       dataContextId: contextId, field: effectiveField, type: effectiveType,
+      label: fieldMeta?.name || effectiveField,
+      ...(needsOptions ? { options: parsedOptions } : {}),
       scope: scopeMode === 'REPORT' ? { type: 'REPORT' } : { type: 'BLOCK', targetIds: chosenTargets },
     })
+    setOptionsText('')
     setAdding(false)
   }
 
   return <section className="report-interaction-panel report-filter-panel" aria-label="报告筛选器">
     <header><strong><Funnel size={15} /> {onlyBlock ? '过滤字段' : '筛选器'}</strong><small>{onlyBlock ? '作用于这张卡片；输入控件固定显示在报告头下方' : '筛选栏属于报告固定结构，不参与正文布局'}</small></header>
     {filters.length > 0 && <ul className="report-interaction-list">
-      {filters.map(filter => <li key={filter.id}>
-        <span>
-          {contextName(filter.fieldRef.dataContextId)} · <code>{filter.fieldRef.field}</code> · {filterTypeLabels[filter.type] ?? filter.type}
-          <em> · {filter.scope.type === 'REPORT' ? '全报告' : `${filter.scope.type === 'BLOCK' ? '卡片' : filter.scope.type} ×${filter.scope.targetIds.length}`}</em>
-        </span>
-        <span className="report-filter-actions">
-          <select aria-label="筛选器作用范围" disabled={busy} value={filter.scope.type === 'REPORT' ? 'REPORT' : 'BLOCK'}
-            onChange={event => onUpdate(filter, {
-              dataContextId: filter.fieldRef.dataContextId, field: filter.fieldRef.field, type: filter.type,
-              scope: event.target.value === 'REPORT' ? { type: 'REPORT' } : { type: 'BLOCK', targetIds: selectedBlockId ? [selectedBlockId] : [] },
-            })}>
-            <option value="REPORT">全报告</option>
-            <option value="BLOCK" disabled={!selectedBlockId && filter.scope.type !== 'BLOCK'}>选中卡片</option>
-          </select>
-          <button type="button" aria-label="删除筛选器" disabled={busy} onClick={() => onDelete(filter.id)}><Trash size={14} /></button>
-        </span>
-      </li>)}
+      {filters.map(filter => {
+        const storedOptions = filter.options ?? []
+        const optionText = optionDrafts[filter.id] ?? storedOptions.join('，')
+        const nextOptions = parseFilterOptions(optionText)
+        const optionsChanged = nextOptions.join('\u0000') !== storedOptions.join('\u0000')
+        return <li className="report-filter-item" key={filter.id}>
+          <div className="report-filter-item-head">
+            <span>
+              <strong>{filterLabel(filter)}</strong><small>{contextName(filter.fieldRef.dataContextId)} · {filter.fieldRef.field} · {filterTypeLabels[filter.type] ?? filter.type}</small>
+            </span>
+            <span className="report-filter-actions">
+              <select aria-label="筛选器作用范围" disabled={busy} value={filter.scope.type === 'REPORT' ? 'REPORT' : 'BLOCK'}
+                onChange={event => onUpdate(filter, {
+                  dataContextId: filter.fieldRef.dataContextId, field: filter.fieldRef.field, type: filter.type,
+                  scope: event.target.value === 'REPORT' ? { type: 'REPORT' } : { type: 'BLOCK', targetIds: selectedBlockId ? [selectedBlockId] : [] },
+                })}>
+                <option value="REPORT">全报告</option>
+                <option value="BLOCK" disabled={!selectedBlockId && filter.scope.type !== 'BLOCK'}>选中卡片</option>
+              </select>
+              <button type="button" aria-label="删除筛选器" disabled={busy} onClick={() => onDelete(filter.id)}><Trash size={14} /></button>
+            </span>
+          </div>
+          {optionFilterTypes.has(filter.type) && <div className="report-filter-option-editor">
+            <label htmlFor={`filter-options-${filter.id}`}>候选值{storedOptions.length === 0 && <em>必填</em>}</label>
+            <div><input id={`filter-options-${filter.id}`} value={optionText} placeholder="例如：是，否"
+              onChange={event => setOptionDrafts(current => ({ ...current, [filter.id]: event.target.value }))} />
+              <button type="button" disabled={busy || nextOptions.length === 0 || !optionsChanged}
+                onClick={() => onUpdate(filter, {
+                  dataContextId: filter.fieldRef.dataContextId, field: filter.fieldRef.field, type: filter.type,
+                  label: filterLabel(filter), options: nextOptions,
+                  scope: filter.scope.type === 'REPORT' ? { type: 'REPORT' } : { type: 'BLOCK', targetIds: filter.scope.targetIds },
+                })}><Check size={13} />保存值</button></div>
+            {storedOptions.length === 0 && <small><WarningCircle size={12} />单选/多选必须先配置真实候选值，运行页才会显示选择框。</small>}
+          </div>}
+        </li>
+      })}
     </ul>}
     {contexts.length === 0 && <p className="report-interaction-note"><Info size={15} />先为报告添加数据集，再配置筛选器。</p>}
     {contexts.length > 0 && !formOpen && <button className="quiet-button report-filter-add" type="button" disabled={busy} onClick={() => setAdding(true)}>
@@ -160,10 +190,14 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
         </select>
       </label>
       <label>类型
-        <select value={effectiveType} onChange={event => setType(event.target.value as GlobalFilter['type'])}>
+        <select value={effectiveType} onChange={event => { setType(event.target.value as GlobalFilter['type']); setOptionsText('') }}>
           {editableFilterTypes.map(item => <option key={item} value={item}>{filterTypeLabels[item]}</option>)}
         </select>
       </label>
+      {needsOptions && <label>候选值（必填）
+        <input value={optionsText} onChange={event => setOptionsText(event.target.value)} placeholder="例如：是，否；支持逗号、分号或换行" />
+        <small>这里填写数据字段中的真实值；未配置时不能创建选择型筛选。</small>
+      </label>}
       <label>作用范围
         <select value={scopeMode} onChange={event => setScopeMode(event.target.value as 'REPORT' | 'BLOCK')}>
           <option value="REPORT">全报告（所有绑定该数据集的卡片）</option>

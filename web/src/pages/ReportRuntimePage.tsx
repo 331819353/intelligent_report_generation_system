@@ -14,6 +14,7 @@ import {
   reportRuntimeAPI, type ExportFormat, type LoadedReport, type ReportVersion,
   type ReportShareRecord, type RuntimeExecution, type RuntimePage,
 } from '../report/api/runtime'
+import { reportEditorAPI, type DataContextCandidate } from '../report/api/editor'
 import type { ReportAsset } from '../report/assets/model'
 import { ReportHeader } from '../report/render/ReportHeader'
 import { ReportPageView } from '../report/render/ReportPageView'
@@ -200,6 +201,7 @@ export function ReportRuntimePage() {
   const requestedVersionId = query.get('versionId') || ''
   const shareToken = query.get('share') || ''
   const [loaded, setLoaded] = useState<LoadedReport | null>(null)
+  const [dataContexts, setDataContexts] = useState<DataContextCandidate[]>([])
   const [manifests, setManifests] = useState<ManifestIndex>(emptyManifestIndex)
   const [assetMeta, setAssetMeta] = useState<ReportAsset | null>(null)
   const [execution, setExecution] = useState<RuntimeExecution | null>(null)
@@ -235,6 +237,14 @@ export function ReportRuntimePage() {
     void listComponentManifests()
       .then(result => { if (!cancelled) setManifests(indexManifests(result.items)) })
       .catch(() => { /* 清单不可用时组件按「未注册模板」显式失败，不做类型猜测。 */ })
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    void reportEditorAPI.listDataContexts()
+      .then(result => { if (!cancelled) setDataContexts(result.items) })
+      .catch(() => { /* 新定义已自带 label；目录读取失败时仅影响旧报告的显示名回退。 */ })
     return () => { cancelled = true }
   }, [])
 
@@ -287,7 +297,12 @@ export function ReportRuntimePage() {
   const ownerName = assetMeta?.ownerName || '报告 Owner'
   const asOf = execution?.asOf || ''
   const timezone = execution?.timezone || 'UTC'
-  const filters = loaded?.definition.globalFilters ?? []
+  const filters = useMemo(() => (loaded?.definition.globalFilters ?? []).map(filter => {
+    if (filter.label?.trim()) return filter
+    const context = dataContexts.find(item => item.dataContext.id === filter.fieldRef.dataContextId)
+    const name = context?.fieldDefinitions?.find(item => item.code === filter.fieldRef.field)?.name
+    return name ? { ...filter, label: name } : filter
+  }), [dataContexts, loaded])
   const sections = page ? orderedSections(page) : []
   const results = useMemo(
     () => new Map((execution?.components ?? []).map(item => [item.componentId, item])),

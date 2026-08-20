@@ -29,7 +29,7 @@ export function FilterControl({ filter, value, onChange }: {
   value: unknown
   onChange: (next: unknown) => void
 }) {
-  const label = filter.fieldRef.field
+  const label = filter.label?.trim() || filter.fieldRef.field
   const defaults = filter.defaultValue
 
   switch (filter.type) {
@@ -104,9 +104,8 @@ export function FilterControl({ filter, value, onChange }: {
       </label>
 
     case 'MULTI_SELECT': {
-      // 发布时固定的候选值来自默认值列表；没有候选值时退回为逗号分隔输入。
       const selected = Array.isArray(value) ? value as string[] : []
-      const options = defaults?.values ?? []
+      const options = filter.options ?? []
       if (options.length === 0) {
         return <label className="report-filter-control">
           <span>{label}</span>
@@ -134,7 +133,7 @@ export function FilterControl({ filter, value, onChange }: {
 
     case 'SINGLE_SELECT':
     case 'SELECT': {
-      const options = defaults?.values ?? []
+      const options = filter.options ?? []
       if (options.length === 0) break
       return <label className="report-filter-control">
         <span>{label}</span>
@@ -147,7 +146,7 @@ export function FilterControl({ filter, value, onChange }: {
     }
   }
 
-  // SEARCH_SELECT、PARAMETER_INPUT 以及没有候选值的单选：自由输入。
+  // SEARCH_SELECT、PARAMETER_INPUT 以及历史定义中没有候选值的单选：自由输入。
   // PARAMETER_INPUT 保留数字语义，其余按字符串提交。
   return <label className="report-filter-control">
     <span>{label}</span>

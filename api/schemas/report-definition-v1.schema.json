@@ -424,6 +424,20 @@
             "BOOLEAN"
           ]
         },
+        "label": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "options": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
         "fieldRef": {
           "$ref": "#/$defs/fieldRef"
         },

@@ -569,7 +569,7 @@ func defaultReportFilters(candidates []reportai.DataContextCandidate) []reportmo
 					filterType = reportmodel.FilterDateRange
 				}
 				filters = append(filters, reportmodel.GlobalFilter{
-					ID: askdata.ID(uuid.NewString()), Type: filterType,
+					ID: askdata.ID(uuid.NewString()), Type: filterType, Label: strings.TrimSpace(field.Name),
 					FieldRef: reportmodel.FieldReference{DataContextID: candidate.DataContext.ID, Field: field.Code},
 					Scope:    reportmodel.FilterScope{Type: reportmodel.FilterScopeReport, TargetIDs: []askdata.ID{}},
 				})

@@ -121,6 +121,9 @@ func resolveRuntimeFilterValues(
 		if err != nil {
 			return nil, fmt.Errorf("report runtime filter %q: %w", id, err)
 		}
+		if err := validateConfiguredFilterOptions(filter, value); err != nil {
+			return nil, fmt.Errorf("report runtime filter %q: %w", id, err)
+		}
 		if relative, ok := value.(RelativeFilterValue); ok {
 			start, end, err := relativeWindow(asOf.In(location), relative.Unit, relative.Offset)
 			if err != nil {
@@ -133,6 +136,33 @@ func resolveRuntimeFilterValues(
 		values[id] = value
 	}
 	return values, nil
+}
+
+func validateConfiguredFilterOptions(filter report.GlobalFilter, value any) error {
+	if len(filter.Options) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(filter.Options))
+	for _, option := range filter.Options {
+		allowed[option] = struct{}{}
+	}
+	check := func(candidate string) error {
+		if _, exists := allowed[candidate]; !exists {
+			return fmt.Errorf("value is not one of the configured options")
+		}
+		return nil
+	}
+	switch typed := value.(type) {
+	case string:
+		return check(typed)
+	case []string:
+		for _, candidate := range typed {
+			if err := check(candidate); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func definitionHasPage(definition report.ReportDefinition, pageID askdata.ID) bool {

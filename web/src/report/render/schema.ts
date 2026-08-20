@@ -146,6 +146,10 @@ export type GlobalFilter = {
   type:
     | 'SINGLE_SELECT' | 'MULTI_SELECT' | 'DATE' | 'DATE_RANGE' | 'RELATIVE_TIME'
     | 'NUMBER_RANGE' | 'SEARCH_SELECT' | 'PARAMETER_INPUT' | 'SELECT' | 'BOOLEAN'
+  /** 由受治理元数据目录（含 LLM 语义命名）提供的用户可见名称。 */
+  label?: string
+  /** 选择型筛选器的候选值；与默认值分离，空筛选仍表示“全部”。 */
+  options?: string[]
   fieldRef: { dataContextId: string; field: string }
   scope: { type: 'REPORT' | 'PAGE' | 'SECTION' | 'BLOCK' | 'COMPONENT'; targetIds: string[] }
   defaultValue?: {

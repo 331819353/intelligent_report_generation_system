@@ -29,26 +29,26 @@ export function ReportHeaderChooser({ value, onChange, compact = false }: {
 
 const previewFilters: GlobalFilter[] = [
   { id: 'preview-period', type: 'DATE_RANGE', fieldRef: { dataContextId: 'preview', field: '报告周期' }, scope: { type: 'REPORT', targetIds: [] } },
-  { id: 'preview-region', type: 'SINGLE_SELECT', fieldRef: { dataContextId: 'preview', field: '区域范围' }, scope: { type: 'REPORT', targetIds: [] }, defaultValue: { values: ['全国', '华东', '华南'] } },
-  { id: 'preview-product', type: 'SINGLE_SELECT', fieldRef: { dataContextId: 'preview', field: '产品线' }, scope: { type: 'REPORT', targetIds: [] }, defaultValue: { values: ['全产品线', '智慧家居', '影音产品'] } },
-  { id: 'preview-channel', type: 'SINGLE_SELECT', fieldRef: { dataContextId: 'preview', field: '销售渠道' }, scope: { type: 'REPORT', targetIds: [] }, defaultValue: { values: ['全渠道', '线上', '线下'] } },
+  { id: 'preview-region', type: 'SINGLE_SELECT', options: ['全国', '华东', '华南'], fieldRef: { dataContextId: 'preview', field: '区域范围' }, scope: { type: 'REPORT', targetIds: [] }, defaultValue: { values: ['全国'] } },
+  { id: 'preview-product', type: 'SINGLE_SELECT', options: ['全产品线', '智慧家居', '影音产品'], fieldRef: { dataContextId: 'preview', field: '产品线' }, scope: { type: 'REPORT', targetIds: [] }, defaultValue: { values: ['全产品线'] } },
+  { id: 'preview-channel', type: 'SINGLE_SELECT', options: ['全渠道', '线上', '线下'], fieldRef: { dataContextId: 'preview', field: '销售渠道' }, scope: { type: 'REPORT', targetIds: [] }, defaultValue: { values: ['全渠道'] } },
 ]
 
 const previewAdvancedFilters: GlobalFilter[] = [
-  { id: 'preview-business', type: 'SINGLE_SELECT', fieldRef: { dataContextId: 'preview', field: '业务类型' }, scope: { type: 'REPORT', targetIds: [] }, defaultValue: { values: ['视听产业', '智慧家居'] } },
-  { id: 'preview-customer', type: 'SINGLE_SELECT', fieldRef: { dataContextId: 'preview', field: '客户类型' }, scope: { type: 'REPORT', targetIds: [] }, defaultValue: { values: ['企业客户', '个人客户'] } },
-  { id: 'preview-level', type: 'SINGLE_SELECT', fieldRef: { dataContextId: 'preview', field: '区域层级' }, scope: { type: 'REPORT', targetIds: [] }, defaultValue: { values: ['省级', '地市级'] } },
-  { id: 'preview-caliber', type: 'SINGLE_SELECT', fieldRef: { dataContextId: 'preview', field: '数据口径' }, scope: { type: 'REPORT', targetIds: [] }, defaultValue: { values: ['含税收入', '不含税收入'] } },
+  { id: 'preview-business', type: 'SINGLE_SELECT', options: ['视听产业', '智慧家居'], fieldRef: { dataContextId: 'preview', field: '业务类型' }, scope: { type: 'REPORT', targetIds: [] }, defaultValue: { values: ['视听产业'] } },
+  { id: 'preview-customer', type: 'SINGLE_SELECT', options: ['企业客户', '个人客户'], fieldRef: { dataContextId: 'preview', field: '客户类型' }, scope: { type: 'REPORT', targetIds: [] }, defaultValue: { values: ['企业客户'] } },
+  { id: 'preview-level', type: 'SINGLE_SELECT', options: ['省级', '地市级'], fieldRef: { dataContextId: 'preview', field: '区域层级' }, scope: { type: 'REPORT', targetIds: [] }, defaultValue: { values: ['省级'] } },
+  { id: 'preview-caliber', type: 'SINGLE_SELECT', options: ['含税收入', '不含税收入'], fieldRef: { dataContextId: 'preview', field: '数据口径' }, scope: { type: 'REPORT', targetIds: [] }, defaultValue: { values: ['含税收入'] } },
 ]
 
-function filterValueText(filter: GlobalFilter, value: unknown, index: number) {
+function filterValueText(filter: GlobalFilter, value: unknown) {
   if (typeof value === 'string' && value) return value
   if (Array.isArray(value) && value.length) return value.join('、')
   if (value && typeof value === 'object') {
     const item = value as Record<string, unknown>
     if (item.start || item.endExclusive) return [item.start, item.endExclusive].filter(Boolean).join(' 至 ')
   }
-  return filter.defaultValue?.values?.[0] || ['2026年上半年', '全国', '全产品线', '全渠道'][index] || '全部'
+  return filter.defaultValue?.values?.[0] || '全部'
 }
 
 export function ReportHeader({
@@ -78,8 +78,8 @@ export function ReportHeader({
   const hasAdvancedFilters = advancedFilters.length > 0
   const advanced = hasAdvancedFilters && (advancedByStyle[style] ?? style === '03')
   const allVisibleFilters = [...primaryFilters, ...advancedFilters]
-  const chips = allVisibleFilters.map((filter, index) => ({
-    id: filter.id, label: filter.fieldRef.field, value: filterValueText(filter, values[filter.id], index),
+  const chips = allVisibleFilters.map(filter => ({
+    id: filter.id, label: filter.label?.trim() || filter.fieldRef.field, value: filterValueText(filter, values[filter.id]),
   }))
   const change = (filterId: string, value: unknown) => onChange?.(filterId, value)
   const apply = () => {

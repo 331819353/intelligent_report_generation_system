@@ -154,8 +154,14 @@ type QueryPolicy struct {
 }
 
 type GlobalFilter struct {
-	ID           askdata.ID          `json:"id"`
-	Type         FilterType          `json:"type"`
+	ID   askdata.ID `json:"id"`
+	Type FilterType `json:"type"`
+	// Label is the governed, user-facing field name captured from the dataset
+	// catalog. FieldRef.Field remains the stable logical code used by queries.
+	Label string `json:"label,omitempty"`
+	// Options is the allowed choice list for select controls. It is separate
+	// from DefaultValue so defining choices never silently selects the first one.
+	Options      []string            `json:"options,omitempty"`
 	FieldRef     FieldReference      `json:"fieldRef"`
 	Scope        FilterScope         `json:"scope"`
 	DefaultValue *FilterDefaultValue `json:"defaultValue,omitempty"`
@@ -1228,6 +1234,32 @@ func (filter GlobalFilter) validate(contextIDs, pageIDs, sectionIDs, blockIDs, c
 		FilterSelect, FilterBoolean:
 	default:
 		return errors.New("type is invalid")
+	}
+	if len(filter.Label) > MaxStringLength {
+		return fmt.Errorf("label exceeds %d characters", MaxStringLength)
+	}
+	if len(filter.Options) > 100 {
+		return errors.New("options exceeds 100 items")
+	}
+	if len(filter.Options) > 0 {
+		switch filter.Type {
+		case FilterSingleSelect, FilterMultiSelect, FilterSearchSelect, FilterSelect:
+		default:
+			return errors.New("options is only valid for select filters")
+		}
+		seenOptions := make(map[string]struct{}, len(filter.Options))
+		for _, option := range filter.Options {
+			if strings.TrimSpace(option) == "" {
+				return errors.New("options must contain non-empty strings")
+			}
+			if len(option) > MaxStringLength {
+				return fmt.Errorf("option exceeds %d characters", MaxStringLength)
+			}
+			if _, exists := seenOptions[option]; exists {
+				return errors.New("options must be unique")
+			}
+			seenOptions[option] = struct{}{}
+		}
 	}
 	if _, exists := contextIDs[filter.FieldRef.DataContextID]; !exists {
 		return errors.New("fieldRef.dataContextId does not reference a data context")

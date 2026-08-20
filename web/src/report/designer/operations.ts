@@ -682,8 +682,17 @@ export type FilterDraft = {
   dataContextId: string
   field: string
   type: GlobalFilter['type']
+  /** 数据目录中的中文业务名；技术字段码仍保存在 fieldRef。 */
+  label?: string
+  /** 单选/多选的真实候选值，与默认选中值互不影响。 */
+  options?: string[]
   /** 全报告生效，或只作用于选中的卡片。 */
   scope: { type: 'REPORT' } | { type: 'BLOCK'; targetIds: string[] }
+}
+
+/** 候选值允许按逗号、中文逗号、分号或换行录入，并在进入定义前去重。 */
+export function parseFilterOptions(raw: string): string[] {
+  return [...new Set(raw.split(/[\n,，;；]+/).map(item => item.trim()).filter(Boolean))]
 }
 
 /** 按字段的语义类型建议筛选器类型：时间字段用日期区间，度量用数值区间，其余多选。 */
@@ -696,12 +705,14 @@ export function suggestedFilterType(field: DataContextField | undefined): Global
 }
 
 /**
- * 筛选器写入走 FILTER_CREATE / FILTER_UPDATE / FILTER_DELETE。筛选器的取值在运行页
- * 顶部的筛选栏由使用者填写并由服务端解析生效；这里只声明字段、类型与作用范围。
+ * 筛选器写入走 FILTER_CREATE / FILTER_UPDATE / FILTER_DELETE。候选值属于筛选器定义，
+ * 使用者在运行页选择的当前值属于运行态；两者不会再与 defaultValue 混用。
  */
 export function createFilterOperations(definition: ReportDefinition, draft: FilterDraft, newId: () => string): EditorOperation[] {
   const filter: GlobalFilter = {
     id: newId(), type: draft.type,
+    ...(draft.label?.trim() ? { label: draft.label.trim() } : {}),
+    ...(draft.options?.length ? { options: draft.options } : {}),
     fieldRef: { dataContextId: draft.dataContextId, field: draft.field },
     scope: draft.scope.type === 'REPORT' ? { type: 'REPORT', targetIds: [] } : { type: 'BLOCK', targetIds: draft.scope.targetIds },
   }
@@ -711,6 +722,8 @@ export function createFilterOperations(definition: ReportDefinition, draft: Filt
 export function updateFilterOperations(filter: GlobalFilter, draft: FilterDraft): EditorOperation[] {
   const next: GlobalFilter = {
     ...filter, type: draft.type,
+    ...(draft.label === undefined ? {} : draft.label.trim() ? { label: draft.label.trim() } : { label: undefined }),
+    ...(draft.options === undefined ? {} : draft.options.length ? { options: draft.options } : { options: undefined }),
     fieldRef: { dataContextId: draft.dataContextId, field: draft.field },
     scope: draft.scope.type === 'REPORT' ? { type: 'REPORT', targetIds: [] } : { type: 'BLOCK', targetIds: draft.scope.targetIds },
   }

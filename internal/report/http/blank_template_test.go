@@ -53,6 +53,9 @@ func TestApplyCreationPresentationPersistsHeaderAndCreatesGovernedFilters(t *tes
 	if definition.GlobalFilters[0].Type != reportmodel.FilterDateRange || definition.GlobalFilters[0].FieldRef.Field != "month" {
 		t.Fatalf("first filter should be governed time range: %#v", definition.GlobalFilters[0])
 	}
+	if definition.GlobalFilters[0].Label != "月份" || definition.GlobalFilters[1].Label != "区域" || definition.GlobalFilters[2].Label != "产品" {
+		t.Fatalf("filters must persist governed LLM-enriched field names: %#v", definition.GlobalFilters)
+	}
 	for _, filter := range definition.GlobalFilters {
 		if filter.FieldRef.Field == "revenue" {
 			t.Fatalf("measure field must not become a default filter: %#v", filter)

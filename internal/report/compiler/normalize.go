@@ -112,6 +112,10 @@ func normalizeStringsAndEnums(definition *report.ReportDefinition) {
 		if filter.Type == report.FilterSelect {
 			filter.Type = report.FilterSingleSelect
 		}
+		filter.Label = strings.TrimSpace(filter.Label)
+		for optionIndex := range filter.Options {
+			filter.Options[optionIndex] = strings.TrimSpace(filter.Options[optionIndex])
+		}
 		filter.FieldRef.Field = strings.TrimSpace(filter.FieldRef.Field)
 		filter.Scope.Type = report.FilterScopeType(strings.ToUpper(strings.TrimSpace(string(filter.Scope.Type))))
 	}
