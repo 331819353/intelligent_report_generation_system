@@ -104,7 +104,7 @@ const tooltipStyle = {
   textStyle: { color: '#344054', fontSize: 11 },
 }
 
-type SeriesShape = 'bar' | 'line' | 'area' | 'pie' | 'scatter' | 'funnel'
+type SeriesShape = 'bar' | 'line' | 'area' | 'pie' | 'scatter' | 'funnel' | 'waterfall'
 
 /**
  * 组件类型 → 图形。清单里没有「图形」字段，因此这里保留一张显式的映射表：
@@ -114,6 +114,7 @@ type SeriesShape = 'bar' | 'line' | 'area' | 'pie' | 'scatter' | 'funnel'
 const shapes: Record<string, SeriesShape> = {
   'bar-comparison': 'bar',
   'bar-horizontal': 'bar',
+  'waterfall-chart': 'waterfall',
   'line-trend': 'line',
   'area-stacked': 'area',
   'pie-donut': 'pie',
@@ -217,6 +218,61 @@ export function buildChartOption(input: ChartInput): Record<string, unknown> {
         type: 'scatter', symbolSize: 9,
         data: rows.map(row => [numeric(row[xIndex], nullPolicy) ?? 0, numeric(row[yIndex], nullPolicy) ?? 0]),
       }],
+    }
+  }
+
+  if (shape === 'waterfall') {
+    const valueIndex = columns.valueIndexes[0] ?? 0
+    const values = rows.map(row => numeric(row[valueIndex], nullPolicy) ?? 0)
+    const helper: Array<number | string> = []
+    const totals: Array<number | string> = []
+    const gains: Array<number | string> = []
+    const losses: Array<number | string> = []
+    let running = values[0] ?? 0
+
+    values.forEach((value, index) => {
+      const endpoint = index === 0 || index === values.length - 1
+      if (endpoint) {
+        helper.push(0); totals.push(value); gains.push('-'); losses.push('-')
+        if (index === 0) running = value
+        return
+      }
+      const next = running + value
+      helper.push(Math.min(running, next)); totals.push('-')
+      gains.push(value >= 0 ? value : '-'); losses.push(value < 0 ? Math.abs(value) : '-')
+      running = next
+    })
+
+    const waterfallLabel = (prefix = '') => ({
+      show: options.showLabel !== false,
+      position: 'top',
+      color: '#52647a',
+      fontSize: 10,
+      fontWeight: 650,
+      formatter: ({ value }: { value: unknown }) => `${prefix}${formatNumber(value, options.numberFormat)}`,
+    })
+    const categoryAxis = {
+      type: 'category', data: categories,
+      axisTick: { show: false }, axisLine: { lineStyle: { color: '#dce6f0' } },
+      axisLabel: { ...axisText, hideOverlap: true, interval: mobile ? 'auto' : 0 },
+    }
+    const valueAxis = {
+      type: 'value', axisTick: { show: false }, axisLine: { show: false },
+      splitLine: { lineStyle: { color: '#edf2f7', type: 'dashed' } },
+      axisLabel: { ...axisText, formatter: (value: number) => formatNumber(value, options.numberFormat) },
+    }
+    return {
+      ...base,
+      legend: { show: false },
+      grid: { left: 58, right: 24, top: 28, bottom: mobile ? 48 : 42 },
+      xAxis: categoryAxis,
+      yAxis: valueAxis,
+      series: [
+        { name: '辅助', type: 'bar', stack: 'waterfall', silent: true, itemStyle: { color: 'transparent' }, emphasis: { itemStyle: { color: 'transparent' } }, data: helper },
+        { name: '结果', type: 'bar', stack: 'waterfall', barMaxWidth: 38, label: waterfallLabel(), itemStyle: { color: '#1769d2', borderRadius: [5, 5, 1, 1] }, data: totals },
+        { name: '正向影响', type: 'bar', stack: 'waterfall', barMaxWidth: 38, label: waterfallLabel('+'), itemStyle: { color: '#16a37a', borderRadius: [5, 5, 1, 1] }, data: gains },
+        { name: '负向影响', type: 'bar', stack: 'waterfall', barMaxWidth: 38, label: waterfallLabel('-'), itemStyle: { color: '#e35d67', borderRadius: [5, 5, 1, 1] }, data: losses },
+      ],
     }
   }
 

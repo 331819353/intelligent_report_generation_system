@@ -95,6 +95,28 @@ test('pie components read the measure through the same binding roles', () => {
   ])
 })
 
+test('waterfall charts keep endpoints as totals and split positive and negative impacts', () => {
+  const waterfallResult = {
+    columns: ['impact', 'amount'],
+    rows: [['目标利润', 17], ['收入影响', -6], ['毛利影响', 12], ['费用影响', -23], ['实际利润', 0]] as unknown[][],
+  }
+  const waterfallBinding: DataBinding = {
+    bindingMode: 'DATASET_FIELD', dataContextId: 'ctx',
+    dimensions: [{ role: 'CATEGORY', field: 'impact' }],
+    measures: [{ role: 'VALUE', field: 'amount' }],
+  }
+  const option = buildChartOption({
+    type: 'waterfall-chart', options: { showLabel: true }, binding: waterfallBinding, result: waterfallResult,
+  }) as { xAxis: { data: string[] }; legend: { show: boolean }; series: Array<{ name: string; stack: string; data: unknown[] }> }
+
+  assert.equal(option.legend.show, false)
+  assert.deepEqual(option.xAxis.data, ['目标利润', '收入影响', '毛利影响', '费用影响', '实际利润'])
+  assert.deepEqual(option.series.find(item => item.name === '结果')?.data, [17, '-', '-', '-', 0])
+  assert.deepEqual(option.series.find(item => item.name === '正向影响')?.data, ['-', '-', 12, '-', '-'])
+  assert.deepEqual(option.series.find(item => item.name === '负向影响')?.data, ['-', 6, '-', 23, '-'])
+  assert.ok(option.series.every(item => item.stack === 'waterfall'))
+})
+
 test('metric cards read the first bound measure, not the first column', () => {
   assert.deepEqual(singleMetric(result, binding), { label: 'revenue', value: 120 })
 })

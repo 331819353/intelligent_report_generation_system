@@ -1,0 +1,30 @@
+{
+  "type": "hierarchy-table",
+  "version": "1.0.0",
+  "renderer": "REACT",
+  "displayName": "层级分析表",
+  "category": "TABLE",
+  "minSize": { "w": 6, "h": 4 },
+  "recommendedSize": { "w": 12, "h": 6 },
+  "dataContract": {
+    "dimensions": { "min": 2, "max": 2 },
+    "measures": { "min": 1, "max": 12 },
+    "timeField": { "required": false },
+    "roles": ["LABEL", "DETAIL", "VALUE", "TOOLTIP"]
+  },
+  "stackingRequiresAdditive": false,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [],
+    "properties": {
+      "title": { "type": "string" },
+      "subtitle": { "type": "string" },
+      "numberFormat": { "type": "string" },
+      "tablePageSize": { "type": "integer", "minimum": 1, "maximum": 200 }
+    }
+  },
+  "defaultOptions": { "tablePageSize": 30 },
+  "mobilePolicy": { "supported": true, "defaultLegendMode": "HIDDEN", "labelDegradation": "ELLIPSIS" },
+  "supportedInteractions": ["SORT", "PAGINATE"]
+}

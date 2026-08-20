@@ -5,10 +5,10 @@
   "displayName": "指标卡",
   "category": "CHART",
   "minSize": { "w": 2, "h": 2 },
-  "recommendedSize": { "w": 6, "h": 3 },
+  "recommendedSize": { "w": 12, "h": 3 },
   "dataContract": {
     "dimensions": { "min": 0, "max": 1 },
-    "measures": { "min": 1, "max": 9 },
+    "measures": { "min": 1, "max": 15 },
     "timeField": { "required": false },
     "roles": ["VALUE", "LABEL", "COLOR", "TOOLTIP"]
   },

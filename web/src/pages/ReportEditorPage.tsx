@@ -151,7 +151,10 @@ function NewReportCanvas({ name, description, reportType }: { name: string; desc
     <main className="report-editor-canvas report-editor-new-canvas">
       <article className="report-editor-paper report-editor-blank-paper" aria-label="空白报告画布">
         <header className="report-editor-document-header">
-          <div><h2>{name.trim() || '外卖销售经营分析'}</h2></div>
+          <div className="report-editor-document-title">
+            <span className="report-editor-document-eyebrow">INTELLIGENT BUSINESS REPORT</span>
+            <div><h2>{name.trim() || '外卖销售经营分析'}</h2></div>
+          </div>
           <div className="report-editor-document-meta"><span>报告类型：{reportTypeLabels[reportType].name}</span><span>当前修订：r0</span><span>展示模板预览</span></div>
           <p className="report-editor-description">{description.trim() || '多维度洞察业务经营情况，驱动增长决策'}</p>
         </header>
@@ -1414,7 +1417,10 @@ export function ReportEditorPage() {
             onDrop={dropFromPalette}>
             <article className="report-editor-paper report-editor-live-paper" onClick={event => { if (editorView !== 'edit' || (event.target as HTMLElement).closest('.report-render-block')) return; setSelectedComponentId('') }}>
               <header className="report-editor-document-header">
-                <div><h2>{draft.definition.metadata.name}</h2>{editorView === 'edit' && <span className="report-editor-fixed-label"><LockSimple size={12} />固定报告头</span>}</div>
+                <div className="report-editor-document-title">
+                  <span className="report-editor-document-eyebrow">INTELLIGENT BUSINESS REPORT</span>
+                  <div><h2>{draft.definition.metadata.name}</h2>{editorView === 'edit' && <span className="report-editor-fixed-label"><LockSimple size={12} />报告头</span>}</div>
+                </div>
                 <div className="report-editor-document-meta">
                   <span>报告类型：{reportTypeLabels[draft.definition.metadata.reportType]?.name ?? draft.definition.metadata.reportType}</span>
                   <span>当前修订：r{draft.revisionNo}</span>

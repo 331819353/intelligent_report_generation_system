@@ -367,12 +367,15 @@ function DesktopPage(props: ReportPageViewProps) {
   const components = contentComponentMap(definition, manifests)
   const sections = contentSections(page, components)
   return <div className={`report-render-page ${editing ? 'is-editing' : ''} ${props.templatePreview ? 'is-template-preview' : ''}`.trim()}>
-    {sections.map(section => {
+    {sections.map((section, sectionIndex) => {
       const titleOwnedByBlock = section.blocks.length === 1 && section.blocks[0]?.title === section.name
       const displayTemplate = isDisplayTemplateSection(section)
       return <section className="report-render-section"
         id={`report-section-${section.id}`} data-section-id={section.id} key={section.id}>
-        {!titleOwnedByBlock && !displayTemplate && <header className="report-render-section-head"><h2>{section.name}</h2>{section.question && <p>{section.question}</p>}</header>}
+        {!titleOwnedByBlock && !displayTemplate && <header className="report-render-section-head">
+          <div><span className="report-render-section-index">{String(sectionIndex + 1).padStart(2, '0')}</span><h2>{section.name}</h2></div>
+          {section.question && <p>{section.question}</p>}
+        </header>}
         <SectionGrid section={section} canvas={canvas} editing={editing} manifests={manifests} components={components}
           selectedComponentId={props.selectedComponentId} onSelectComponent={props.onSelectComponent}
           content={block => <BlockZones {...props} block={block} components={components} manifests={manifests} />} />
@@ -392,7 +395,7 @@ function RuntimeAutoPage(props: ReportPageViewProps & { mobile?: boolean }) {
   const sections = contentSections(page, components)
 
   return <div className={`report-render-page is-auto ${mobile ? 'is-mobile' : ''}`.trim()}>
-    {sections.map(section => {
+    {sections.map((section, sectionIndex) => {
       const elements = section.blocks.flatMap(block => block.zones.flatMap(zone => zone.slots.flatMap(slot => {
         const component = slot.componentId ? components.get(slot.componentId) : undefined
         return component ? [{ block, zone, component }] : []
@@ -401,7 +404,10 @@ function RuntimeAutoPage(props: ReportPageViewProps & { mobile?: boolean }) {
       const displayTemplate = isDisplayTemplateSection(section)
       return <section className="report-render-section report-runtime-auto-section"
         id={`report-section-${section.id}`} data-section-id={section.id} key={section.id}>
-        {!displayTemplate && <header className="report-render-section-head"><div><span /> <h2>{section.name}</h2></div>{section.question && <p>{section.question}</p>}</header>}
+        {!displayTemplate && <header className="report-render-section-head"><div>
+          <span className="report-render-section-index">{String(sectionIndex + 1).padStart(2, '0')}</span>
+          <h2>{section.name}</h2>
+        </div>{section.question && <p>{section.question}</p>}</header>}
         <div className="report-runtime-auto-grid">
           {elements.map(({ block, zone, component }) => {
             const manifest = manifests.get(component.templateRef.type, component.templateRef.version)
@@ -410,9 +416,13 @@ function RuntimeAutoPage(props: ReportPageViewProps & { mobile?: boolean }) {
                 : component.templateRef.type === 'metric-card' ? 'metric'
                   : manifest?.renderer === 'TEXT' || zone.type === 'INSIGHT' ? 'narrative'
                     : manifest?.renderer === 'IMAGE' ? 'image' : 'visual'
+            const metricCount = component.templateRef.type === 'metric-card'
+              ? component.dataBinding?.measures?.filter(binding => binding.role === 'VALUE').length ?? 0
+              : undefined
             const role = interaction?.roleFor(component.id)
             return <ReportBlockBoundary key={`${block.id}:${component.id}`}>
-              <div className={`report-runtime-element is-${kind}`} data-block-id={block.id} data-component-id={component.id}>
+              <div className={`report-runtime-element is-${kind}`} data-block-id={block.id} data-component-id={component.id}
+                data-metric-count={metricCount || undefined}>
                 <ReportComponentBoundary fallback={<ComponentStateView state="ERROR" onAction={() => onRetryBlock?.(block.id)} />}>
                   <ComponentView component={component} manifests={manifests} mobile={mobile} designMode={designMode}
                     item={results?.get(component.id)} onRetry={() => onRetryBlock?.(block.id)}

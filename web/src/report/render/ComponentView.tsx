@@ -3,7 +3,7 @@ import { BarChart, FunnelChart, LineChart, PieChart, ScatterChart } from 'echart
 import { AriaComponent, GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import { init, use as registerEChartsComponents } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
-import { CaretLeft, CaretRight, Image as ImageIcon, Info } from '@phosphor-icons/react'
+import { CaretDown, CaretLeft, CaretRight, Image as ImageIcon, Info } from '@phosphor-icons/react'
 import { ComponentStateView } from '../runtime/ComponentStateView.tsx'
 import { componentPresentation, type ReportComponentState } from '../runtime/state.ts'
 import { buildChartOption, formatNumber, resolveColumns, singleMetric, type QueryResult } from './chart-option.ts'
@@ -48,30 +48,71 @@ function EChartsView({ option, label, onPick }: {
     role="img" aria-label={label} />
 }
 
+function visibleHierarchyRows(rows: unknown[][], hierarchyIndex: number, collapsedRows: Set<number>) {
+  let hiddenBelowLevel: number | undefined
+  const visible: Array<{ row: unknown[]; originalIndex: number; level: number }> = []
+  for (const [originalIndex, row] of rows.entries()) {
+    const level = hierarchyIndex >= 0 ? Math.max(0, Number(row[hierarchyIndex]) || 0) : 0
+    if (hiddenBelowLevel !== undefined && level > hiddenBelowLevel) continue
+    if (hiddenBelowLevel !== undefined && level <= hiddenBelowLevel) hiddenBelowLevel = undefined
+    visible.push({ row, originalIndex, level })
+    if (collapsedRows.has(originalIndex)) hiddenBelowLevel = level
+  }
+  return visible
+}
+
 function TableView({ component, result }: { component: ReportComponent; result: QueryResult }) {
   const pageSize = Math.max(1, component.options.tablePageSize ?? 20)
   const [page, setPage] = useState(0)
-  const pageCount = Math.max(1, Math.ceil(result.rows.length / pageSize))
+  const [collapsedRows, setCollapsedRows] = useState<Set<number>>(() => new Set())
+  const byName = new Map(result.columns.map((column, index) => [column, index]))
+  const hierarchyField = component.templateRef.type === 'hierarchy-table'
+    ? component.dataBinding?.dimensions?.find(binding => binding.role === 'DETAIL')?.field
+    : undefined
+  const labelField = component.dataBinding?.dimensions?.find(binding => binding.role === 'LABEL')?.field
+  const hierarchyIndex = hierarchyField ? byName.get(hierarchyField) ?? -1 : -1
+  const labelIndex = labelField ? byName.get(labelField) ?? 0 : 0
+  const displayColumnIndexes = result.columns.map((_, index) => index).filter(index => index !== hierarchyIndex)
+  const visibleRows = visibleHierarchyRows(result.rows, hierarchyIndex, collapsedRows)
+  const pageCount = Math.max(1, Math.ceil(visibleRows.length / pageSize))
   const current = Math.min(page, pageCount - 1)
-  const rows = result.rows.slice(current * pageSize, current * pageSize + pageSize)
+  const rows = visibleRows.slice(current * pageSize, current * pageSize + pageSize)
   const numericColumn = result.columns.map((_, index) =>
     result.rows.some(row => Number.isFinite(Number(row[index]))))
   return <div className="report-render-table">
     <div className="report-render-table-scroll">
       <table>
-        <thead><tr>{result.columns.map(column => <th key={column}>{column}</th>)}</tr></thead>
-        <tbody>{rows.map((row, rowIndex) => <tr key={current * pageSize + rowIndex}>
-          {result.columns.map((column, columnIndex) => <td className={numericColumn[columnIndex] ? 'is-numeric' : ''} key={column}>
-            {numericColumn[columnIndex]
-              ? formatNumber(row[columnIndex], component.options.numberFormat)
-              : String(row[columnIndex] ?? '—')}
+        <thead><tr>{displayColumnIndexes.map(index => <th key={result.columns[index]}>{result.columns[index]}</th>)}</tr></thead>
+        <tbody>{rows.map(item => {
+          const next = result.rows[item.originalIndex + 1]
+          const nextLevel = hierarchyIndex >= 0 && next ? Math.max(0, Number(next[hierarchyIndex]) || 0) : 0
+          const expandable = hierarchyIndex >= 0 && nextLevel > item.level
+          const collapsed = collapsedRows.has(item.originalIndex)
+          return <tr key={item.originalIndex} data-hierarchy-level={hierarchyIndex >= 0 ? item.level : undefined}>
+          {displayColumnIndexes.map(columnIndex => <td className={numericColumn[columnIndex] ? 'is-numeric' : ''} key={result.columns[columnIndex]}>
+            {columnIndex === labelIndex && hierarchyIndex >= 0
+              ? <span className="report-hierarchy-cell" style={{ paddingLeft: `${item.level * 18}px` }}>
+                {expandable
+                  ? <button type="button" className={collapsed ? '' : 'is-expanded'} aria-label={collapsed ? '展开下级' : '收起下级'}
+                    onClick={() => setCollapsedRows(currentRows => {
+                      const nextRows = new Set(currentRows)
+                      if (nextRows.has(item.originalIndex)) nextRows.delete(item.originalIndex)
+                      else nextRows.add(item.originalIndex)
+                      return nextRows
+                    })}>{collapsed ? <CaretRight size={12} /> : <CaretDown size={12} />}</button>
+                  : <i />}
+                <span>{String(item.row[columnIndex] ?? '—')}</span>
+              </span>
+              : numericColumn[columnIndex]
+                ? formatNumber(item.row[columnIndex], component.options.numberFormat)
+                : String(item.row[columnIndex] ?? '—')}
           </td>)}
-        </tr>)}</tbody>
+        </tr>})}</tbody>
       </table>
     </div>
     {pageCount > 1 && <nav className="report-render-table-pager" aria-label="表格分页">
       <button type="button" aria-label="上一页" disabled={current === 0} onClick={() => setPage(current - 1)}><CaretLeft size={13} /></button>
-      <span>{current + 1} / {pageCount}<small>共 {result.rows.length} 行</small></span>
+      <span>{current + 1} / {pageCount}<small>共 {visibleRows.length} 行</small></span>
       <button type="button" aria-label="下一页" disabled={current >= pageCount - 1} onClick={() => setPage(current + 1)}><CaretRight size={13} /></button>
     </nav>}
   </div>
@@ -243,6 +284,8 @@ export function ComponentView({
     manifest?.renderer !== 'TEXT' && manifest?.renderer !== 'IMAGE' && manifest?.renderer !== 'CONTROL'
 
   const classes = ['report-render-component']
+  if (manifest) classes.push(`is-category-${manifest.category.toLocaleLowerCase()}`)
+  classes.push(`is-type-${component.templateRef.type}`)
   if (selected) classes.push('is-selected-source')
   if (dimmed) classes.push('is-dimmed')
   return <article className={classes.join(' ')} data-component-id={component.id}>

@@ -1,0 +1,33 @@
+{
+  "type": "waterfall-chart",
+  "version": "1.0.0",
+  "renderer": "ECHARTS",
+  "displayName": "经营瀑布图",
+  "category": "CHART",
+  "minSize": { "w": 6, "h": 4 },
+  "recommendedSize": { "w": 12, "h": 5 },
+  "dataContract": {
+    "dimensions": { "min": 1, "max": 1 },
+    "measures": { "min": 1, "max": 1 },
+    "timeField": { "required": false },
+    "roles": ["CATEGORY", "LABEL", "VALUE", "TOOLTIP"]
+  },
+  "stackingRequiresAdditive": true,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [],
+    "properties": {
+      "title": { "type": "string" },
+      "subtitle": { "type": "string" },
+      "showLabel": { "type": "boolean" },
+      "numberFormat": { "type": "string" },
+      "colorPaletteRef": { "type": "string" },
+      "nullPolicy": { "type": "string", "enum": ["ZERO", "HIDE"] },
+      "animation": { "type": "boolean" }
+    }
+  },
+  "defaultOptions": { "showLabel": true, "nullPolicy": "ZERO", "animation": true },
+  "mobilePolicy": { "supported": true, "defaultLegendMode": "HIDDEN", "labelDegradation": "HIDE_WHEN_DENSE" },
+  "supportedInteractions": ["CLICK_FILTER", "DRILL_DOWN", "ZOOM"]
+}

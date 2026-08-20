@@ -10,10 +10,10 @@ const categoryLabels: Record<ComponentManifest['category'], string> = {
 function paletteIcon(manifest: ComponentManifest) {
   const type = manifest.type
   if (type.startsWith('line') || type.startsWith('area')) return <ChartLine size={18} weight="duotone" />
-  if (type.startsWith('bar')) return <ChartBar size={18} weight="duotone" />
+  if (type.startsWith('bar') || type === 'waterfall-chart') return <ChartBar size={18} weight="duotone" />
   if (type.startsWith('pie') || type.startsWith('funnel')) return <ChartPieSlice size={18} weight="duotone" />
   if (type === 'metric-card') return <Gauge size={18} weight="duotone" />
-  if (type === 'data-table') return <Table size={18} weight="duotone" />
+  if (type === 'data-table' || type === 'hierarchy-table') return <Table size={18} weight="duotone" />
   if (type === 'insight-text') return <Sparkle size={18} weight="duotone" />
   if (type === 'rich-text') return <TextT size={18} weight="duotone" />
   if (type === 'image') return <ImageIcon size={18} weight="duotone" />
@@ -38,7 +38,7 @@ export function ComponentPalette({ manifests, disabled, onPick }: {
       categoryLabels[manifest.category].includes(normalized)))
   }, [category, designable, query])
   const unique = (items: ComponentManifest[]) => Array.from(new Map(items.map(item => [manifestRef(item), item])).values())
-  const favoriteTypes = ['line-trend', 'bar-comparison', 'data-table', 'insight-text', 'image']
+  const favoriteTypes = ['metric-card', 'waterfall-chart', 'hierarchy-table', 'line-trend', 'data-table', 'insight-text']
   const favorites = unique(favoriteTypes
     .map(type => filtered.find(item => item.type === type))
     .filter((item): item is ComponentManifest => Boolean(item)))
