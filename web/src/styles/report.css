@@ -3933,7 +3933,7 @@ body:has(.report-editor-shell) { height: 100%; overflow: hidden; }
 .report-profile-companions > div:first-child > button:disabled { color: #adb7c2; }
 .report-profile-companions > p { margin: 0; color: #9ba6b4; font-size: 9px; line-height: 1.45; }
 
-/* A metric-card 1.1 renders every primary value with its ordered companion metrics. */
+/* The current metric card renders every primary value with its ordered companion metrics. */
 .report-render-metric {
   flex: 1;
   display: grid;

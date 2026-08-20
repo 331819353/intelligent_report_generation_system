@@ -28,15 +28,15 @@ function manifest(type: string, version: string): ComponentManifest {
 
 test('component library keeps only the newest exact version per type', () => {
   const oldMetric = manifest('metric-card', '1.0.0')
-  const newMetric = manifest('metric-card', '1.1.0')
+  const newMetric = manifest('metric-card', '1.2.0')
   const bar = manifest('bar-comparison', '1.0.0')
   assert.deepEqual(latestComponentManifests([oldMetric, bar, newMetric]).map(item => `${item.type}@${item.version}`).sort(), [
-    'bar-comparison@1.0.0', 'metric-card@1.1.0',
+    'bar-comparison@1.0.0', 'metric-card@1.2.0',
   ])
 })
 
 test('KPI companion metrics must follow their primary metric and stay within each group', () => {
-  const metric = manifest('metric-card', '1.1.0')
+  const metric = manifest('metric-card', '1.2.0')
   assert.equal(editorBindingsValid(metric, [], [
     { role: 'VALUE', field: 'revenue' }, { role: 'TOOLTIP', field: 'revenue_yoy' },
     { role: 'VALUE', field: 'profit' }, { role: 'TOOLTIP', field: 'profit_mom' },
