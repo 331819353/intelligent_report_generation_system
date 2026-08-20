@@ -78,13 +78,41 @@ function TableView({ component, result }: { component: ReportComponent; result: 
 }
 
 function MetricView({ component, result }: { component: ReportComponent; result: QueryResult }) {
-  const metric = singleMetric(result, component.dataBinding)
-  const columns = resolveColumns(result, component.dataBinding)
-  const comparison = columns.valueIndexes[1]
-  return <div className="report-render-metric">
-    <strong>{formatNumber(metric.value, component.options.numberFormat)}</strong>
-    <span>{metric.label}</span>
-    {comparison !== undefined && <em>{result.columns[comparison]} {formatNumber(result.rows[0]?.[comparison], component.options.numberFormat)}</em>}
+  const bindings = component.dataBinding?.measures ?? []
+  const primaryIndexes = bindings.map((binding, index) => ({ binding, index }))
+    .filter(item => item.binding.role === 'VALUE')
+  if (primaryIndexes.length === 0) {
+    const metric = singleMetric(result, component.dataBinding)
+    const columns = resolveColumns(result, component.dataBinding)
+    const comparison = columns.valueIndexes[1]
+    return <div className="report-render-metric"><article>
+      <strong>{formatNumber(metric.value, component.options.numberFormat)}</strong>
+      <span>{metric.label}</span>
+      {comparison !== undefined && <em>{result.columns[comparison]} {formatNumber(result.rows[0]?.[comparison], component.options.numberFormat)}</em>}
+    </article></div>
+  }
+  const byName = new Map(result.columns.map((column, index) => [column, index]))
+  const dimensionCount = component.dataBinding?.dimensions?.length ?? 0
+  const columnIndex = (bindingIndex: number) => byName.get(bindings[bindingIndex].field) ?? dimensionCount + bindingIndex
+  return <div className={'report-render-metric ' + (primaryIndexes.length > 1 ? 'is-multiple' : '')}>
+    {primaryIndexes.map((primary, position) => {
+      const nextPrimary = primaryIndexes[position + 1]?.index ?? bindings.length
+      const comparisons = bindings.map((binding, index) => ({ binding, index }))
+        .filter(item => item.index > primary.index && item.index < nextPrimary && item.binding.role === 'TOOLTIP')
+      const valueIndex = columnIndex(primary.index)
+      return <article key={primary.binding.field + '-' + primary.index}>
+        <span>{result.columns[valueIndex] || primary.binding.field}</span>
+        <strong>{formatNumber(result.rows[0]?.[valueIndex], component.options.numberFormat)}</strong>
+        {comparisons.length > 0 && <div>
+          {comparisons.map(item => {
+            const index = columnIndex(item.index)
+            return <em key={item.binding.field + '-' + item.index}>
+              <small>{result.columns[index] || item.binding.field}</small>{formatNumber(result.rows[0]?.[index], component.options.numberFormat)}
+            </em>
+          })}
+        </div>}
+      </article>
+    })}
   </div>
 }
 

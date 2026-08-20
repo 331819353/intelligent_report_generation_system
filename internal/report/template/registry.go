@@ -19,10 +19,11 @@ var bundledManifests embed.FS
 type Migrator func(options json.RawMessage) (json.RawMessage, error)
 
 type Registry struct {
-	manifests     map[string]Manifest
-	contentHashes map[string]askdata.ContentHash
-	byContentHash map[askdata.ContentHash]Manifest
-	migrators     map[string]Migrator
+	manifests      map[string]Manifest
+	contentHashes  map[string]askdata.ContentHash
+	byContentHash  map[askdata.ContentHash]Manifest
+	migrators      map[string]Migrator
+	editorProfiles map[string]EditorProfile
 }
 
 func NewDefaultRegistry() (*Registry, error) {
@@ -30,15 +31,25 @@ func NewDefaultRegistry() (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewRegistry(manifests, nil)
+	registry, err := NewRegistry(manifests, nil)
+	if err != nil {
+		return nil, err
+	}
+	profiles, err := loadBundledEditorProfiles(registry)
+	if err != nil {
+		return nil, err
+	}
+	registry.editorProfiles = profiles
+	return registry, nil
 }
 
 func NewRegistry(manifests []Manifest, migrators map[string]Migrator) (*Registry, error) {
 	registry := &Registry{
-		manifests:     make(map[string]Manifest, len(manifests)),
-		contentHashes: make(map[string]askdata.ContentHash, len(manifests)),
-		byContentHash: make(map[askdata.ContentHash]Manifest, len(manifests)),
-		migrators:     make(map[string]Migrator, len(migrators)),
+		manifests:      make(map[string]Manifest, len(manifests)),
+		contentHashes:  make(map[string]askdata.ContentHash, len(manifests)),
+		byContentHash:  make(map[askdata.ContentHash]Manifest, len(manifests)),
+		migrators:      make(map[string]Migrator, len(migrators)),
+		editorProfiles: map[string]EditorProfile{},
 	}
 	for id, migrator := range migrators {
 		if !migratorIDPattern.MatchString(id) || migrator == nil {
@@ -81,6 +92,20 @@ func NewRegistry(manifests []Manifest, migrators map[string]Migrator) (*Registry
 		}
 	}
 	return registry, nil
+}
+
+// EditorProfile returns the exact component-version authoring contract. It is
+// intentionally separate from Manifest so UI improvements never rewrite a
+// published renderer contract or invalidate its content hash.
+func (registry *Registry) EditorProfile(componentType, version string) (EditorProfile, bool) {
+	if registry == nil {
+		return EditorProfile{}, false
+	}
+	profile, exists := registry.editorProfiles[manifestKey(componentType, version)]
+	if !exists {
+		return EditorProfile{}, false
+	}
+	return cloneEditorProfile(profile), true
 }
 
 func LoadManifestsFS(fsys fs.FS, directory string) ([]Manifest, error) {

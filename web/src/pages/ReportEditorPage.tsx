@@ -21,13 +21,14 @@ import { InteractionPanel } from '../report/designer/InteractionPanel'
 import { EvidencePanel } from '../report/designer/EvidencePanel'
 import { DataContextPanel, DefinitionJSONDialog, FilterPanel } from '../report/designer/DataPanels'
 import { ComponentPalette } from '../report/designer/ComponentPalette'
+import { ComponentBindingEditor } from '../report/designer/ComponentBindingEditor'
 import {
-  emptyManifestIndex, indexManifests, listComponentManifests, minimumSize,
+  editorBindingsValid, emptyManifestIndex, indexManifests, latestComponentManifests, listComponentManifests, minimumSize,
   type ComponentManifest, type ManifestIndex,
 } from '../report/render/manifests'
 import {
   canvasOf, defaultCanvas, findBlock, findComponentBlock, orderedPages, orderedSections,
-  type BindingRole, type ComponentOptions, type FieldBinding, type GlobalFilter, type Page, type ReportDefinition, type ReportType,
+  type ComponentOptions, type FieldBinding, type GlobalFilter, type Page, type ReportDefinition, type ReportType,
 } from '../report/render/schema'
 import {
   addComponentOperations, addDataContextOperations, bundle, createFilterOperations, createInteractionOperations,
@@ -44,11 +45,6 @@ const reportTypeLabels: Record<ReportType, { name: string; hint: string }> = {
   DASHBOARD: { name: '报表', hint: '以卡片和筛选器为主的看板：一屏多卡片，交互筛选、联动、钻取' },
 }
 
-/** 绑定角色 / 表现属性的中文标签：面板不再把 X_AXIS、colorPaletteRef 这类合同键直接摊给用户。 */
-const roleLabels: Record<string, string> = {
-  X_AXIS: '横轴', Y_AXIS: '数值', SERIES: '系列', COLOR: '颜色', LABEL: '标签', TIME: '时间', TOOLTIP: '提示',
-  CATEGORY: '类目', VALUE: '数值', DIMENSION: '维度', DETAIL: '明细', SIZE: '大小',
-}
 const optionLabels: Record<string, string> = {
   showLegend: '显示图例', showLabel: '显示数值标签', smooth: '平滑曲线', colorPaletteRef: '配色方案', nullPolicy: '空值处理',
   animation: '动画效果', orientation: '方向', topN: '只显示前 N 项', numberFormat: '数字格式', tablePageSize: '每页行数',
@@ -58,8 +54,6 @@ const optionEnumLabels: Record<string, string> = {
   ZERO: '按 0 处理', HIDE: '隐藏', GAP: '断开', HORIZONTAL: '横向', VERTICAL: '纵向', VISIBLE: '显示', HIDDEN: '隐藏', SCROLL: '可滚动',
   SUMMARY: '总结', TREND: '趋势', COMPARISON: '对比', ANOMALY: '异常', ACTION: '建议',
 }
-const roleLabel = (role: string) => roleLabels[role] ?? role
-
 type PartialDecision = 'retain' | 'exclude'
 
 function dateTime(value: string) {
@@ -79,6 +73,22 @@ function governedFieldDefinitions(candidate?: DataContextCandidate): DataContext
     code, name: code, canonicalType: '', semanticType: '', aggregation: '',
     role: /(^|_)(amount|quantity|count|revenue|cost|profit|sales|value)($|_)/i.test(code) ? 'MEASURE' : 'DIMENSION',
   }))
+}
+
+function bindingResultSummary(manifest: ComponentManifest, fields: DataContextField[], dimensions: FieldBinding[], measures: FieldBinding[]) {
+  const fieldName = (code: string) => fields.find(field => field.code === code)?.name || code
+  const names = (bindings: FieldBinding[]) => bindings.filter(binding => binding.field).map(binding => fieldName(binding.field))
+  const dimensionNames = names(dimensions)
+  const primaryNames = names(measures.filter(binding => binding.role !== 'TOOLTIP'))
+  const companionNames = names(measures.filter(binding => binding.role === 'TOOLTIP'))
+  const primary = primaryNames.length ? `「${primaryNames.join('、')}」` : '待选择的核心数值'
+  const scope = dimensionNames.length ? `按「${dimensionNames.join('、')}」` : ''
+  if (manifest.type === 'metric-card') {
+    return `突出展示${primary}${companionNames.length ? `，并用「${companionNames.join('、')}」说明变化` : ''}`
+  }
+  if (manifest.type === 'data-table') return `展示${dimensionNames.length ? `「${dimensionNames.join('、')}」和` : ''}${primary}`
+  if (manifest.type === 'filter-control') return dimensionNames.length ? `用「${dimensionNames.join('、')}」筛选整份报告` : '选择一个报告筛选条件'
+  return `${scope ? scope + '，' : ''}用${manifest.displayName}分析${primary}`
 }
 
 function objectName(draft: ReportDraft, id: string) {
@@ -371,19 +381,17 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
   const contract = manifest?.dataContract
   // SEMANTIC_IR 绑定固定语义发布版本，只能由问数或 AI 编排产生，面板不得改写。
   const semanticBound = component?.dataBinding?.bindingMode === 'SEMANTIC_IR'
-  // 可切换到的展示类型：同一渲染家族之外也允许（例如柱状图换成表格），绑定会按新合同重映射。
-  const switchable = manifests.filter(item => item.renderer !== 'CONTROL' && item.renderer !== 'IMAGE')
+  // 组件库只露出每种组件的最新合同；既有草稿若固定在旧版本，仍保留当前版本供查看。
+  const switchableLatest = latestComponentManifests(manifests).filter(item => item.renderer !== 'CONTROL' && item.renderer !== 'IMAGE')
+  const switchable = currentManifest && !switchableLatest.some(item => item.type === currentManifest.type && item.version === currentManifest.version)
+    ? [currentManifest, ...switchableLatest] : switchableLatest
   const dimensionFields = fields.filter(field => field.role !== 'MEASURE')
   const measureFields = fields.filter(field => field.role === 'MEASURE')
   const bindable = Boolean(contract) && fields.length > 0 && !semanticBound
-  const roles = contract?.roles ?? []
-  const dimensionRoles = roles.filter(role => role !== 'VALUE' && role !== 'Y_AXIS')
-  const measureRoles = roles.filter(role => role === 'VALUE' || role === 'Y_AXIS' || role === 'SIZE')
-  const dimensionsValid = !contract || (dimensions.length >= contract.dimensions.min && dimensions.length <= contract.dimensions.max)
-  const measuresValid = !contract || (measures.length >= contract.measures.min && measures.length <= contract.measures.max)
   const complete = dimensions.every(item => item.field && item.role && dimensionFields.some(field => field.code === item.field)) &&
     measures.every(item => item.field && item.role && measureFields.some(field => field.code === item.field))
-  const bindingValid = !bindable || (dimensionsValid && measuresValid && complete)
+  const bindingValid = !bindable || Boolean(manifest && editorBindingsValid(manifest, dimensions, measures) && complete)
+  const resultSummary = manifest ? bindingResultSummary(manifest, fields, dimensions, measures) : ''
 
   // 表现属性直接由清单的 optionSchema 生成，避免面板与渲染器各自维护一份白名单。
   const styleProperties = Object.entries(manifest?.optionSchema.properties ?? {})
@@ -408,52 +416,25 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
     if (!next) return
     // 表现属性只保留新清单 optionSchema 认识的键（标题/副标题始终保留），否则服务端会拒绝未知选项。
     setOptions(current => pruneOptions(current, next))
-    // 展示类型变化时按新合同的角色白名单与上限重映射当前绑定。
-    const roles = next.dataContract.roles
-    const dimensionFallback = roles.find(role => role !== 'VALUE' && role !== 'Y_AXIS' && role !== 'SIZE') ?? 'DIMENSION'
-    const measureFallback = roles.find(role => role === 'VALUE' || role === 'Y_AXIS' || role === 'SIZE') ?? 'VALUE'
-    setDimensions(current => current.slice(0, next.dataContract.dimensions.max).map(item => ({ ...item, role: roles.includes(item.role) ? item.role : dimensionFallback })))
-    setMeasures(current => current.slice(0, next.dataContract.measures.max).map(item => ({ ...item, role: roles.includes(item.role) ? item.role : measureFallback })))
+    // 组件类型变化时按它自己的编辑档案重建最小字段集合，避免把旧图形角色带入新图形。
+    applyBinding(defaultBinding(next, fields))
   }
   const suggest = async () => {
     if (!onSuggest || !manifest) return
     setSuggesting(true); setSuggestError(''); setSuggestion(null)
     try {
       const result = await onSuggest({ dataContextId, manifest, title: options.title ?? '' })
-      if (!result) { setSuggestError('AI 没有给出可用的绑定建议，可改用「按字段角色填充」。'); return }
+      if (!result) { setSuggestError('暂未找到合适的智能推荐，请直接从下方选择。'); return }
       setSuggestion(result)
       applyBinding(result)
     } catch (cause) {
-      setSuggestError(cause instanceof Error ? cause.message : 'AI 识别失败')
+      setSuggestError(cause instanceof Error ? cause.message : '智能推荐暂时不可用')
     } finally { setSuggesting(false) }
   }
-
-  const rows = (
-    label: string, items: FieldBinding[], allowedRoles: BindingRole[], max: number,
-    availableFields: DataContextField[],
-    onChange: (next: FieldBinding[]) => void,
-  ) => <div className="report-editor-binding-group">
-    <div className="report-editor-binding-head">
-      <strong>{label}</strong>
-      <button type="button" disabled={items.length >= max || allowedRoles.length === 0}
-        onClick={() => onChange([...items, { role: allowedRoles[0], field: availableFields[0]?.code ?? '' }])}>添加</button>
-    </div>
-    {items.length === 0 && <p className="report-editor-binding-empty">尚未选择{label}</p>}
-    {items.map((item, index) => <div className={`report-editor-binding-row ${allowedRoles.length > 1 ? '' : 'is-single-role'}`.trim()} key={`${label}-${index}`}>
-      {allowedRoles.length > 1
-        ? <select aria-label={`${label}角色`} value={item.role} title="该字段在图中扮演的角色"
-          onChange={event => onChange(items.map((row, position) => position === index ? { ...row, role: event.target.value as BindingRole } : row))}>
-          {allowedRoles.map(role => <option key={role} value={role}>{roleLabel(role)}</option>)}
-        </select>
-        : <span className="report-editor-binding-role" title={item.role}>{roleLabel(item.role)}</span>}
-      <select aria-label={`${label}字段`} value={item.field}
-        onChange={event => onChange(items.map((row, position) => position === index ? { ...row, field: event.target.value } : row))}>
-        {availableFields.map(field => <option key={field.code} value={field.code}>{field.name || field.code} · {field.code}</option>)}
-      </select>
-      <button type="button" aria-label={`移除${label}`}
-        onClick={() => onChange(items.filter((_, position) => position !== index))}><X size={14} /></button>
-    </div>)}
-  </div>
+  const recommend = () => {
+    if (canAI && onSuggest) void suggest()
+    else if (manifest) applyBinding(defaultBinding(manifest, fields))
+  }
 
   const save = () => onSave({
     options: { ...(manifest ? pruneOptions(options, manifest) : options), title: options.title?.trim(), subtitle: options.subtitle?.trim() },
@@ -464,7 +445,7 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
 
   return <section className="report-card-inspector" aria-labelledby="manual-editor-title">
       <header>
-        <div className="report-card-inspector-title"><h2 id="manual-editor-title">{mode === 'data' ? '数据绑定' : '外观设置'}</h2><span>{component?.options.title || component?.templateRef.type || '画布元素'}</span></div>
+        <div className="report-card-inspector-title"><h2 id="manual-editor-title">{mode === 'data' ? '组件配置' : '外观设置'}</h2><span>{manifest?.displayName || component?.options.title || component?.templateRef.type || '画布元素'}</span></div>
         <div className="report-card-inspector-actions">
           <button className="report-inspector-apply" type="button" disabled={busy || !options.title?.trim() || !bindingValid} onClick={save}>{busy ? '应用中…' : '应用'}</button>
           <button type="button" aria-label="取消选中" onClick={onClose}><X size={18} /></button>
@@ -472,18 +453,20 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
       </header>
       <div className="report-editor-manual-form">
         {mode === 'data' && <>
-        <h4 className="report-inspector-group">数据源</h4>
-        {!semanticBound && reportContexts.length > 0 && <label>数据集
-          <select aria-label="卡片数据集" value={dataContextId} onChange={event => changeContext(event.target.value)}>
-            {reportContexts.map(context => <option key={context.id} value={context.id}>{contextNameOf(context.id)}</option>)}
-          </select>
-        </label>}
-        {!semanticBound && switchable.length > 0 && <label>展示类型
-          <select aria-label="展示类型" value={manifestRef} onChange={event => changeManifest(event.target.value)}>
-            {switchable.map(item => <option key={`${item.type}@${item.version}`} value={`${item.type}@${item.version}`}>{item.displayName}</option>)}
-          </select>
-          {replacing && <small className="report-editor-binding-note"><Info size={13} />保存后卡片将换成「{manifest?.displayName}」，指标与维度已按新图形重新对应。</small>}
-        </label>}
+        <section className="report-profile-source">
+          <header><Database size={16} /><div><strong>先确定分析基础</strong><small>选择这张图使用的数据和呈现方式</small></div></header>
+          {!semanticBound && reportContexts.length > 0 && <label>数据来源
+            <select aria-label="卡片数据集" value={dataContextId} onChange={event => changeContext(event.target.value)}>
+              {reportContexts.map(context => <option key={context.id} value={context.id}>{contextNameOf(context.id)}</option>)}
+            </select>
+          </label>}
+          {!semanticBound && switchable.length > 0 && <label>分析方式
+            <select aria-label="组件类型" value={manifestRef} onChange={event => changeManifest(event.target.value)}>
+              {switchable.map(item => <option key={item.type + '@' + item.version} value={item.type + '@' + item.version}>{item.displayName}</option>)}
+            </select>
+          </label>}
+          {replacing && <p className="report-editor-binding-note"><Info size={13} />应用后改为「{manifest?.displayName}」，字段会按新组件合同重新配置。</p>}
+        </section>
 
         {semanticBound && <p className="report-editor-binding-note">
           <ShieldCheck size={15} />该组件使用 SEMANTIC_IR 绑定并固定了语义发布版本，只能通过语义升级流程调整。
@@ -495,24 +478,31 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
           <WarningCircle size={15} />当前报告的数据上下文没有可用字段。
         </p>}
 
-        {bindable && contract && <div className="report-editor-binding">
-          <div className="report-editor-binding-summary" aria-label="当前字段选择">
-            <span><strong>{measures.length}</strong> / {contract.measures.max} 指标</span>
-            {contract.dimensions.max > 0 && <span><strong>{dimensions.length}</strong> / {contract.dimensions.max} 维度</span>}
-          </div>
-          <div className="report-editor-binding-assist">
-            <button type="button" disabled={busy || suggesting || !manifest} title="按数据集里字段的角色（度量/维度/时间）自动填入" onClick={() => manifest && applyBinding(defaultBinding(manifest, fields))}>自动填充</button>
-            <button type="button" disabled={busy || suggesting || !canAI || !onSuggest || !manifest} title={canAI ? '让模型按卡片标题在数据集里挑选指标与维度' : '当前不可用：需要模型提供方与 AI 编辑权限'} onClick={() => void suggest()}>
-              {suggesting ? <SpinnerGap className="is-spinning" size={14} /> : <MagicWand size={14} />}{suggesting ? 'AI 识别中…' : 'AI 识别指标与维度'}
-            </button>
-          </div>
-          {suggestion && <p className="report-editor-binding-note"><Sparkle size={14} weight="fill" />AI 建议已填入：{suggestion.dimensions.length} 个维度、{suggestion.measures.length} 个指标{suggestion.rationale ? `（${suggestion.rationale}）` : ''}。点击「保存」才会生效。</p>}
+        {bindable && contract && manifest && <section className="report-profile-fields">
+          <header>
+            <div><strong>再回答几个业务问题</strong><small>不同图表只显示各自真正需要的内容</small></div>
+            <div className="report-editor-binding-assist">
+              <button type="button" disabled={busy || suggesting} title={canAI && onSuggest ? '根据图表用途智能选择合适字段' : '按字段类型生成一套可用配置'} onClick={recommend}>
+                {suggesting ? <SpinnerGap className="is-spinning" size={14} /> : <MagicWand size={14} />}{suggesting ? '推荐中…' : '智能推荐'}
+              </button>
+            </div>
+          </header>
+          {suggestion && <p className="report-editor-binding-note"><Sparkle size={14} weight="fill" />已生成推荐配置{suggestion.rationale ? `：${suggestion.rationale}` : ''}。点击「应用」后生效。</p>}
           {suggestError && <p className="report-editor-inline-error"><WarningCircle size={15} />{suggestError}</p>}
-          {rows('指标', measures, measureRoles, contract.measures.max, measureFields, setMeasures)}
-          {contract.dimensions.max > 0 && rows('维度', dimensions, dimensionRoles, contract.dimensions.max, dimensionFields, setDimensions)}
-          {!measuresValid && <p className="report-editor-inline-error"><WarningCircle size={15} />指标数量不符合要求</p>}
-          {!dimensionsValid && <p className="report-editor-inline-error"><WarningCircle size={15} />维度数量不符合要求</p>}
-        </div>}
+          <ComponentBindingEditor manifest={manifest} dimensions={dimensions} measures={measures}
+            dimensionFields={dimensionFields} measureFields={measureFields}
+            onDimensionsChange={setDimensions} onMeasuresChange={setMeasures} />
+          {!bindingValid && <p className="report-editor-inline-error"><WarningCircle size={15} />请完成该组件要求的核心字段配置</p>}
+          {manifest.editorProfile && <section className="report-profile-result">
+            <span><Eye size={17} /></span>
+            <div><small>配置结果</small><strong>{resultSummary}</strong>
+              <p>{manifest.editorProfile.example.description}</p>
+              {manifest.editorProfile.example.items.length > 0 && <ul>
+                {manifest.editorProfile.example.items.map(item => <li key={item}>{item}</li>)}
+              </ul>}
+            </div>
+          </section>}
+        </section>}
         </>}
 
         {mode === 'appearance' && <>
@@ -557,7 +547,7 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
         {mode === 'data' && filterPanel && <details className="report-inspector-disclosure">
           <summary>
             <span className="report-inspector-disclosure-icon"><Funnel size={16} /></span>
-            <span><strong>过滤字段</strong><small>{filterCount > 0 ? `${filterCount} 个已配置` : '按需添加，不占用首屏'}</small></span>
+            <span><strong>卡片筛选</strong><small>{filterCount > 0 ? `${filterCount} 个条件已生效` : '可选，仅限制当前图表的数据'}</small></span>
             <CaretDown className="report-inspector-disclosure-caret" size={15} />
           </summary>
           <div className="report-inspector-disclosure-content">{filterPanel}</div>
@@ -1387,7 +1377,7 @@ export function ReportEditorPage() {
       <div className="report-editor-body">
         <div className="report-editor-main">
           <nav className="report-editor-outline report-editor-sidebar" aria-label="组件面板与大纲">
-            <ComponentPalette manifests={manifests.list()} disabled={!canEdit}
+            <ComponentPalette manifests={latestComponentManifests(manifests.list())} disabled={!canEdit}
               onPick={pickComponentForSlot} />
             <details className="report-editor-structure-panel">
               <summary><span>页面结构</span><em>{sections.length}</em><CaretRight size={14} /></summary>
@@ -1592,7 +1582,7 @@ export function ReportEditorPage() {
       </footer>
     </div>
     {jsonOpen && <DefinitionJSONDialog definition={draft.definition} onClose={() => setJsonOpen(false)} />}
-    {componentLibraryOpen && <ComponentLibraryDialog manifests={manifests.list()}
+    {componentLibraryOpen && <ComponentLibraryDialog manifests={latestComponentManifests(manifests.list())}
       reportContexts={reportContexts} contextNameOf={contextNameOf} fieldsOf={fieldsOf} defaultContextId={currentDataContextId}
       sectionName={activeSection?.name ?? ''}
       busy={componentBusy} error={componentError}

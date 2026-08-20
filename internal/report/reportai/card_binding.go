@@ -25,11 +25,28 @@ type CardBindingField struct {
 }
 
 type CardBindingContract struct {
-	DimensionsMin int      `json:"dimensionsMin"`
-	DimensionsMax int      `json:"dimensionsMax"`
-	MeasuresMin   int      `json:"measuresMin"`
-	MeasuresMax   int      `json:"measuresMax"`
-	Roles         []string `json:"roles"`
+	DimensionsMin  int                `json:"dimensionsMin"`
+	DimensionsMax  int                `json:"dimensionsMax"`
+	MeasuresMin    int                `json:"measuresMin"`
+	MeasuresMax    int                `json:"measuresMax"`
+	Roles          []string           `json:"roles"`
+	DimensionRoles []string           `json:"dimensionRoles,omitempty"`
+	MeasureRoles   []string           `json:"measureRoles,omitempty"`
+	Groups         []CardBindingGroup `json:"groups,omitempty"`
+}
+
+// CardBindingGroup is the model-facing form of the component editor profile.
+// It keeps manual and LLM configuration on the same component-specific rules.
+type CardBindingGroup struct {
+	ID           string   `json:"id"`
+	Label        string   `json:"label"`
+	Description  string   `json:"description"`
+	Kind         string   `json:"kind"`
+	Roles        []string `json:"roles"`
+	Min          int      `json:"min"`
+	Max          int      `json:"max"`
+	NestedUnder  string   `json:"nestedUnder,omitempty"`
+	MaxPerParent int      `json:"maxPerParent,omitempty"`
 }
 
 type CardBindingRequest struct {
@@ -54,7 +71,7 @@ type CardBindingSuggester interface {
 
 const (
 	maxCardBindingFields = 400
-	cardBindingPrompt    = "You bind one report card to governed dataset fields. Choose dimensions only from fields whose role is not MEASURE and measures only from fields whose role is MEASURE, using only the listed field codes. Respect the contract: dimension and measure counts must stay within [min,max] and every role must come from contract.roles (dimension roles exclude VALUE/Y_AXIS/SIZE). Prefer TIME fields for trend charts, CATEGORY/DIMENSION fields for comparisons, and measures whose names match the card title or intent. Return a short rationale in Chinese. Never invent fields."
+	cardBindingPrompt    = "You bind one report card to governed dataset fields. Choose dimensions only from non-MEASURE fields and measures only from MEASURE fields, using listed field codes. Follow contract.groups exactly: each group has its own allowed roles and [min,max]. When a group has nestedUnder, place its bindings immediately after the related parent binding, before the next parent, and respect maxPerParent. Use contract.dimensionRoles and contract.measureRoles to classify roles. Prefer TIME for trends, categories for comparisons, and measures matching the card title or intent. Return a short rationale in Chinese. Never invent fields."
 )
 
 // ValidateCardBindingRequest bounds the payload before it reaches a model.
@@ -66,6 +83,29 @@ func ValidateCardBindingRequest(request CardBindingRequest) error {
 		request.Contract.DimensionsMax < request.Contract.DimensionsMin ||
 		request.Contract.MeasuresMax < request.Contract.MeasuresMin || len(request.Contract.Roles) == 0 {
 		return errors.New("card binding contract is invalid")
+	}
+	allowedRoles := cardBindingStringSet(request.Contract.Roles)
+	groupIDs := map[string]bool{}
+	groupRoles := map[string]bool{}
+	for _, group := range request.Contract.Groups {
+		if strings.TrimSpace(group.ID) == "" || groupIDs[group.ID] ||
+			(group.Kind != "DIMENSION" && group.Kind != "MEASURE") || len(group.Roles) == 0 ||
+			group.Min < 0 || group.Max < group.Min {
+			return errors.New("card binding group contract is invalid")
+		}
+		groupIDs[group.ID] = true
+		for _, role := range group.Roles {
+			role = strings.ToUpper(strings.TrimSpace(role))
+			if !allowedRoles[role] || groupRoles[role] {
+				return errors.New("card binding group roles are invalid")
+			}
+			groupRoles[role] = true
+		}
+	}
+	for _, group := range request.Contract.Groups {
+		if group.NestedUnder != "" && (!groupIDs[group.NestedUnder] || group.MaxPerParent < 1) {
+			return errors.New("card binding nested group contract is invalid")
+		}
 	}
 	return nil
 }
@@ -87,7 +127,11 @@ func ValidateCardBindingSuggestion(request CardBindingRequest, suggestion CardBi
 	for _, role := range request.Contract.Roles {
 		roles[strings.ToUpper(strings.TrimSpace(role))] = true
 	}
-	measureRole := func(role string) bool { return role == "VALUE" || role == "Y_AXIS" || role == "SIZE" }
+	measureRoles := cardBindingStringSet(request.Contract.MeasureRoles)
+	if len(measureRoles) == 0 {
+		measureRoles = map[string]bool{"VALUE": true, "Y_AXIS": true, "SIZE": true}
+	}
+	measureRole := func(role string) bool { return measureRoles[role] }
 	seen := map[string]bool{}
 	keep := func(items []report.FieldBinding, wantMeasure bool, max int) []report.FieldBinding {
 		result := make([]report.FieldBinding, 0, len(items))
@@ -119,5 +163,81 @@ func ValidateCardBindingSuggestion(request CardBindingRequest, suggestion CardBi
 		return CardBindingSuggestion{}, fmt.Errorf("card binding suggestion does not satisfy the component contract (dimensions %d/%d, measures %d/%d)",
 			len(result.Dimensions), request.Contract.DimensionsMin, len(result.Measures), request.Contract.MeasuresMin)
 	}
+	if err := validateCardBindingGroups(request.Contract.Groups, result); err != nil {
+		return CardBindingSuggestion{}, err
+	}
 	return result, nil
+}
+
+func cardBindingStringSet(values []string) map[string]bool {
+	result := make(map[string]bool, len(values))
+	for _, value := range values {
+		if value = strings.ToUpper(strings.TrimSpace(value)); value != "" {
+			result[value] = true
+		}
+	}
+	return result
+}
+
+func validateCardBindingGroups(groups []CardBindingGroup, suggestion CardBindingSuggestion) error {
+	if len(groups) == 0 {
+		return nil
+	}
+	type bindingWithKind struct {
+		binding report.FieldBinding
+		kind    string
+	}
+	items := make([]bindingWithKind, 0, len(suggestion.Dimensions)+len(suggestion.Measures))
+	for _, binding := range suggestion.Dimensions {
+		items = append(items, bindingWithKind{binding: binding, kind: "DIMENSION"})
+	}
+	for _, binding := range suggestion.Measures {
+		items = append(items, bindingWithKind{binding: binding, kind: "MEASURE"})
+	}
+	counts := map[string]int{}
+	roleGroups := map[string]CardBindingGroup{}
+	for _, group := range groups {
+		for _, role := range group.Roles {
+			roleGroups[strings.ToUpper(strings.TrimSpace(role))] = group
+		}
+	}
+	for _, item := range items {
+		group, exists := roleGroups[strings.ToUpper(string(item.binding.Role))]
+		if !exists || group.Kind != item.kind {
+			return errors.New("card binding suggestion does not match its component-specific groups")
+		}
+		counts[group.ID]++
+	}
+	for _, group := range groups {
+		if counts[group.ID] < group.Min || counts[group.ID] > group.Max {
+			return fmt.Errorf("card binding group %s count %d is outside %d..%d", group.ID, counts[group.ID], group.Min, group.Max)
+		}
+		if group.NestedUnder == "" {
+			continue
+		}
+		parentRoles := map[string]bool{}
+		for _, parent := range groups {
+			if parent.ID == group.NestedUnder {
+				parentRoles = cardBindingStringSet(parent.Roles)
+				break
+			}
+		}
+		childRoles := cardBindingStringSet(group.Roles)
+		activeParent, children := false, 0
+		for _, item := range items {
+			if item.kind != group.Kind {
+				continue
+			}
+			role := strings.ToUpper(string(item.binding.Role))
+			if parentRoles[role] {
+				activeParent, children = true, 0
+			} else if childRoles[role] {
+				children++
+				if !activeParent || children > group.MaxPerParent {
+					return fmt.Errorf("card binding nested group %s is not attached to a parent", group.ID)
+				}
+			}
+		}
+	}
+	return nil
 }

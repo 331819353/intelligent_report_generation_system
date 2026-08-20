@@ -584,7 +584,21 @@ func (handler *Handler) componentManifests(writer http.ResponseWriter, request *
 		writeError(writer, http.StatusServiceUnavailable, "REPORT_COMPONENT_REGISTRY_UNAVAILABLE", "component manifest registry is unavailable")
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"items": handler.ai.Components.List()})
+	type manifestItem struct {
+		template.Manifest
+		EditorProfile *template.EditorProfile `json:"editorProfile,omitempty"`
+	}
+	manifests := handler.ai.Components.List()
+	items := make([]manifestItem, 0, len(manifests))
+	for _, manifest := range manifests {
+		profile, exists := handler.ai.Components.EditorProfile(manifest.Type, manifest.Version)
+		if !exists {
+			writeError(writer, http.StatusServiceUnavailable, "REPORT_COMPONENT_EDITOR_PROFILE_UNAVAILABLE", "component editor profile is unavailable")
+			return
+		}
+		items = append(items, manifestItem{Manifest: manifest, EditorProfile: &profile})
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"items": items})
 }
 
 // cardKinds exposes the semantic vocabulary used by both the component panel
@@ -1299,11 +1313,32 @@ func (handler *Handler) aiCardBinding(writer http.ResponseWriter, request *http.
 	for _, role := range manifest.DataContract.Roles {
 		roles = append(roles, string(role))
 	}
+	dimensionRoles, measureRoles := make([]string, 0), make([]string, 0)
+	bindingGroups := make([]reportai.CardBindingGroup, 0)
+	if profile, exists := handler.ai.Components.EditorProfile(manifest.Type, manifest.Version); exists {
+		bindingGroups = make([]reportai.CardBindingGroup, 0, len(profile.BindingGroups))
+		for _, group := range profile.BindingGroups {
+			groupRoles := make([]string, 0, len(group.Roles))
+			for _, role := range group.Roles {
+				groupRoles = append(groupRoles, string(role))
+				if group.Kind == template.EditorBindingDimension {
+					dimensionRoles = append(dimensionRoles, string(role))
+				} else {
+					measureRoles = append(measureRoles, string(role))
+				}
+			}
+			bindingGroups = append(bindingGroups, reportai.CardBindingGroup{
+				ID: group.ID, Label: group.Label, Description: group.Description, Kind: string(group.Kind), Roles: groupRoles,
+				Min: group.Min, Max: group.Max, NestedUnder: group.NestedUnder, MaxPerParent: group.MaxPerParent,
+			})
+		}
+	}
 	aiRequest := reportai.CardBindingRequest{
 		CardTitle: strings.TrimSpace(body.Title), ComponentType: manifest.Type, ComponentName: manifest.DisplayName,
 		Contract: reportai.CardBindingContract{
 			DimensionsMin: manifest.DataContract.Dimensions.Min, DimensionsMax: manifest.DataContract.Dimensions.Max,
 			MeasuresMin: manifest.DataContract.Measures.Min, MeasuresMax: manifest.DataContract.Measures.Max, Roles: roles,
+			DimensionRoles: dimensionRoles, MeasureRoles: measureRoles, Groups: bindingGroups,
 		},
 		DataContextName: dataContext.Alias, Fields: fields, Intent: strings.TrimSpace(body.Intent),
 	}

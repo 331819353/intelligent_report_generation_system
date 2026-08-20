@@ -1,0 +1,31 @@
+{
+  "type": "metric-card",
+  "version": "1.1.0",
+  "renderer": "REACT",
+  "displayName": "指标卡",
+  "category": "CHART",
+  "minSize": { "w": 2, "h": 2 },
+  "recommendedSize": { "w": 6, "h": 3 },
+  "dataContract": {
+    "dimensions": { "min": 0, "max": 1 },
+    "measures": { "min": 1, "max": 9 },
+    "timeField": { "required": false },
+    "roles": ["VALUE", "LABEL", "COLOR", "TOOLTIP"]
+  },
+  "stackingRequiresAdditive": false,
+  "optionSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [],
+    "properties": {
+      "title": { "type": "string" },
+      "subtitle": { "type": "string" },
+      "showLabel": { "type": "boolean" },
+      "numberFormat": { "type": "string" },
+      "colorPaletteRef": { "type": "string" }
+    }
+  },
+  "defaultOptions": { "showLabel": true },
+  "mobilePolicy": { "supported": true, "defaultLegendMode": "HIDDEN", "labelDegradation": "ELLIPSIS" },
+  "supportedInteractions": ["CLICK_FILTER", "DRILL_DOWN"]
+}

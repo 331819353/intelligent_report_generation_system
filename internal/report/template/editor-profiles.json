@@ -1,0 +1,186 @@
+{
+  "version": "1.0",
+  "profiles": [
+    {
+      "componentType": "area-stacked",
+      "componentVersion": "1.0.0",
+      "example": {
+        "title": "堆叠趋势",
+        "description": "按时间观察多个分类的累计变化",
+        "items": ["时间范围 · 1 个", "分类拆分 · 可选", "业务数值 · 1～5 个"]
+      },
+      "bindingGroups": [
+        { "id": "axis", "label": "按什么时间看", "description": "选择日期、月份等时间字段", "kind": "DIMENSION", "roles": ["X_AXIS", "TIME"], "min": 1, "max": 1, "addLabel": "选择时间" },
+        { "id": "series", "label": "还要按什么分类", "description": "可选，例如地区、渠道或商品类型", "kind": "DIMENSION", "roles": ["SERIES", "COLOR"], "min": 0, "max": 1, "addLabel": "添加分类" },
+        { "id": "values", "label": "观察哪些数值", "description": "选择需要累计比较的业务数值", "kind": "MEASURE", "roles": ["Y_AXIS", "TOOLTIP"], "min": 1, "max": 5, "addLabel": "添加数值" }
+      ]
+    },
+    {
+      "componentType": "bar-comparison",
+      "componentVersion": "1.0.0",
+      "example": {
+        "title": "分类对比",
+        "description": "按一个分类比较一组核心指标",
+        "items": ["比较对象 · 1 个", "颜色分组 · 可选", "业务数值 · 1～5 个"]
+      },
+      "bindingGroups": [
+        { "id": "category", "label": "按什么对比", "description": "例如时间、地区、渠道或商品", "kind": "DIMENSION", "roles": ["X_AXIS", "LABEL"], "min": 1, "max": 1, "addLabel": "选择对比项" },
+        { "id": "series", "label": "还要按什么分组", "description": "可选，用不同颜色进一步拆分", "kind": "DIMENSION", "roles": ["SERIES", "COLOR"], "min": 0, "max": 1, "addLabel": "添加分组" },
+        { "id": "values", "label": "比较哪些数值", "description": "选择要并排比较的业务数值", "kind": "MEASURE", "roles": ["Y_AXIS", "TOOLTIP"], "min": 1, "max": 5, "addLabel": "添加数值" }
+      ]
+    },
+    {
+      "componentType": "bar-horizontal",
+      "componentVersion": "1.0.0",
+      "example": {
+        "title": "横向排名",
+        "description": "适合名称较长的分类排行",
+        "items": ["排名对象 · 1 个", "颜色分组 · 可选", "排名数值 · 1～3 个"]
+      },
+      "bindingGroups": [
+        { "id": "category", "label": "给什么对象排名", "description": "例如门店、商品或销售人员", "kind": "DIMENSION", "roles": ["X_AXIS", "LABEL"], "min": 1, "max": 1, "addLabel": "选择排行对象" },
+        { "id": "series", "label": "还要按什么分组", "description": "可选，用不同颜色拆分结果", "kind": "DIMENSION", "roles": ["SERIES", "COLOR"], "min": 0, "max": 1, "addLabel": "添加分组" },
+        { "id": "values", "label": "按什么数值排名", "description": "选择决定排名顺序的业务数值", "kind": "MEASURE", "roles": ["Y_AXIS", "TOOLTIP"], "min": 1, "max": 3, "addLabel": "添加数值" }
+      ]
+    },
+    {
+      "componentType": "data-table",
+      "componentVersion": "1.0.0",
+      "example": {
+        "title": "明细表格",
+        "description": "维度列在前，数值列在后",
+        "items": ["展示信息 · 0～16 项", "业务数值 · 1～16 项"]
+      },
+      "bindingGroups": [
+        { "id": "dimensions", "label": "展示哪些信息", "description": "时间、名称、分类等业务信息", "kind": "DIMENSION", "roles": ["DIMENSION", "TIME", "LABEL", "DETAIL"], "min": 0, "max": 16, "addLabel": "添加信息列" },
+        { "id": "values", "label": "展示哪些数值", "description": "金额、数量、比率等业务数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 16, "addLabel": "添加数值列" }
+      ]
+    },
+    {
+      "componentType": "filter-control",
+      "componentVersion": "1.0.0",
+      "example": {
+        "title": "筛选控件",
+        "description": "一个控件只绑定一个筛选字段",
+        "items": ["筛选条件 · 1 个"]
+      },
+      "bindingGroups": [
+        { "id": "filter-field", "label": "用什么条件筛选", "description": "例如日期、地区、渠道或商品", "kind": "DIMENSION", "roles": ["DIMENSION", "TIME"], "min": 1, "max": 1, "addLabel": "选择条件" }
+      ]
+    },
+    {
+      "componentType": "funnel",
+      "componentVersion": "1.0.0",
+      "example": {
+        "title": "转化漏斗",
+        "description": "按阶段展示数量或转化规模",
+        "items": ["业务阶段 · 1 个", "阶段数值 · 1 个"]
+      },
+      "bindingGroups": [
+        { "id": "stage", "label": "漏斗分哪几步", "description": "选择能表示业务阶段的字段", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL", "COLOR"], "min": 1, "max": 1, "addLabel": "选择阶段" },
+        { "id": "value", "label": "每一步看什么数值", "description": "例如人数、订单数或金额", "kind": "MEASURE", "roles": ["VALUE", "TOOLTIP"], "min": 1, "max": 1, "addLabel": "选择数值" }
+      ]
+    },
+    {
+      "componentType": "image",
+      "componentVersion": "1.0.0",
+      "example": {
+        "title": "图片",
+        "description": "无需绑定数据，在外观页选择素材",
+        "items": []
+      },
+      "bindingGroups": []
+    },
+    {
+      "componentType": "insight-text",
+      "componentVersion": "1.0.0",
+      "example": {
+        "title": "智能结论",
+        "description": "基于指标和可选维度生成可追溯结论",
+        "items": ["分析角度 · 可选", "重点数值 · 1～8 个"]
+      },
+      "bindingGroups": [
+        { "id": "dimensions", "label": "从哪些角度分析", "description": "可选，例如时间、地区或渠道", "kind": "DIMENSION", "roles": ["DIMENSION", "TIME", "DETAIL"], "min": 0, "max": 8, "addLabel": "添加分析角度" },
+        { "id": "values", "label": "重点解读哪些数值", "description": "结论引用的核心业务数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 8, "addLabel": "添加数值" }
+      ]
+    },
+    {
+      "componentType": "line-trend",
+      "componentVersion": "1.0.0",
+      "example": {
+        "title": "趋势折线",
+        "description": "沿时间或有序分类观察指标变化",
+        "items": ["时间范围 · 1 个", "分类对比 · 可选", "业务数值 · 1～5 个"]
+      },
+      "bindingGroups": [
+        { "id": "axis", "label": "按什么时间看", "description": "选择日期、月份等时间字段", "kind": "DIMENSION", "roles": ["X_AXIS", "TIME"], "min": 1, "max": 1, "addLabel": "选择时间" },
+        { "id": "series", "label": "还要按什么分类", "description": "可选，例如地区、渠道或商品", "kind": "DIMENSION", "roles": ["SERIES", "COLOR"], "min": 0, "max": 1, "addLabel": "添加分类" },
+        { "id": "values", "label": "观察哪些数值", "description": "选择需要观察变化的业务数值", "kind": "MEASURE", "roles": ["Y_AXIS", "TOOLTIP"], "min": 1, "max": 5, "addLabel": "添加数值" }
+      ]
+    },
+    {
+      "componentType": "metric-card",
+      "componentVersion": "1.0.0",
+      "example": {
+        "title": "单指标卡",
+        "description": "展示一个主数值和最多两个补充数值",
+        "items": ["说明范围 · 可选", "核心数值 · 1～3 个"]
+      },
+      "bindingGroups": [
+        { "id": "label", "label": "按什么范围说明", "description": "可选，例如地区或渠道", "kind": "DIMENSION", "roles": ["LABEL", "COLOR"], "min": 0, "max": 1, "addLabel": "添加范围" },
+        { "id": "values", "label": "卡片展示哪些数值", "description": "第一个为主数值，其余作为补充说明", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 3, "addLabel": "添加数值" }
+      ]
+    },
+    {
+      "componentType": "metric-card",
+      "componentVersion": "1.1.0",
+      "example": {
+        "title": "多指标卡",
+        "description": "每个核心数值可挂接同比、环比等说明指标",
+        "items": ["核心数值 · 1～3 个", "每项说明指标 · 最多 2 个"]
+      },
+      "bindingGroups": [
+        { "id": "label", "label": "按什么范围说明", "description": "可选，例如地区或渠道", "kind": "DIMENSION", "roles": ["LABEL", "COLOR"], "min": 0, "max": 1, "addLabel": "添加范围" },
+        { "id": "primary-metrics", "label": "卡片突出哪些数值", "description": "最多同时展示 3 个核心业务数值", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 3, "addLabel": "添加核心数值" },
+        { "id": "comparison-metrics", "label": "怎样补充说明", "description": "同比、环比或目标达成率", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 6, "addLabel": "添加同比/环比", "nestedUnder": "primary-metrics", "maxPerParent": 2 }
+      ]
+    },
+    {
+      "componentType": "pie-donut",
+      "componentVersion": "1.0.0",
+      "example": {
+        "title": "占比结构",
+        "description": "用一个分类和一个可加总指标展示构成",
+        "items": ["分类对象 · 1 个", "占比数值 · 1 个"]
+      },
+      "bindingGroups": [
+        { "id": "category", "label": "按什么分类", "description": "例如地区、渠道或商品类型", "kind": "DIMENSION", "roles": ["CATEGORY", "LABEL", "COLOR"], "min": 1, "max": 1, "addLabel": "选择分类" },
+        { "id": "value", "label": "用什么数值算占比", "description": "例如销售额、订单数或利润", "kind": "MEASURE", "roles": ["VALUE", "TOOLTIP"], "min": 1, "max": 1, "addLabel": "选择数值" }
+      ]
+    },
+    {
+      "componentType": "rich-text",
+      "componentVersion": "1.0.0",
+      "example": {
+        "title": "富文本",
+        "description": "无需绑定数据，在外观页编辑正文",
+        "items": []
+      },
+      "bindingGroups": []
+    },
+    {
+      "componentType": "scatter",
+      "componentVersion": "1.0.0",
+      "example": {
+        "title": "相关性散点",
+        "description": "用两个数值轴观察相关性，可按分类拆分",
+        "items": ["分析对象 · 可选", "对比数值 · 2 个", "气泡大小 · 可选"]
+      },
+      "bindingGroups": [
+        { "id": "details", "label": "每个点代表什么", "description": "可选，例如客户、商品或门店", "kind": "DIMENSION", "roles": ["X_AXIS", "COLOR", "DETAIL", "TOOLTIP"], "min": 0, "max": 2, "addLabel": "添加对象信息" },
+        { "id": "axes", "label": "比较哪两个数值", "description": "前两个数值分别放在横轴和纵轴", "kind": "MEASURE", "roles": ["Y_AXIS"], "min": 2, "max": 2, "addLabel": "添加比较数值" },
+        { "id": "size", "label": "气泡大小代表什么", "description": "可选，用第三个数值控制点的大小", "kind": "MEASURE", "roles": ["SIZE"], "min": 0, "max": 1, "addLabel": "添加大小数值" }
+      ]
+    }
+  ]
+}

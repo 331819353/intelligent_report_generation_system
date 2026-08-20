@@ -1,6 +1,6 @@
 import type { DataContextField, EditorOperation, EditorOperationBundle } from '../api/editor.ts'
 import type { ComponentManifest, ManifestIndex } from '../render/manifests.ts'
-import { minimumSize, recommendedSize } from '../render/manifests.ts'
+import { editorBindingGroups, minimumSize, recommendedSize } from '../render/manifests.ts'
 import {
   canvasOf, findBlock, findComponentBlock, orderedSections,
   type BlockType, type ComponentOptions, type FieldBinding, type GlobalFilter,
@@ -319,12 +319,18 @@ export function defaultBinding(
   }
   const dimensionFields = fields.filter(field => field.role !== 'MEASURE').sort((left, right) => rank(left) - rank(right))
   const measureFields = fields.filter(field => field.role === 'MEASURE').sort((left, right) => measureRank(left) - measureRank(right))
-  const dimensions: FieldBinding[] = Array.from({ length: manifest.dataContract.dimensions.min }, (_, index) => ({
-    role: preferredRole(manifest, true), field: dimensionFields[index]?.code ?? '',
-  }))
-  const measures: FieldBinding[] = Array.from({ length: manifest.dataContract.measures.min }, (_, index) => ({
-    role: preferredRole(manifest, false), field: measureFields[index]?.code ?? '',
-  }))
+  let dimensionIndex = 0
+  let measureIndex = 0
+  const dimensions: FieldBinding[] = []
+  const measures: FieldBinding[] = []
+  for (const group of editorBindingGroups(manifest)) {
+    const target = group.kind === 'DIMENSION' ? dimensions : measures
+    const available = group.kind === 'DIMENSION' ? dimensionFields : measureFields
+    for (let index = 0; index < group.min; index += 1) {
+      const fieldIndex = group.kind === 'DIMENSION' ? dimensionIndex++ : measureIndex++
+      target.push({ role: group.roles[0] ?? preferredRole(manifest, group.kind === 'DIMENSION'), field: available[fieldIndex]?.code ?? '' })
+    }
+  }
   return { dimensions, measures }
 }
 
