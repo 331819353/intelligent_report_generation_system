@@ -50,13 +50,22 @@ export const defaultCanvas: Canvas = {
   mobile: { columns: 1, gapY: 12, paddingX: 12, paddingY: 12 },
 }
 
-export type FieldBinding = { role: BindingRole; field: string }
+export type MetricAggregation = 'SUM' | 'AVG' | 'MIN' | 'MAX' | 'COUNT' | 'COUNT_DISTINCT'
+export type FieldBinding = { role: BindingRole; field: string; label?: string; aggregation?: MetricAggregation }
+
+export type ComponentFilterPolicy = {
+  /** 报告头筛选控件的当前值映射到本卡片数据集中的目标字段。 */
+  globalMappings: Array<{ filterId: string; field: string }>
+  /** 不创建报告头控件、只固定作用于本卡片的字段条件。 */
+  localFilters: Array<{ field: string; operator: 'EQUALS' | 'NOT_EQUALS'; value: string | number | boolean }>
+}
 
 export type DataBinding = {
   bindingMode: BindingMode
   dataContextId?: string
   dimensions?: FieldBinding[]
   measures?: FieldBinding[]
+  filterPolicy?: ComponentFilterPolicy
   semanticQueryRef?: Record<string, unknown>
 }
 

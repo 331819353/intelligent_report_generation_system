@@ -56,8 +56,8 @@ function dataShape(component: ReportComponent, result: QueryResult): DataShape {
   return {
     dimensionIndexes,
     measureIndexes,
-    dimensionNames: dimensionIndexes.map((position, order) => result.columns[position] ?? dimensions[order]?.field ?? `维度 ${order + 1}`),
-    measureNames: measureIndexes.map((position, order) => result.columns[position] ?? measures[order]?.field ?? `指标 ${order + 1}`),
+    dimensionNames: dimensionIndexes.map((position, order) => dimensions[order]?.label || result.columns[position] || dimensions[order]?.field || `维度 ${order + 1}`),
+    measureNames: measureIndexes.map((position, order) => measures[order]?.label || result.columns[position] || measures[order]?.field || `指标 ${order + 1}`),
     rows: result.rows,
     labels: result.rows.map((row, rowIndex) => String(row[dimensionIndexes[0] ?? -1] ?? `对象 ${rowIndex + 1}`)),
     values: measureIndexes.map(position => result.rows.map(row => numeric(row[position]))),
@@ -461,23 +461,20 @@ function MetricPill({ label, value, positive }: { label: string; value: string; 
 
 function MetricStatusCard({ component, shape, variant, mode }: { component: ReportComponent; shape: DataShape; variant: AnalysisCardVariant; mode: AnalysisCardSizeMode }) {
   const primary = valueAt(shape)
+  const auxiliaries = shape.measureNames.slice(1, 3).map((label, index) => ({ label, measure: index + 1 }))
+  const pills = auxiliaries.map(item => <MetricPill key={`${item.label}-${item.measure}`} label={item.label}
+    value={formatValue(component, valueAt(shape, item.measure))} positive={valueAt(shape, item.measure) >= 0} />)
   if (variant === '01') return <div className="report-analysis-kpi-layout is-hero-deltas">
     <span className="report-analysis-eyebrow">{shape.measureNames[0] || '核心指标'}</span>
     <strong className="report-analysis-hero-value">{formatValue(component, primary)}</strong>
-    <div className="report-analysis-pill-row">
-      <MetricPill label={shape.measureNames[1] || '同比'} value={formatValue(component, valueAt(shape, 1))} positive={valueAt(shape, 1) >= 0} />
-      <MetricPill label={shape.measureNames[2] || '环比'} value={formatValue(component, valueAt(shape, 2))} positive={valueAt(shape, 2) >= 0} />
-    </div>
+    {pills.length > 0 && <div className="report-analysis-pill-row">{pills}</div>}
   </div>
   if (variant === '03') return <div className="report-analysis-kpi-layout is-orbit-score">
     <img className="report-analysis-kpi-orbit" src="/report-assets/kpi-orbit.png" alt="" aria-hidden="true" />
     <strong className="report-analysis-orbit-value">{formatValue(component, primary)}</strong>
-    <div className="report-analysis-pill-row">
-      <MetricPill label={shape.measureNames[1] || '同比'} value={formatValue(component, valueAt(shape, 1))} positive={valueAt(shape, 1) >= 0} />
-      <MetricPill label={shape.measureNames[2] || '环比'} value={formatValue(component, valueAt(shape, 2))} positive={valueAt(shape, 2) >= 0} />
-    </div>
+    {pills.length > 0 && <div className="report-analysis-pill-row">{pills}</div>}
   </div>
-  const maximum = Math.max(Math.abs(primary), Math.abs(valueAt(shape, 1)), 100)
+  const maximum = Math.max(Math.abs(primary), ...auxiliaries.map(item => Math.abs(valueAt(shape, item.measure))), 100)
   const option: ChartOption = {
     ...baseOption(variant, mode), legend: { show: false },
     series: [{
@@ -492,10 +489,9 @@ function MetricStatusCard({ component, shape, variant, mode }: { component: Repo
   }
   return <div className="report-analysis-kpi-layout is-comparison-ring">
     <AnalysisECharts option={option} label="指标状态环" className="is-kpi-ring" />
-    <div className="report-analysis-kpi-sides">
-      <span><small>{shape.measureNames[1] || '对比一'}</small><strong>{formatValue(component, valueAt(shape, 1))}</strong></span>
-      <span><small>{shape.measureNames[2] || '对比二'}</small><strong>{formatValue(component, valueAt(shape, 2))}</strong></span>
-    </div>
+    {auxiliaries.length > 0 && <div className="report-analysis-kpi-sides">
+      {auxiliaries.map(item => <span key={`${item.label}-${item.measure}`}><small>{item.label}</small><strong>{formatValue(component, valueAt(shape, item.measure))}</strong></span>)}
+    </div>}
   </div>
 }
 

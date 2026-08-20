@@ -81,6 +81,16 @@ func (runner *DatasetVersionRunner) ExecuteDatasetFields(ctx context.Context, re
 		slog.Warn("report dataset query failed", "dataset_id", request.DatasetID, "dataset_version_id", request.DatasetVersionID, "error", err)
 		return QueryResult{}, err
 	}
+	for _, binding := range request.Measures {
+		formula := strings.ToUpper(strings.TrimSpace(binding.Aggregation))
+		if formula == "" {
+			continue
+		}
+		governed := strings.ToUpper(strings.TrimSpace(contract.Measures[binding.Field].Aggregation))
+		if governed == "" || formula != governed {
+			return QueryResult{}, fmt.Errorf("measure %q formula %q does not match governed dataset aggregation %q", binding.Field, formula, governed)
+		}
+	}
 	indexes := make(map[string]int, len(preview.Columns))
 	for index, column := range preview.Columns {
 		indexes[column] = index
@@ -158,6 +168,13 @@ func datasetPredicates(dataContextID askdata.ID, filters []ResolvedFilter) ([]qu
 		}
 		appendPredicate := func(operator string, value any) {
 			result = append(result, queryruntime.VersionPredicate{FieldCode: field, Operator: operator, Value: value})
+		}
+		if operator := strings.ToUpper(strings.TrimSpace(filter.Operator)); operator != "" {
+			if operator != "EQUALS" && operator != "NOT_EQUALS" {
+				return nil, fmt.Errorf("dataset report filter %q has an unsupported operator", filter.ID)
+			}
+			appendPredicate(operator, filter.Value)
+			continue
 		}
 		switch value := filter.Value.(type) {
 		case string, bool, json.Number, float64, float32, int, int64:

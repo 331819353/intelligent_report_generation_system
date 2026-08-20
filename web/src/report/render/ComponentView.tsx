@@ -144,13 +144,13 @@ function MetricView({ component, result }: { component: ReportComponent; result:
         .filter(item => item.index > primary.index && item.index < nextPrimary && item.binding.role === 'TOOLTIP')
       const valueIndex = columnIndex(primary.index)
       return <article key={primary.binding.field + '-' + primary.index}>
-        <span>{result.columns[valueIndex] || primary.binding.field}</span>
+        <span>{primary.binding.label || result.columns[valueIndex] || primary.binding.field}</span>
         <strong>{formatNumber(result.rows[0]?.[valueIndex], component.options.numberFormat)}</strong>
         {comparisons.length > 0 && <div>
           {comparisons.map(item => {
             const index = columnIndex(item.index)
             return <em key={item.binding.field + '-' + item.index}>
-              <small>{result.columns[index] || item.binding.field}</small>{formatNumber(result.rows[0]?.[index], component.options.numberFormat)}
+              <small>{item.binding.label || result.columns[index] || item.binding.field}</small>{formatNumber(result.rows[0]?.[index], component.options.numberFormat)}
             </em>
           })}
         </div>}

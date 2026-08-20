@@ -3,7 +3,7 @@ import type { ComponentManifest, ManifestIndex } from '../render/manifests.ts'
 import { editorBindingGroups, minimumSize, recommendedSize } from '../render/manifests.ts'
 import {
   canvasOf, findBlock, findComponentBlock, orderedSections,
-  type BlockType, type ComponentOptions, type FieldBinding, type GlobalFilter,
+  type BlockType, type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type MetricAggregation,
   type Block, type GridRect, type Page, type ReportComponent, type ReportDefinition, type Section, type Zone,
 } from '../render/schema.ts'
 import { findFreeRect, resolveLayout, resolveSlotPlacement } from './placement.ts'
@@ -356,6 +356,19 @@ export function defaultBinding(
   return { dimensions, measures }
 }
 
+const metricAggregations = new Set<MetricAggregation>(['SUM', 'AVG', 'MIN', 'MAX', 'COUNT', 'COUNT_DISTINCT'])
+
+/** 把受治理字段的中文名与聚合口径快照到卡片绑定，渲染和审计不再回退到技术字段码。 */
+export function bindingForField(role: FieldBinding['role'], field?: DataContextField): FieldBinding {
+  if (!field) return { role, field: '' }
+  const aggregation = field.aggregation?.toUpperCase() as MetricAggregation
+  return {
+    role, field: field.code,
+    ...(field.name?.trim() ? { label: field.name.trim() } : {}),
+    ...(field.role === 'MEASURE' && metricAggregations.has(aggregation) ? { aggregation } : {}),
+  }
+}
+
 /** 组件构造在「新建卡片」与「加入卡片」之间共用，避免两处默认值漂移。 */
 function buildComponent(
   componentId: string, manifest: ComponentManifest, title: string,
@@ -488,7 +501,7 @@ export function removeComponentOperations(page: Page, componentId: string): Edit
 export function updateComponentOperations(
   component: ReportComponent,
   options: ComponentOptions,
-  binding: { dimensions: FieldBinding[]; measures: FieldBinding[] } | undefined,
+  binding: { dimensions: FieldBinding[]; measures: FieldBinding[]; filterPolicy?: ComponentFilterPolicy } | undefined,
   dataContextId: string | undefined,
 ): EditorOperation[] {
   const operations: EditorOperation[] = [

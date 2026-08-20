@@ -403,11 +403,32 @@ const (
 )
 
 type DataBinding struct {
-	BindingMode      BindingMode       `json:"bindingMode"`
-	SemanticQueryRef *SemanticQueryRef `json:"semanticQueryRef,omitempty"`
-	DataContextID    *askdata.ID       `json:"dataContextId,omitempty"`
-	Dimensions       []FieldBinding    `json:"dimensions,omitempty"`
-	Measures         []FieldBinding    `json:"measures,omitempty"`
+	BindingMode      BindingMode            `json:"bindingMode"`
+	SemanticQueryRef *SemanticQueryRef      `json:"semanticQueryRef,omitempty"`
+	DataContextID    *askdata.ID            `json:"dataContextId,omitempty"`
+	Dimensions       []FieldBinding         `json:"dimensions,omitempty"`
+	Measures         []FieldBinding         `json:"measures,omitempty"`
+	FilterPolicy     *ComponentFilterPolicy `json:"filterPolicy,omitempty"`
+}
+
+// ComponentFilterPolicy keeps a card's filtering contract separate from the
+// report header controls. GlobalMappings reuse the selected value of an
+// existing report-wide control and translate it to this dataset's field;
+// LocalFilters are fixed predicates that belong only to this card.
+type ComponentFilterPolicy struct {
+	GlobalMappings []GlobalFilterMapping `json:"globalMappings"`
+	LocalFilters   []LocalFilter         `json:"localFilters"`
+}
+
+type GlobalFilterMapping struct {
+	FilterID askdata.ID `json:"filterId"`
+	Field    string     `json:"field"`
+}
+
+type LocalFilter struct {
+	Field    string `json:"field"`
+	Operator string `json:"operator"`
+	Value    any    `json:"value"`
 }
 
 // MarshalJSON preserves the closed union shape: semantic bindings never emit
@@ -424,15 +445,17 @@ func (binding DataBinding) MarshalJSON() ([]byte, error) {
 		})
 	}
 	return json.Marshal(struct {
-		BindingMode   BindingMode    `json:"bindingMode"`
-		DataContextID *askdata.ID    `json:"dataContextId,omitempty"`
-		Dimensions    []FieldBinding `json:"dimensions"`
-		Measures      []FieldBinding `json:"measures"`
+		BindingMode   BindingMode            `json:"bindingMode"`
+		DataContextID *askdata.ID            `json:"dataContextId,omitempty"`
+		Dimensions    []FieldBinding         `json:"dimensions"`
+		Measures      []FieldBinding         `json:"measures"`
+		FilterPolicy  *ComponentFilterPolicy `json:"filterPolicy,omitempty"`
 	}{
 		BindingMode:   binding.BindingMode,
 		DataContextID: binding.DataContextID,
 		Dimensions:    binding.Dimensions,
 		Measures:      binding.Measures,
+		FilterPolicy:  binding.FilterPolicy,
 	})
 }
 
@@ -467,8 +490,10 @@ const (
 )
 
 type FieldBinding struct {
-	Role  BindingRole `json:"role"`
-	Field string      `json:"field"`
+	Role        BindingRole `json:"role"`
+	Field       string      `json:"field"`
+	Label       string      `json:"label,omitempty"`
+	Aggregation string      `json:"aggregation,omitempty"`
 }
 
 // ComponentOptions contains only renderer-independent V1 options. The
@@ -722,12 +747,28 @@ func (definition ReportDefinition) Validate() error {
 	}
 
 	filterIDs := map[askdata.ID]struct{}{}
+	filtersByID := map[askdata.ID]GlobalFilter{}
 	for index, filter := range definition.GlobalFilters {
 		if err := addUniqueID(filterIDs, filter.ID, fmt.Sprintf("globalFilters[%d].id", index)); err != nil {
 			return err
 		}
 		if err := filter.validate(contextIDs, pageIDs, sectionIDs, blockIDs, componentIDs); err != nil {
 			return fmt.Errorf("globalFilters[%d]: %w", index, err)
+		}
+		filtersByID[filter.ID] = filter
+	}
+	for index, component := range definition.Components {
+		if component.DataBinding == nil || component.DataBinding.FilterPolicy == nil {
+			continue
+		}
+		for mappingIndex, mapping := range component.DataBinding.FilterPolicy.GlobalMappings {
+			filter, exists := filtersByID[mapping.FilterID]
+			if !exists {
+				return fmt.Errorf("components[%d].dataBinding.filterPolicy.globalMappings[%d].filterId does not reference a global filter", index, mappingIndex)
+			}
+			if filter.Scope.Type != FilterScopeReport {
+				return fmt.Errorf("components[%d].dataBinding.filterPolicy.globalMappings[%d] must reference a report-scoped filter", index, mappingIndex)
+			}
 		}
 	}
 
@@ -1084,7 +1125,7 @@ func (component Component) validate(contextIDs map[askdata.ID]struct{}) error {
 func (binding DataBinding) validate(contextIDs map[askdata.ID]struct{}) error {
 	switch binding.BindingMode {
 	case BindingSemanticIR:
-		if binding.SemanticQueryRef == nil || binding.DataContextID != nil || len(binding.Dimensions) != 0 || len(binding.Measures) != 0 {
+		if binding.SemanticQueryRef == nil || binding.DataContextID != nil || len(binding.Dimensions) != 0 || len(binding.Measures) != 0 || binding.FilterPolicy != nil {
 			return errors.New("SEMANTIC_IR requires semanticQueryRef and forbids dataset fields")
 		}
 		return binding.SemanticQueryRef.validate()
@@ -1111,6 +1152,11 @@ func (binding DataBinding) validate(contextIDs map[askdata.ID]struct{}) error {
 				return fmt.Errorf("field binding %d is duplicated", index)
 			}
 			seen[key] = struct{}{}
+		}
+		if binding.FilterPolicy != nil {
+			if err := binding.FilterPolicy.validate(); err != nil {
+				return fmt.Errorf("filterPolicy: %w", err)
+			}
 		}
 	default:
 		return errors.New("bindingMode is invalid")
@@ -1191,7 +1237,63 @@ func (binding FieldBinding) validate() error {
 	if !fieldPattern.MatchString(binding.Field) {
 		return errors.New("field must be a logical field identifier")
 	}
+	if len([]rune(binding.Label)) > 200 {
+		return errors.New("label exceeds 200 characters")
+	}
+	if binding.Aggregation != "" && !oneOfString(strings.ToUpper(binding.Aggregation), "SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT") {
+		return errors.New("aggregation is invalid")
+	}
 	return nil
+}
+
+func (policy ComponentFilterPolicy) validate() error {
+	if policy.GlobalMappings == nil || policy.LocalFilters == nil {
+		return errors.New("globalMappings and localFilters must be JSON arrays, not null")
+	}
+	if len(policy.GlobalMappings) > 16 || len(policy.LocalFilters) > 16 {
+		return errors.New("filter policy exceeds 16 items per section")
+	}
+	seenFilters := map[askdata.ID]struct{}{}
+	for index, mapping := range policy.GlobalMappings {
+		if mapping.FilterID.Validate() != nil || !fieldPattern.MatchString(mapping.Field) {
+			return fmt.Errorf("globalMappings[%d] is invalid", index)
+		}
+		if _, duplicate := seenFilters[mapping.FilterID]; duplicate {
+			return fmt.Errorf("globalMappings[%d].filterId is duplicated", index)
+		}
+		seenFilters[mapping.FilterID] = struct{}{}
+	}
+	seenLocalFields := map[string]struct{}{}
+	for index, filter := range policy.LocalFilters {
+		if !fieldPattern.MatchString(filter.Field) || !oneOfString(strings.ToUpper(filter.Operator), "EQUALS", "NOT_EQUALS") || !validLocalFilterValue(filter.Value) {
+			return fmt.Errorf("localFilters[%d] is invalid", index)
+		}
+		if _, duplicate := seenLocalFields[filter.Field]; duplicate {
+			return fmt.Errorf("localFilters[%d].field is duplicated", index)
+		}
+		seenLocalFields[filter.Field] = struct{}{}
+	}
+	return nil
+}
+
+func validLocalFilterValue(value any) bool {
+	switch value := value.(type) {
+	case string:
+		return strings.TrimSpace(value) != "" && len([]rune(value)) <= MaxStringLength
+	case bool, json.Number, float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return true
+	default:
+		return false
+	}
+}
+
+func oneOfString(value string, allowed ...string) bool {
+	for _, item := range allowed {
+		if value == item {
+			return true
+		}
+	}
+	return false
 }
 
 func (options ComponentOptions) validate() error {

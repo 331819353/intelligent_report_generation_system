@@ -94,6 +94,7 @@ type ResolvedFilter struct {
 	ID            askdata.ID `json:"id"`
 	Field         string     `json:"field"`
 	DataContextID askdata.ID `json:"dataContextId"`
+	Operator      string     `json:"operator,omitempty"`
 	Value         any        `json:"value"`
 	Temporary     bool       `json:"temporary"`
 }
@@ -301,6 +302,23 @@ func ResolveFilters(definition report.ReportDefinition, pageID, sectionID, block
 		specificity int
 	}
 	resolved := map[string]candidate{}
+	var component *report.Component
+	for index := range definition.Components {
+		if definition.Components[index].ID == componentID {
+			component = &definition.Components[index]
+			break
+		}
+	}
+	var policy *report.ComponentFilterPolicy
+	mappings := map[askdata.ID]string{}
+	if component != nil && component.DataBinding != nil && component.DataBinding.BindingMode == report.BindingDatasetField {
+		policy = component.DataBinding.FilterPolicy
+		if policy != nil {
+			for _, mapping := range policy.GlobalMappings {
+				mappings[mapping.FilterID] = mapping.Field
+			}
+		}
+	}
 	for _, filter := range definition.GlobalFilters {
 		specificity, applies := filterSpecificity(filter.Scope, pageID, sectionID, blockID, componentID)
 		if !applies {
@@ -313,14 +331,36 @@ func ResolveFilters(definition report.ReportDefinition, pageID, sectionID, block
 		if value == nil {
 			continue
 		}
-		key := filterBindingKey(filter.FieldRef.DataContextID, filter.FieldRef.Field)
+		dataContextID := filter.FieldRef.DataContextID
+		field := filter.FieldRef.Field
+		if policy != nil {
+			mappedField, mapped := mappings[filter.ID]
+			if !mapped || component.DataBinding.DataContextID == nil {
+				continue
+			}
+			dataContextID, field = *component.DataBinding.DataContextID, mappedField
+		}
+		key := filterBindingKey(dataContextID, field)
 		current, exists := resolved[key]
 		if exists && (current.specificity > specificity || (current.specificity == specificity && current.filter.ID < filter.ID)) {
 			continue
 		}
 		resolved[key] = candidate{
-			filter:      ResolvedFilter{ID: filter.ID, Field: filter.FieldRef.Field, DataContextID: filter.FieldRef.DataContextID, Value: value},
+			filter:      ResolvedFilter{ID: filter.ID, Field: field, DataContextID: dataContextID, Value: value},
 			specificity: specificity,
+		}
+	}
+	if policy != nil && component.DataBinding.DataContextID != nil {
+		for index, filter := range policy.LocalFilters {
+			key := filterBindingKey(*component.DataBinding.DataContextID, filter.Field)
+			resolved[key] = candidate{
+				filter: ResolvedFilter{
+					ID:    askdata.ID(fmt.Sprintf("%s:local:%02d", componentID, index+1)),
+					Field: filter.Field, DataContextID: *component.DataBinding.DataContextID,
+					Operator: strings.ToUpper(filter.Operator), Value: filter.Value,
+				},
+				specificity: 6,
+			}
 		}
 	}
 	for _, filter := range temporary {

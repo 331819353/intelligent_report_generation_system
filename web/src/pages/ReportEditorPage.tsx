@@ -22,16 +22,17 @@ import { EvidencePanel } from '../report/designer/EvidencePanel'
 import { DataContextPanel, DefinitionJSONDialog, FilterPanel } from '../report/designer/DataPanels'
 import { ComponentPalette } from '../report/designer/ComponentPalette'
 import { ComponentBindingEditor } from '../report/designer/ComponentBindingEditor'
+import { MetricStatusConfiguration } from '../report/designer/MetricStatusConfiguration'
 import {
   editorBindingGroups, editorBindingsValid, emptyManifestIndex, indexManifests, latestComponentManifests, listComponentManifests, minimumSize,
   type ComponentManifest, type ManifestIndex,
 } from '../report/render/manifests'
 import {
   canvasOf, findBlock, findComponentBlock, orderedPages, orderedSections,
-  type ComponentOptions, type FieldBinding, type GlobalFilter, type Page, type ReportDefinition, type ReportHeaderStyle, type ReportType,
+  type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type Page, type ReportDefinition, type ReportHeaderStyle, type ReportType,
 } from '../report/render/schema'
 import {
-  addComponentOperations, addDataContextOperations, bundle, createFilterOperations, createInteractionOperations,
+  addComponentOperations, addDataContextOperations, bindingForField, bundle, createFilterOperations, createInteractionOperations,
   createSectionOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, layoutOperations,
   findCompatibleTemplateSlot, placeComponentInSlotOperations,
   removeBlockOperations, removeComponentOperations, removeDataContextOperations, renameSectionOperations,
@@ -304,7 +305,7 @@ function NewReportTaskPanel({
 
 export type ManualEditResult = {
   options: ComponentOptions
-  binding?: { dimensions: FieldBinding[]; measures: FieldBinding[] }
+  binding?: { dimensions: FieldBinding[]; measures: FieldBinding[]; filterPolicy?: ComponentFilterPolicy }
   /** 卡片绑定的数据集（报告内的数据上下文）；改绑数据集会随绑定一起写入。 */
   dataContextId?: string
   /** 更换展示类型：先 COMPONENT_REPLACE 到新清单，再写入属性与绑定。 */
@@ -390,7 +391,7 @@ function pruneOptions(options: ComponentOptions, manifest: ComponentManifest): C
  * 卡片配置面板（右侧内联）：数据集 → 展示类型 → 指标（度量）与维度 → 过滤字段 → 样式。
  * 保存走 COMPONENT_REPLACE / COMPONENT_UPDATE / DATA_BINDING_UPDATE 受控 Operation。
  */
-function CardInspector({ mode, component, manifest: currentManifest, manifests, reportContexts, contextNameOf, fieldsOf, defaultContextId, canAI, onSuggest, busy, error, onClose, onSave, filterPanel, filterCount, filterFields }: {
+function CardInspector({ mode, component, manifest: currentManifest, manifests, reportContexts, contextNameOf, fieldsOf, defaultContextId, canAI, onSuggest, busy, error, onClose, onSave, filterPanel, filterCount, filterFields, globalFilters }: {
   mode: 'data' | 'appearance'
   component?: EditorComponent
   manifest?: ComponentManifest
@@ -400,6 +401,8 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
   filterCount: number
   /** 当前实际生效的过滤字段，用于和数据集、指标、维度一起形成完整映射。 */
   filterFields: FilterFieldSummary[]
+  /** 报告头已经配置的筛选控件；指标状态卡只引用它们，不重复创建控件。 */
+  globalFilters: GlobalFilter[]
   /** 可切换的展示类型（组件清单）。 */
   manifests: ComponentManifest[]
   /** 报告内已声明的数据集。 */
@@ -415,16 +418,40 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
   onClose: () => void
   onSave: (result: ManualEditResult) => void
 }) {
+  const initialContextId = component?.dataBinding?.dataContextId ?? defaultContextId
+  const hydrateInitialMetric = (binding: FieldBinding, role = binding.role) => {
+    if (currentManifest?.type !== 'analysis-metric-status') return binding
+    const field = fieldsOf(initialContextId).find(item => item.code === binding.field)
+    return { ...bindingForField(role, field), ...(binding.label?.trim() ? { label: binding.label.trim() } : {}) }
+  }
   const [options, setOptions] = useState<ComponentOptions>(() => ({ ...component?.options }))
   const [dimensions, setDimensions] = useState<FieldBinding[]>(component?.dataBinding?.dimensions ?? [])
-  const [measures, setMeasures] = useState<FieldBinding[]>(component?.dataBinding?.measures ?? [])
-  const [dataContextId, setDataContextId] = useState(component?.dataBinding?.dataContextId ?? defaultContextId)
+  const [measures, setMeasures] = useState<FieldBinding[]>(() => {
+    const existing = component?.dataBinding?.measures ?? []
+    if (currentManifest?.type !== 'analysis-metric-status') return existing
+    return existing.slice(0, 3).map((binding, index) => hydrateInitialMetric(binding, index === 0 ? 'VALUE' : 'TOOLTIP'))
+  })
+  const [dataContextId, setDataContextId] = useState(initialContextId)
+  const [filterPolicy, setFilterPolicy] = useState<ComponentFilterPolicy>(() => {
+    if (component?.dataBinding?.filterPolicy) return {
+      globalMappings: [...component.dataBinding.filterPolicy.globalMappings],
+      localFilters: [...component.dataBinding.filterPolicy.localFilters],
+    }
+    const contextID = initialContextId
+    const available = fieldsOf(contextID)
+    return {
+      globalMappings: globalFilters.filter(filter => filter.scope.type === 'REPORT' && filter.fieldRef.dataContextId === contextID && available.some(field => field.code === filter.fieldRef.field))
+        .map(filter => ({ filterId: filter.id, field: filter.fieldRef.field })),
+      localFilters: [],
+    }
+  })
   const [manifestRef, setManifestRef] = useState(currentManifest ? `${currentManifest.type}@${currentManifest.version}` : '')
   const [suggesting, setSuggesting] = useState(false)
   const [suggestion, setSuggestion] = useState<BindingSuggestion | null>(null)
   const [suggestError, setSuggestError] = useState('')
 
   const manifest = manifests.find(item => `${item.type}@${item.version}` === manifestRef) ?? currentManifest
+  const metricStatus = manifest?.type === 'analysis-metric-status'
   const replacing = Boolean(currentManifest && manifest && (manifest.type !== currentManifest.type || manifest.version !== currentManifest.version))
   const fields = fieldsOf(dataContextId)
   const contract = manifest?.dataContract
@@ -437,9 +464,17 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
   const dimensionFields = fields.filter(field => field.role !== 'MEASURE')
   const measureFields = fields.filter(field => field.role === 'MEASURE')
   const bindable = Boolean(contract) && fields.length > 0 && !semanticBound
-  const complete = dimensions.every(item => item.field && item.role && dimensionFields.some(field => field.code === item.field)) &&
+  const complete = (metricStatus ? [] : dimensions).every(item => item.field && item.role && dimensionFields.some(field => field.code === item.field)) &&
     measures.every(item => item.field && item.role && measureFields.some(field => field.code === item.field))
-  const bindingValid = !bindable || Boolean(manifest && editorBindingsValid(manifest, dimensions, measures) && complete)
+  const metricMeasuresValid = !metricStatus || (
+    measures.filter(item => item.role === 'VALUE').length === 1 && measures.filter(item => item.role === 'TOOLTIP').length <= 2 &&
+    measures.every(item => Boolean(item.label?.trim()) && Boolean(item.field) && Boolean(item.aggregation))
+  )
+  const metricFiltersValid = !metricStatus || (
+    filterPolicy.globalMappings.every(mapping => globalFilters.some(filter => filter.id === mapping.filterId && filter.scope.type === 'REPORT') && fields.some(field => field.code === mapping.field)) &&
+    filterPolicy.localFilters.every(filter => fields.some(field => field.code === filter.field) && filter.value !== '')
+  )
+  const bindingValid = !bindable || Boolean(manifest && editorBindingsValid(manifest, metricStatus ? [] : dimensions, measures) && complete && metricMeasuresValid && metricFiltersValid)
   const resultSummary = manifest ? bindingResultSummary(manifest, fields, dimensions, measures) : ''
 
   // 表现属性直接由清单的 optionSchema 生成，避免面板与渲染器各自维护一份白名单。
@@ -450,14 +485,22 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
   const setOption = (name: string, value: unknown) =>
     setOptions(current => ({ ...current, [name]: value }))
 
-  const applyBinding = (next: { dimensions: FieldBinding[]; measures: FieldBinding[] }) => {
-    setDimensions(next.dimensions.filter(item => item.field))
-    setMeasures(next.measures.filter(item => item.field))
+  const applyBinding = (next: { dimensions: FieldBinding[]; measures: FieldBinding[] }, contextID = dataContextId, forMetricStatus = metricStatus) => {
+    const decorate = (item: FieldBinding) => {
+      if (!forMetricStatus) return item
+      const governed = fieldsOf(contextID).find(field => field.code === item.field)
+      const base = bindingForField(item.role, governed)
+      return { ...base, ...(item.label?.trim() ? { label: item.label.trim() } : {}) }
+    }
+    setDimensions((forMetricStatus ? [] : next.dimensions).filter(item => item.field).map(decorate))
+    const nextMeasures = next.measures.filter(item => item.field)
+    setMeasures((forMetricStatus ? nextMeasures.slice(0, 3).map((item, index) => ({ ...item, role: index === 0 ? 'VALUE' as const : 'TOOLTIP' as const })) : nextMeasures).map(decorate))
   }
   const changeContext = (nextId: string) => {
     setDataContextId(nextId); setSuggestion(null); setSuggestError('')
     // 换数据集后旧字段不再成立：按新数据集的字段角色重新填充下限绑定。
-    if (manifest) applyBinding(defaultBinding(manifest, fieldsOf(nextId)))
+    if (manifest) applyBinding(defaultBinding(manifest, fieldsOf(nextId)), nextId, manifest.type === 'analysis-metric-status')
+    setFilterPolicy({ globalMappings: [], localFilters: [] })
   }
   const changeManifest = (ref: string) => {
     setManifestRef(ref); setSuggestion(null); setSuggestError('')
@@ -466,7 +509,8 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
     // 表现属性只保留新清单 optionSchema 认识的键（标题/副标题始终保留），否则服务端会拒绝未知选项。
     setOptions(current => pruneOptions(current, next))
     // 组件类型变化时按它自己的编辑档案重建最小字段集合，避免把旧图形角色带入新图形。
-    applyBinding(defaultBinding(next, fields))
+    applyBinding(defaultBinding(next, fields), dataContextId, next.type === 'analysis-metric-status')
+    if (next.type === 'analysis-metric-status') setFilterPolicy({ globalMappings: [], localFilters: [] })
   }
   const suggest = async () => {
     if (!onSuggest || !manifest) return
@@ -487,7 +531,7 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
 
   const save = () => onSave({
     options: { ...(manifest ? pruneOptions(options, manifest) : options), title: options.title?.trim(), subtitle: options.subtitle?.trim() },
-    binding: bindable ? { dimensions, measures } : undefined,
+    binding: bindable ? { dimensions: metricStatus ? [] : dimensions, measures, ...(metricStatus ? { filterPolicy } : component?.dataBinding?.filterPolicy ? { filterPolicy: component.dataBinding.filterPolicy } : {}) } : undefined,
     dataContextId: bindable ? dataContextId : undefined,
     replaceWith: replacing ? manifest : undefined,
   })
@@ -503,8 +547,8 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
       <div className="report-editor-manual-form">
         {mode === 'data' && <>
         <section className="report-profile-source">
-          <header><Database size={16} /><div><strong>先确定分析基础</strong><small>选择这张图使用的数据和呈现方式</small></div></header>
-          {!semanticBound && reportContexts.length > 0 && <label>数据来源
+          <header><Database size={16} /><div><strong>{metricStatus ? '数据源' : '先确定分析基础'}</strong><small>{metricStatus ? '指标值与局部过滤值均来自所选数据集' : '选择这张图使用的数据和呈现方式'}</small></div></header>
+          {!semanticBound && reportContexts.length > 0 && <label>{metricStatus ? '数据集' : '数据来源'}
             <select aria-label="卡片数据集" value={dataContextId} onChange={event => changeContext(event.target.value)}>
               {reportContexts.map(context => <option key={context.id} value={context.id}>{contextNameOf(context.id)}</option>)}
             </select>
@@ -514,6 +558,9 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
               {switchable.map(item => <option key={item.type + '@' + item.version} value={item.type + '@' + item.version}>{item.displayName}</option>)}
             </select>
           </label>}
+          <label>卡片标题
+            <input value={options.title ?? ''} maxLength={200} placeholder="请输入卡片标题" onChange={event => setOption('title', event.target.value)} />
+          </label>
           {replacing && <p className="report-editor-binding-note"><Info size={13} />应用后改为「{manifest?.displayName}」，字段会按新组件合同重新配置。</p>}
         </section>
 
@@ -529,7 +576,7 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
 
         {bindable && contract && manifest && <section className="report-profile-fields">
           <header>
-            <div><strong>再回答几个业务问题</strong><small>不同图表只显示各自真正需要的内容</small></div>
+            <div><strong>{metricStatus ? '卡片配置' : '再回答几个业务问题'}</strong><small>{metricStatus ? '配置主指标、按需添加辅助指标与过滤项' : '不同图表只显示各自真正需要的内容'}</small></div>
             <div className="report-editor-binding-assist">
               <button type="button" disabled={busy || suggesting} title={canAI && onSuggest ? '根据图表用途智能选择合适字段' : '按字段类型生成一套可用配置'} onClick={recommend}>
                 {suggesting ? <SpinnerGap className="is-spinning" size={14} /> : <MagicWand size={14} />}{suggesting ? '推荐中…' : '智能推荐'}
@@ -538,11 +585,16 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
           </header>
           {suggestion && <p className="report-editor-binding-note"><Sparkle size={14} weight="fill" />已生成推荐配置{suggestion.rationale ? `：${suggestion.rationale}` : ''}。点击「应用」后生效。</p>}
           {suggestError && <p className="report-editor-inline-error"><WarningCircle size={15} />{suggestError}</p>}
-          <ComponentBindingEditor manifest={manifest} dimensions={dimensions} measures={measures}
-            dimensionFields={dimensionFields} measureFields={measureFields}
-            onDimensionsChange={setDimensions} onMeasuresChange={setMeasures} />
-          <BindingMappingSummary manifest={manifest} dataset={contextNameOf(dataContextId)} fields={fields}
-            dimensions={dimensions} measures={measures} filters={filterFields} />
+          {metricStatus ? <MetricStatusConfiguration
+            dataContextId={dataContextId} fields={fields} fieldsOf={fieldsOf} measures={measures}
+            globalFilters={globalFilters} filterPolicy={filterPolicy}
+            onMeasuresChange={setMeasures} onFilterPolicyChange={setFilterPolicy} /> : <>
+            <ComponentBindingEditor manifest={manifest} dimensions={dimensions} measures={measures}
+              dimensionFields={dimensionFields} measureFields={measureFields}
+              onDimensionsChange={setDimensions} onMeasuresChange={setMeasures} />
+            <BindingMappingSummary manifest={manifest} dataset={contextNameOf(dataContextId)} fields={fields}
+              dimensions={dimensions} measures={measures} filters={filterFields} />
+          </>}
           {!bindingValid && <p className="report-editor-inline-error"><WarningCircle size={15} />请完成该组件要求的核心字段配置</p>}
           {manifest.editorProfile && <section className="report-profile-result">
             <span><Eye size={17} /></span>
@@ -595,7 +647,7 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
           })}
         </div>}
         </>}
-        {mode === 'data' && filterPanel && <details className="report-inspector-disclosure">
+        {mode === 'data' && !metricStatus && filterPanel && <details className="report-inspector-disclosure">
           <summary>
             <span className="report-inspector-disclosure-icon"><Funnel size={16} /></span>
             <span><strong>卡片筛选</strong><small>{filterCount > 0 ? `${filterCount} 个条件已生效` : '可选，仅限制当前图表的数据'}</small></span>
@@ -1539,6 +1591,7 @@ export function ReportEditorPage() {
                 reportContexts={reportContexts} contextNameOf={contextNameOf} fieldsOf={fieldsOf} defaultContextId={currentDataContextId}
                 canAI={canAIEdit} onSuggest={suggestBinding}
                 busy={manualBusy || !canEdit} error={manualError} filterCount={selectedFilterCount} filterFields={selectedFilterFields}
+                globalFilters={displayedGlobalFilters}
                 onClose={() => setSelectedComponentId('')} onSave={result => void saveManual(result)}
                 filterPanel={sidePanel === 'data' ? <FilterPanel definition={draft.definition} candidates={contexts} fieldsOf={fieldsOf} selectedBlockId={selectedCardId}
                   onlyBlock defaultContextId={selectedComponent.dataBinding?.dataContextId ?? currentDataContextId}

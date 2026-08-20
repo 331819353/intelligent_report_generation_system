@@ -1202,6 +1202,76 @@
           "items": {
             "$ref": "#/$defs/fieldBinding"
           }
+        },
+        "filterPolicy": {
+          "$ref": "#/$defs/componentFilterPolicy"
+        }
+      }
+    },
+    "componentFilterPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "globalMappings",
+        "localFilters"
+      ],
+      "properties": {
+        "globalMappings": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/globalFilterMapping"
+          }
+        },
+        "localFilters": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/localFilter"
+          }
+        }
+      }
+    },
+    "globalFilterMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filterId",
+        "field"
+      ],
+      "properties": {
+        "filterId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "field": {
+          "$ref": "#/$defs/logicalField"
+        }
+      }
+    },
+    "localFilter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "operator",
+        "value"
+      ],
+      "properties": {
+        "field": {
+          "$ref": "#/$defs/logicalField"
+        },
+        "operator": {
+          "enum": [
+            "EQUALS",
+            "NOT_EQUALS"
+          ]
+        },
+        "value": {
+          "type": [
+            "string",
+            "number",
+            "boolean"
+          ]
         }
       }
     },
@@ -1434,6 +1504,20 @@
         },
         "field": {
           "$ref": "#/$defs/logicalField"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "aggregation": {
+          "enum": [
+            "SUM",
+            "AVG",
+            "MIN",
+            "MAX",
+            "COUNT",
+            "COUNT_DISTINCT"
+          ]
         }
       }
     },
