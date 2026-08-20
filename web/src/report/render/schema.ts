@@ -7,6 +7,7 @@
  */
 
 export type ReportType = 'REPORT' | 'DASHBOARD'
+export type ReportHeaderStyle = '01' | '02' | '03'
 export type BindingMode = 'SEMANTIC_IR' | 'DATASET_FIELD'
 export type BlockType = 'ANALYSIS_CARD' | 'KPI_GROUP' | 'CHART' | 'TABLE' | 'CONTENT' | 'FILTER'
 export type ZoneType = 'HEADER' | 'FILTER' | 'INSIGHT' | 'CONTENT' | 'FOOTER'
@@ -176,7 +177,7 @@ export type ReportDefinition = {
   schemaVersion: string
   metadata: {
     id: string; code: string; name: string; description?: string
-    reportType: ReportType; locale?: string
+    reportType: ReportType; headerStyle?: ReportHeaderStyle; locale?: string
   }
   templateRef?: Record<string, unknown>
   themeRef?: Record<string, unknown>

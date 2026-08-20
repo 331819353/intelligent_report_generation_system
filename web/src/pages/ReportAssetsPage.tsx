@@ -13,7 +13,7 @@ import { reportAssetsAPI, type AssetEvent, type PermissionGrant } from '../repor
 import { reportRuntimeAPI, type LoadedReport } from '../report/api/runtime'
 import { reportAssetFixtures } from '../report/assets/fixtures'
 import { canRun, filterAssets, lifecycleLabels, type ReportAction, type ReportAsset, type ReportLifecycle, type ReportScope } from '../report/assets/model'
-import { ReportFilterStrip } from '../report/render/ReportFilterStrip'
+import { ReportHeader } from '../report/render/ReportHeader'
 import { ReportPageView } from '../report/render/ReportPageView'
 import { emptyManifestIndex, indexManifests, listComponentManifests, type ManifestIndex } from '../report/render/manifests'
 import { orderedPages } from '../report/render/schema'
@@ -66,8 +66,8 @@ function AssetStructurePreview({ asset }: { asset: ReportAsset }) {
   return <div className="report-drawer-structure-preview">
     <p className="report-drawer-preview-note">已发布 v{loaded.versionNo} 的真实结构缩略图，数值需打开报告后按你的权限执行。</p>
     <div className="report-drawer-preview-frame" aria-label={`报告 v${loaded.versionNo} 结构缩略图`}>
-      <header className="report-drawer-document-header"><strong>{loaded.definition.metadata.name}</strong><span>固定报告头</span></header>
-      <ReportFilterStrip filters={loaded.definition.globalFilters ?? []} compact />
+      <ReportHeader style={loaded.definition.metadata.headerStyle || '01'} title={loaded.definition.metadata.name}
+        meta={[`已发布 v${loaded.versionNo}`, '固定报告头']} filters={loaded.definition.globalFilters ?? []} compact />
       {page && <ReportPageView definition={loaded.definition} page={page} manifests={manifests} designMode />}
     </div>
   </div>

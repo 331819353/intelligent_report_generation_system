@@ -60,12 +60,13 @@ type ReportDefinition struct {
 }
 
 type Metadata struct {
-	ID          askdata.ID `json:"id"`
-	Code        string     `json:"code"`
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	ReportType  ReportType `json:"reportType"`
-	Locale      string     `json:"locale"`
+	ID          askdata.ID        `json:"id"`
+	Code        string            `json:"code"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	ReportType  ReportType        `json:"reportType"`
+	HeaderStyle ReportHeaderStyle `json:"headerStyle,omitempty"`
+	Locale      string            `json:"locale"`
 }
 
 type ReportType string
@@ -73,6 +74,14 @@ type ReportType string
 const (
 	ReportTypeReport    ReportType = "REPORT"
 	ReportTypeDashboard ReportType = "DASHBOARD"
+)
+
+type ReportHeaderStyle string
+
+const (
+	ReportHeaderStyle01 ReportHeaderStyle = "01"
+	ReportHeaderStyle02 ReportHeaderStyle = "02"
+	ReportHeaderStyle03 ReportHeaderStyle = "03"
 )
 
 type TemplateReference struct {
@@ -746,6 +755,9 @@ func (metadata Metadata) validate() error {
 	}
 	if metadata.ReportType != ReportTypeReport && metadata.ReportType != ReportTypeDashboard {
 		return errors.New("reportType is invalid")
+	}
+	if metadata.HeaderStyle != "" && metadata.HeaderStyle != ReportHeaderStyle01 && metadata.HeaderStyle != ReportHeaderStyle02 && metadata.HeaderStyle != ReportHeaderStyle03 {
+		return errors.New("headerStyle is invalid")
 	}
 	if !localePattern.MatchString(metadata.Locale) {
 		return errors.New("locale is invalid")

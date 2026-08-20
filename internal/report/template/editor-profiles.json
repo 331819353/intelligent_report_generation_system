@@ -2631,6 +2631,57 @@
           "addLabel": "选择结果数量"
         }
       ]
+    },
+    {
+      "componentType": "analysis-long-form-conclusion",
+      "componentVersion": "1.0.0",
+      "example": {
+        "title": "长文本结论卡",
+        "description": "如何完整表达综合分析结论？",
+        "items": [
+          "常见子类型：综合结论、经营复盘、问题总结、证据链",
+          "常用呈现：指标上置双栏正文、正文主栏指标侧栏、分段论据嵌入指标"
+        ]
+      },
+      "bindingGroups": [
+        {
+          "id": "scope",
+          "label": "结论对象",
+          "description": "业务链群、区域、产品或其他结论适用对象",
+          "kind": "DIMENSION",
+          "roles": [
+            "LABEL",
+            "DETAIL"
+          ],
+          "min": 1,
+          "max": 3,
+          "addLabel": "添加结论对象"
+        },
+        {
+          "id": "evidence",
+          "label": "核心证据",
+          "description": "正文重点引用的指标、比率与业务结果",
+          "kind": "MEASURE",
+          "roles": [
+            "VALUE"
+          ],
+          "min": 1,
+          "max": 4,
+          "addLabel": "添加证据指标"
+        },
+        {
+          "id": "comparison",
+          "label": "变化证据",
+          "description": "可选，用同比、环比或目标差补充论据",
+          "kind": "MEASURE",
+          "roles": [
+            "TOOLTIP"
+          ],
+          "min": 0,
+          "max": 4,
+          "addLabel": "添加变化指标"
+        }
+      ]
     }
   ]
 }

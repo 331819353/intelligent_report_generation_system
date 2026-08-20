@@ -12,7 +12,7 @@ import (
 	"intelligent-report-generation-system/internal/askdata"
 )
 
-const BundledManifestCount = 53
+const BundledManifestCount = 54
 
 // SeedBundledComponents hydrates the migration's platform component identities
 // with the exact embedded manifests used by the compiler. Existing real

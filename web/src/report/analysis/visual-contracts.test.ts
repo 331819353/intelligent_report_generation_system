@@ -6,7 +6,7 @@ import { analysisCardVisualContract, analysisCardVisualContracts } from './visua
 const catalog = JSON.parse(readFileSync(new URL('./analysis-card-catalog.json', import.meta.url), 'utf8')) as Array<{ id: number; name: string }>
 
 test('visual contracts cover every category and all three source variants', () => {
-  assert.equal(analysisCardVisualContracts.length, 108)
+  assert.equal(analysisCardVisualContracts.length, 111)
   for (const item of catalog) {
     for (const variant of ['01', '02', '03'] as const) {
       assert.ok(analysisCardVisualContract(item.id, variant), `${item.id}-${variant}`)

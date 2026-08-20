@@ -10,7 +10,7 @@ export type AnalysisRendererKind =
   | 'contribution' | 'waterfall' | 'drivers' | 'root-cause' | 'forecast'
   | 'scenario' | 'sensitivity' | 'risk' | 'experiment' | 'geospatial'
   | 'monitoring' | 'pipeline' | 'calendar' | 'detail' | 'timeline' | 'insight'
-  | 'action' | 'data-info' | 'scope'
+  | 'action' | 'data-info' | 'scope' | 'long-form'
 
 export type AnalysisCardCatalogItem = {
   id: number

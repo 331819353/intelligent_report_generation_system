@@ -134,6 +134,10 @@
             "DASHBOARD"
           ]
         },
+        "headerStyle": {
+          "description": "Selected report-header composition. Omitted legacy definitions render style 01.",
+          "enum": ["01", "02", "03"]
+        },
         "locale": {
           "type": "string",
           "pattern": "^[a-z]{2,3}(-[A-Z]{2})?$",

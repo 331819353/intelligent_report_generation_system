@@ -15,7 +15,7 @@ import {
   type ReportShareRecord, type RuntimeExecution, type RuntimePage,
 } from '../report/api/runtime'
 import type { ReportAsset } from '../report/assets/model'
-import { ReportFilterStrip } from '../report/render/ReportFilterStrip'
+import { ReportHeader } from '../report/render/ReportHeader'
 import { ReportPageView } from '../report/render/ReportPageView'
 import { emptyManifestIndex, indexManifests, listComponentManifests, type ManifestIndex } from '../report/render/manifests'
 import { describeSelections, useReportRuntimeState, type ReportExecutionInput } from '../report/render/runtime-state'
@@ -406,8 +406,11 @@ export function ReportRuntimePage() {
         </div>
       </header>
 
-      {!loading && loaded && <ReportFilterStrip filters={filters} values={runtimeState.filterValues}
-        onChange={runtimeState.setFilterValue} onApply={applyFilters} applying={refreshing} />}
+      {!loading && loaded && <ReportHeader style={loaded.definition.metadata.headerStyle || '01'} title={title}
+        description={loaded.definition.metadata.description}
+        meta={[`负责人 ${ownerName}`, `更新 ${formatDateTime(assetMeta?.updatedAt || currentVersion?.publishedAt)}`, `数据截至 ${formatDateTime(asOf)}`]}
+        filters={filters} values={runtimeState.filterValues} onChange={runtimeState.setFilterValue}
+        onApply={applyFilters} applying={refreshing} onExport={() => setExportOpen(true)} />}
 
       {loading && <div className="runtime-report-feedback"><SpinnerGap className="is-spinning" size={25} /><strong>正在加载不可变发布制品</strong><p>随后会按当前查看者权限执行可见组件。</p></div>}
       {!loading && loadError && !loaded && <div className="runtime-report-feedback is-error"><WarningCircle size={25} /><strong>报告加载失败</strong><p>{loadError}</p><button type="button" onClick={() => window.location.reload()}>重新加载</button></div>}

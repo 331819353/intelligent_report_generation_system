@@ -1,7 +1,7 @@
 import {
   ArrowsClockwise, ArrowsLeftRight, CalendarDots, ChartBar, ChartBarHorizontal, ChartDonut,
   ChartLineUp, ChartScatter, ClockCounterClockwise, Flask, Funnel, Gauge, GitBranch, GridFour,
-  Info, Kanban, Lightbulb, ListChecks, MagnifyingGlass, MapTrifold, Path, Pulse, Ranking,
+  FileText, Info, Kanban, Lightbulb, ListChecks, MagnifyingGlass, MapTrifold, Path, Pulse, Ranking,
   SlidersHorizontal, Table, Target, TreeStructure, UsersThree, Warning,
 } from '@phosphor-icons/react'
 import { useMemo, useState, type ReactNode } from 'react'
@@ -19,7 +19,7 @@ const groups = [
   { id: 'journey', label: '流程与生命周期', range: [14, 17] },
   { id: 'diagnosis', label: '归因与诊断', range: [18, 21] },
   { id: 'decision', label: '预测与决策', range: [22, 26] },
-  { id: 'operations', label: '运营与表达', range: [27, 36] },
+  { id: 'operations', label: '运营与表达', range: [27, 37] },
 ] as const
 
 function familyIcon(kind: AnalysisRendererKind, size = 17): ReactNode {
@@ -51,13 +51,14 @@ function familyIcon(kind: AnalysisRendererKind, size = 17): ReactNode {
     case 'action': return <ListChecks {...props} />
     case 'data-info': return <Info {...props} />
     case 'scope': return <SlidersHorizontal {...props} />
+    case 'long-form': return <FileText {...props} />
     default: return <UsersThree {...props} />
   }
 }
 
 function AnalysisCardThumbnail({ item, variant }: { item: AnalysisCardCatalogItem; variant: AnalysisCardVariant }) {
   return <span className={`report-analysis-thumb is-${item.rendererKind} is-variant-${variant}`} aria-hidden="true">
-    <img src={`/analysis-card-gallery/${String(item.id).padStart(2, '0')}-${item.slug}/${variant}.webp`} alt="" loading="lazy" />
+    <img src={`/analysis-card-gallery/${String(item.id).padStart(2, '0')}-${item.slug}/${variant}.${item.id === 37 ? 'png' : 'webp'}`} alt="" loading="lazy" />
   </span>
 }
 
@@ -93,7 +94,7 @@ export function ComponentPalette({ manifests, disabled, onPick }: {
   }), [analysisManifests, group, normalized])
 
   return <div className="report-palette" aria-label="分析卡片库">
-    <header><strong>分析卡片</strong><small>36 类业务问题 · 每类 3 种版式</small></header>
+    <header><strong>分析卡片</strong><small>37 类业务问题 · 每类 3 种版式</small></header>
     <div className="report-palette-search">
       <MagnifyingGlass size={16} />
       <input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索问题、类型或图形" aria-label="搜索分析卡片" />

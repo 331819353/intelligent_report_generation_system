@@ -18,7 +18,7 @@ export type AnalysisCardVisualContract = {
 type ContractSeed = readonly [motif: string, mainVisual: string, supportingRoles: readonly string[]]
 
 /**
- * 108 张参考图的运行时视觉合同。
+ * 111 张参考图的运行时视觉合同。
  *
  * 这里的 motif 是渲染器的稳定分派键；同一类别的三张图必须拥有不同 motif，
  * 以防止实现退化成“同一个通用图表换三套颜色”。所有名称与数值仍由数据绑定提供。
@@ -203,6 +203,11 @@ const seeds: Record<number, readonly [ContractSeed, ContractSeed, ContractSeed]>
     ['header-filter-form', '蓝色标题带内的筛选表单', ['筛选维度', '筛选值', '结果数']],
     ['horizontal-filter-grid', '横向筛选网格与应用/重置操作', ['筛选维度', '筛选值', '结果数']],
     ['radial-scope-summary', '中央范围摘要与四周条件卡', ['筛选维度', '筛选值', '结果数']],
+  ],
+  37: [
+    ['kpi-over-narrative', '四项证据指标置于双栏长文本上方', ['结论对象', '核心证据', '变化证据', '长文本']],
+    ['narrative-with-kpi-rail', '长文本主栏与右侧指标证据栏', ['结论对象', '长文本', '核心证据']],
+    ['evidence-sections', '分段论据与嵌入式指标卡', ['论据标题', '长文本', '证据指标']],
   ],
 }
 

@@ -22,14 +22,15 @@ function manifestFor(item) {
   const roles = [...new Set(item.bindingGroups.flatMap(group => group.roles))]
   const isTable = item.category === 'TABLE'
   const isContent = item.category === 'CONTENT'
+  const isLongForm = item.rendererKind === 'long-form'
   return {
     type: item.type,
     version: '1.0.0',
     renderer: 'REACT',
     displayName: item.name.replace(/类$/, '卡'),
     category: item.category,
-    minSize: { w: isTable ? 10 : 6, h: isTable ? 5 : isContent ? 3 : 4 },
-    recommendedSize: { w: isTable ? 18 : 12, h: isTable ? 8 : isContent ? 5 : 6 },
+    minSize: { w: isLongForm ? 12 : isTable ? 10 : 6, h: isLongForm ? 7 : isTable ? 5 : isContent ? 3 : 4 },
+    recommendedSize: { w: isLongForm ? 24 : isTable ? 18 : 12, h: isLongForm ? 10 : isTable ? 8 : isContent ? 5 : 6 },
     dataContract: {
       dimensions,
       measures,
@@ -44,6 +45,7 @@ function manifestFor(item) {
       properties: {
         title: { type: 'string' },
         subtitle: { type: 'string' },
+        ...(isLongForm ? { richText: { type: 'string', description: '正文或长文本结论' } } : {}),
         cardVariant: { type: 'string', description: '卡片版式', enum: ['01', '02', '03'] },
         showLegend: { type: 'boolean', description: '显示图例' },
         showLabel: { type: 'boolean', description: '显示数值标签' },
@@ -51,7 +53,10 @@ function manifestFor(item) {
         topN: { type: 'integer', description: '最多显示对象数', minimum: 1, maximum: 100 },
       },
     },
-    defaultOptions: { cardVariant: '01', showLegend: true, showLabel: true, topN: 10 },
+    defaultOptions: {
+      cardVariant: '01', showLegend: true, showLabel: true, topN: 10,
+      ...(isLongForm ? { richText: '填写综合结论正文；指标名称和数值将由下方数据绑定自动替换。' } : {}),
+    },
     mobilePolicy: { supported: true, defaultLegendMode: 'HIDDEN', labelDegradation: 'ELLIPSIS' },
     supportedInteractions: isContent ? [] : ['CLICK_FILTER'],
   }

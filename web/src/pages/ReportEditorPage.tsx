@@ -1,7 +1,7 @@
 import {
   ArrowDown, ArrowLeft, ArrowUp, ArrowUDownLeft, ArrowUDownRight, BracketsCurly, CaretDown, CaretRight, Check,
   CheckCircle, CirclesFour, Database, DotsThreeVertical, Eye, Funnel, Info, MagicWand,
-  LockSimple, NotePencil, PencilSimple, Plus, ShieldCheck, Sparkle, SpinnerGap, Trash, WarningCircle, X,
+  NotePencil, PencilSimple, Plus, ShieldCheck, Sparkle, SpinnerGap, Trash, WarningCircle, X,
 } from '@phosphor-icons/react'
 import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
@@ -15,7 +15,7 @@ import {
 } from '../report/api/editor'
 import { reportAssetsAPI } from '../report/api/assets'
 import type { ReportAsset } from '../report/assets/model'
-import { ReportFilterStrip } from '../report/render/ReportFilterStrip'
+import { ReportHeader, ReportHeaderChooser } from '../report/render/ReportHeader'
 import { ReportPageView } from '../report/render/ReportPageView'
 import { InteractionPanel } from '../report/designer/InteractionPanel'
 import { EvidencePanel } from '../report/designer/EvidencePanel'
@@ -28,7 +28,7 @@ import {
 } from '../report/render/manifests'
 import {
   canvasOf, defaultCanvas, findBlock, findComponentBlock, orderedPages, orderedSections,
-  type ComponentOptions, type FieldBinding, type GlobalFilter, type Page, type ReportDefinition, type ReportType,
+  type ComponentOptions, type FieldBinding, type GlobalFilter, type Page, type ReportDefinition, type ReportHeaderStyle, type ReportType,
 } from '../report/render/schema'
 import {
   addComponentOperations, addDataContextOperations, bundle, createFilterOperations, createInteractionOperations,
@@ -143,7 +143,7 @@ const reportDisplayTemplatePreviewPage: Page = {
   }],
 }
 
-function NewReportCanvas({ name, description, reportType }: { name: string; description: string; reportType: ReportType }) {
+function NewReportCanvas({ name, description, reportType, headerStyle }: { name: string; description: string; reportType: ReportType; headerStyle?: ReportHeaderStyle }) {
   return <div className="report-editor-main report-editor-new-main">
     <nav className="report-editor-outline report-editor-new-outline" aria-label="报告大纲">
       <header><strong>报告大纲</strong></header>
@@ -151,15 +151,9 @@ function NewReportCanvas({ name, description, reportType }: { name: string; desc
     </nav>
     <main className="report-editor-canvas report-editor-new-canvas">
       <article className="report-editor-paper report-editor-blank-paper" aria-label="空白报告画布">
-        <header className="report-editor-document-header">
-          <div className="report-editor-document-title">
-            <span className="report-editor-document-eyebrow">INTELLIGENT BUSINESS REPORT</span>
-            <div><h2>{name.trim() || '外卖销售经营分析'}</h2></div>
-          </div>
-          <div className="report-editor-document-meta"><span>报告类型：{reportTypeLabels[reportType].name}</span><span>当前修订：r0</span><span>展示模板预览</span></div>
-          <p className="report-editor-description">{description.trim() || '多维度洞察业务经营情况，驱动增长决策'}</p>
-        </header>
-        <ReportFilterStrip filters={[]} onConfigure={() => undefined} />
+        <ReportHeader style={headerStyle || '01'} title={name.trim() || '视听产业经营分析报告'}
+          description={description.trim() || '多维度洞察业务经营情况，驱动增长决策'}
+          meta={[`报告类型：${reportTypeLabels[reportType].name}`, '当前修订：r0', '展示模板预览']} filters={[]} />
         <ReportPageView definition={{ canvas: defaultCanvas, components: [] }} page={reportDisplayTemplatePreviewPage}
           manifests={emptyManifestIndex} templatePreview />
       </article>
@@ -202,12 +196,13 @@ function starterBlueprint(candidate: DataContextCandidate, name: string, reportT
  * 继续作为兼容入口。所有入口最终都产出同一种 Report Definition。
  */
 function NewReportTaskPanel({
-  name, reportType, intent, contexts, contextId, contextsLoading, contextsError, templates, templatesLoading, selectedTemplateId, creating, error,
+  name, reportType, headerStyle, intent, contexts, contextId, contextsLoading, contextsError, templates, templatesLoading, selectedTemplateId, creating, error,
   blueprintText, importText, onName, onReportType, onIntent, onContext, onTemplate, onCreateBlank, onCreateTemplate, onCreateBlueprint, onGenerate,
-  onBlueprintText, onImportText, onImport,
+  onBlueprintText, onImportText, onImport, onHeaderStyle,
 }: {
   name: string
   reportType: ReportType
+  headerStyle?: ReportHeaderStyle
   intent: string
   contexts: DataContextCandidate[]
   contextId: string
@@ -222,6 +217,7 @@ function NewReportTaskPanel({
   importText: string
   onName: (value: string) => void
   onReportType: (value: ReportType) => void
+  onHeaderStyle: (value: ReportHeaderStyle) => void
   onIntent: (value: string) => void
   onBlueprintText: (value: string) => void
   onImportText: (value: string) => void
@@ -237,12 +233,13 @@ function NewReportTaskPanel({
   const selected = contexts.find(item => item.dataContext.id === contextId)
   const ready = !contextsLoading && !contextsError && contexts.length > 0
   const busy = Boolean(creating)
+  const headerReady = reportType !== 'REPORT' || Boolean(headerStyle)
   const primary = {
-    blank: { label: '创建空白报告', icon: <NotePencil size={16} />, disabled: !ready || !name.trim(), run: onCreateBlank },
-    template: { label: '使用所选模板创建', icon: <CirclesFour size={16} />, disabled: !ready || !selectedTemplateId || !name.trim(), run: onCreateTemplate },
-    blueprint: { label: '按蓝图生成报告', icon: <BracketsCurly size={16} />, disabled: !ready || !blueprintText.trim(), run: onCreateBlueprint },
-    ai: { label: '让 AI 配置蓝图', icon: <MagicWand size={16} />, disabled: !ready || !intent.trim(), run: onGenerate },
-    import: { label: '导入为新草稿', icon: <BracketsCurly size={16} />, disabled: !importText.trim(), run: onImport },
+    blank: { label: '创建空白报告', icon: <NotePencil size={16} />, disabled: !headerReady || !ready || !name.trim(), run: onCreateBlank },
+    template: { label: '使用所选模板创建', icon: <CirclesFour size={16} />, disabled: !headerReady || !ready || !selectedTemplateId || !name.trim(), run: onCreateTemplate },
+    blueprint: { label: '按蓝图生成报告', icon: <BracketsCurly size={16} />, disabled: !headerReady || !ready || !blueprintText.trim(), run: onCreateBlueprint },
+    ai: { label: '让 AI 配置蓝图', icon: <MagicWand size={16} />, disabled: !headerReady || !ready || !intent.trim(), run: onGenerate },
+    import: { label: '导入为新草稿', icon: <BracketsCurly size={16} />, disabled: !headerReady || !importText.trim(), run: onImport },
   }[mode]
 
   return <aside className="report-editor-task-panel report-editor-new-panel">
@@ -260,6 +257,7 @@ function NewReportTaskPanel({
             <span><strong>{reportTypeLabels[type].name}</strong><small>{reportTypeLabels[type].hint}</small></span>
           </label>)}
         </fieldset>
+        {reportType === 'REPORT' && <ReportHeaderChooser value={headerStyle} onChange={onHeaderStyle} compact />}
         {mode !== 'import' && <label>数据来源
           <select aria-label="受治理数据上下文" value={contextId} disabled={!ready} onChange={event => onContext(event.target.value)}>
             {contexts.map(item => <option key={item.dataContext.id} value={item.dataContext.id}>{item.name}</option>)}
@@ -311,10 +309,10 @@ function NewReportTaskPanel({
 
     <footer className="report-editor-new-footer">
       {error && <div className="report-editor-new-error" role="alert"><WarningCircle size={15} /><span>{error}</span></div>}
-      <button className="primary-button" type="button" disabled={busy || primary.disabled} onClick={primary.run}>
+      {headerReady ? <button className="primary-button" type="button" disabled={busy || primary.disabled} onClick={primary.run}>
         {busy ? <SpinnerGap className="is-spinning" size={16} /> : primary.icon}
         <span>{busy ? '正在创建…' : primary.label}</span>
-      </button>
+      </button> : <span className="report-editor-new-hint"><Info size={14} />选择上方报告头后即可创建</span>}
     </footer>
   </aside>
 }
@@ -717,6 +715,7 @@ export function ReportEditorPage() {
   const [intent, setIntent] = useState('')
   const [newName, setNewName] = useState('')
   const [newReportType, setNewReportType] = useState<ReportType>('REPORT')
+  const [newHeaderStyle, setNewHeaderStyle] = useState<ReportHeaderStyle>()
   const [blueprintText, setBlueprintText] = useState('')
   const [importText, setImportText] = useState('')
   const [contexts, setContexts] = useState<DataContextCandidate[]>([])
@@ -1299,7 +1298,7 @@ export function ReportEditorPage() {
     setNewCreating('blank'); setActionError('')
     try {
       const result = await reportEditorAPI.createBlank({
-        name: newName.trim(), description: intent.trim(), dataContextId: contextId || undefined, reportType: newReportType,
+        name: newName.trim(), description: intent.trim(), dataContextId: contextId || undefined, reportType: newReportType, headerStyle: newHeaderStyle,
       })
       navigate(`/reports/${result.report.id}?mode=edit`, { replace: true })
     } catch (cause) {
@@ -1311,7 +1310,7 @@ export function ReportEditorPage() {
     if (!intent.trim() || newCreating) return
     setNewCreating('ai'); setActionError('')
     try {
-      const result = await reportEditorAPI.createAI({ intent: intent.trim(), reportType: newReportType, dataContextId: contextId || undefined })
+      const result = await reportEditorAPI.createAI({ intent: intent.trim(), reportType: newReportType, headerStyle: newHeaderStyle, dataContextId: contextId || undefined })
       navigate(`/reports/${result.report.id}?mode=edit`, { replace: true })
     } catch (cause) {
       setActionError(cause instanceof Error
@@ -1332,7 +1331,7 @@ export function ReportEditorPage() {
       const configured: ReportBlueprint = {
         ...parsed, title: newName.trim() || parsed.title, reportType: newReportType,
       }
-      const result = await reportEditorAPI.createFromBlueprint({ blueprint: configured, dataContextIds: [contextId] })
+      const result = await reportEditorAPI.createFromBlueprint({ blueprint: configured, dataContextIds: [contextId], headerStyle: newHeaderStyle })
       navigate(`/reports/${result.report.id}?mode=edit`, { replace: true })
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : '蓝图展开失败，请检查卡片合同与短引用')
@@ -1344,7 +1343,7 @@ export function ReportEditorPage() {
     setNewCreating('template'); setActionError('')
     try {
       const result = await reportEditorAPI.instantiateStarterTemplate(selectedTemplateId, {
-        name: newName.trim(), description: intent.trim(), dataContextId: contextId, reportType: newReportType,
+        name: newName.trim(), description: intent.trim(), dataContextId: contextId, reportType: newReportType, headerStyle: newHeaderStyle,
       })
       navigate(`/reports/${result.report.id}?mode=edit`, { replace: true })
     } catch (cause) {
@@ -1368,6 +1367,7 @@ export function ReportEditorPage() {
         metadata: {
           ...parsed.metadata, id, code: `report_${id.replace(/-/g, '').slice(0, 16)}`,
           name: newName.trim() || parsed.metadata.name, reportType: parsed.metadata.reportType || newReportType,
+          headerStyle: newReportType === 'REPORT' ? newHeaderStyle || parsed.metadata.headerStyle || '01' : parsed.metadata.headerStyle,
         },
       }
       const result = await reportEditorAPI.createFromDefinition(definition)
@@ -1401,12 +1401,12 @@ export function ReportEditorPage() {
   if (newMode) return <AppShell className="report-editor-shell" lockBusinessDomain>
     <div className="report-editor-workspace report-editor-new-workspace">
       <header className="report-editor-header"><div><button type="button" onClick={() => navigate('/reports')}><ArrowLeft size={15} />返回报告工作台</button><div className="report-editor-title"><h1>新建报告</h1><span>草稿 r0</span><small>创建后进入编辑器</small></div></div></header>
-      <div className="report-editor-body"><NewReportCanvas name={newName} description={intent} reportType={newReportType} /><NewReportTaskPanel
-        name={newName} reportType={newReportType} intent={intent} contexts={contexts} contextId={contextId}
+      <div className="report-editor-body"><NewReportCanvas name={newName} description={intent} reportType={newReportType} headerStyle={newHeaderStyle} /><NewReportTaskPanel
+        name={newName} reportType={newReportType} headerStyle={newHeaderStyle} intent={intent} contexts={contexts} contextId={contextId}
         contextsLoading={contextsLoading} contextsError={contextsError}
         templates={starterTemplates} templatesLoading={starterTemplatesLoading} selectedTemplateId={selectedTemplateId}
         creating={newCreating} error={actionError} blueprintText={blueprintText} importText={importText}
-        onName={setNewName} onReportType={setNewReportType} onIntent={setIntent} onContext={value => {
+        onName={setNewName} onReportType={setNewReportType} onHeaderStyle={setNewHeaderStyle} onIntent={setIntent} onContext={value => {
           setContextId(value)
           const selected = contexts.find(item => item.dataContext.id === value)
           if (selected) setBlueprintText(JSON.stringify(starterBlueprint(selected, newName, newReportType), null, 2))
@@ -1494,31 +1494,18 @@ export function ReportEditorPage() {
             onDragOver={event => { if (event.dataTransfer.types.includes(paletteDragType)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' } }}
             onDrop={dropFromPalette}>
             <article className="report-editor-paper report-editor-live-paper" onClick={event => { if (editorView !== 'edit' || (event.target as HTMLElement).closest('.report-render-block')) return; setSelectedComponentId('') }}>
-              <header className="report-editor-document-header">
-                <div className="report-editor-document-title">
-                  <span className="report-editor-document-eyebrow">INTELLIGENT BUSINESS REPORT</span>
-                  <div><h2>{draft.definition.metadata.name}</h2>{editorView === 'edit' && <span className="report-editor-fixed-label"><LockSimple size={12} />报告头</span>}</div>
-                </div>
-                <div className="report-editor-document-meta">
-                  <span>报告类型：{reportTypeLabels[draft.definition.metadata.reportType]?.name ?? draft.definition.metadata.reportType}</span>
-                  <span>当前修订：r{draft.revisionNo}</span>
-                  <span>数据源：{reportContexts.length} 个</span>
-                  <span aria-live="polite">
-                    {executing
-                      ? <><SpinnerGap className="is-spinning" size={13} />正在刷新预览</>
-                      : executionError
-                        ? <><WarningCircle size={13} />预览暂不可用</>
-                        : execution
-                          ? <><CheckCircle size={13} weight="fill" />数据截至 {dateTime(execution.asOf)}</>
-                          : <><Info size={13} />尚未执行预览</>}
-                  </span>
-                </div>
-                {draft.definition.metadata.description && <p className="report-editor-description">{draft.definition.metadata.description}</p>}
-              </header>
-              <ReportFilterStrip filters={draft.definition.globalFilters ?? []} values={designFilterValues}
+              <ReportHeader style={draft.definition.metadata.headerStyle || '01'} title={draft.definition.metadata.name}
+                description={draft.definition.metadata.description}
+                meta={[
+                  `报告类型：${reportTypeLabels[draft.definition.metadata.reportType]?.name ?? draft.definition.metadata.reportType}`,
+                  `当前修订：r${draft.revisionNo}`, `数据源：${reportContexts.length} 个`,
+                  executing ? '正在刷新预览' : executionError ? '预览暂不可用' : execution ? `数据截至 ${dateTime(execution.asOf)}` : '尚未执行预览',
+                ]}
+                filters={draft.definition.globalFilters ?? []} values={designFilterValues}
                 onChange={(filterId, value) => setDesignFilterValues(current => ({ ...current, [filterId]: value }))}
                 onApply={() => notify('筛选条件已应用到报告预览')} applying={executing}
-                onConfigure={editorView === 'edit' ? () => { setSelectedComponentId(''); setSidePanel('data'); setReportInspectorView('filters') } : undefined} />
+                onConfigure={editorView === 'edit' ? () => { setSelectedComponentId(''); setSidePanel('data'); setReportInspectorView('filters') } : undefined}
+                onExport={() => notify('发布后可导出报告')} locked={editorView === 'edit'} />
               {/* 首次执行返回前按设计态呈现；之后组件状态一律来自真实执行结果。 */}
               <ReportPageView definition={draft.definition} page={page} manifests={manifests} results={results}
                 designMode={!execution}

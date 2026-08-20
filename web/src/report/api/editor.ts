@@ -1,5 +1,5 @@
 import { apiRequest } from '../../lib/api'
-import type { Block, FieldBinding, Page, ReportComponent, ReportDefinition, Section } from '../render/schema'
+import type { Block, FieldBinding, Page, ReportComponent, ReportDefinition, ReportHeaderStyle, Section } from '../render/schema'
 import type { ComponentManifest } from '../render/manifests'
 import type { RuntimeComponentResult } from './runtime'
 
@@ -206,18 +206,18 @@ function idempotencyHeaders() {
 }
 
 export const reportEditorAPI = {
-  createAI(input: { intent: string; reportType?: 'REPORT' | 'DASHBOARD'; dataContextId?: string }) {
+  createAI(input: { intent: string; reportType?: 'REPORT' | 'DASHBOARD'; headerStyle?: ReportHeaderStyle; dataContextId?: string }) {
     return apiRequest<AICreateReportResponse>('/v1/reports/ai/create', {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
     })
   },
-  createFromBlueprint(input: { blueprint: ReportBlueprint; dataContextIds: string[] }) {
+  createFromBlueprint(input: { blueprint: ReportBlueprint; dataContextIds: string[]; headerStyle?: ReportHeaderStyle }) {
     return apiRequest<BlankCreateReportResponse & { blueprint: ReportBlueprint }>('/v1/report-blueprints/expand', {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
     })
   },
   // 空白新建不依赖模型提供方，是未配置 LLM 时报告主链的保底入口。
-  createBlank(input: { name: string; description?: string; dataContextId?: string; dataContextIds?: string[]; reportType?: 'REPORT' | 'DASHBOARD' }) {
+  createBlank(input: { name: string; description?: string; dataContextId?: string; dataContextIds?: string[]; reportType?: 'REPORT' | 'DASHBOARD'; headerStyle?: ReportHeaderStyle }) {
     return apiRequest<BlankCreateReportResponse>('/v1/reports/blank', {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
     })
@@ -235,7 +235,7 @@ export const reportEditorAPI = {
   listStarterTemplates() {
     return apiRequest<{ items: ReportStarterTemplate[] }>('/v1/report-templates')
   },
-  instantiateStarterTemplate(templateId: string, input: { name: string; description?: string; dataContextId: string; reportType?: 'REPORT' | 'DASHBOARD' }) {
+  instantiateStarterTemplate(templateId: string, input: { name: string; description?: string; dataContextId: string; reportType?: 'REPORT' | 'DASHBOARD'; headerStyle?: ReportHeaderStyle }) {
     return apiRequest<BlankCreateReportResponse>(`/v1/report-templates/${encodeURIComponent(templateId)}/instantiate`, {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input),
     })

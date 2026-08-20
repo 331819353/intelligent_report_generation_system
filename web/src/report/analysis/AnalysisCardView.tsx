@@ -11,7 +11,8 @@ import { init, use as registerEChartsComponents } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import {
   ArrowDownRight, ArrowRight, ArrowUpRight, Check, CheckCircle, Clock, Database,
-  FunnelSimple, Info, Lightbulb, ListChecks, MapTrifold, ShieldCheck, Target, WarningCircle,
+  ChartDonut, FunnelSimple, Info, Lightbulb, ListChecks, MapTrifold, Network, ShieldCheck,
+  Target, TrendDown, TrendUp, WarningCircle,
 } from '@phosphor-icons/react'
 import { analysisCardDefinition, type AnalysisCardCatalogItem, type AnalysisCardVariant } from './catalog.ts'
 import { analysisCardVisualContract, type AnalysisCardSizeMode } from './visual-contracts.ts'
@@ -657,6 +658,47 @@ function ScopeCard({ component, shape, variant }: { component: ReportComponent; 
   </div>
 }
 
+function conclusionParagraphs(component: ReportComponent, shape: DataShape) {
+  const subject = shape.labels[0] || shape.dimensionNames[0] || '当前业务'
+  const primary = shape.measureNames[0] || '核心指标'
+  const secondary = shape.measureNames[1] || '结构指标'
+  const provided = component.options.richText?.trim().split(/\n+/).map(value => value.trim()).filter(Boolean) ?? []
+  const fallback = [
+    `${subject}的${primary}构成当前结果的主要支撑。结合业务范围与数据表现看，增长基础仍然稳定，但后续改善需要同时关注规模、效率与结构质量。`,
+    `${secondary}揭示了不同对象之间的表现分化。头部对象保持领先，中腰部仍有可提升空间，应优先识别偏离整体趋势的区域、产品或渠道。`,
+    `建议围绕关键证据建立持续跟踪机制，把指标变化、执行动作与责任人放在同一复盘节奏中，并在下一周期验证改善是否真实发生。`,
+  ]
+  return [...provided, ...fallback.slice(provided.length)].slice(0, 3)
+}
+
+function LongFormConclusionCard({ component, shape, variant }: { component: ReportComponent; shape: DataShape; variant: AnalysisCardVariant }) {
+  const title = component.options.title || `${shape.labels[0] || '业务'}综合结论`
+  const paragraphs = conclusionParagraphs(component, shape)
+  const metrics = Array.from({ length: 4 }, (_, index) => ({
+    name: shape.measureNames[index] || `证据指标 ${index + 1}`,
+    value: formatValue(component, valueAt(shape, index)),
+    change: shape.values[index + 4]?.[0] ?? shape.values[index + 1]?.[1] ?? 0,
+  }))
+  if (variant === '01') return <div className="report-analysis-long-form is-kpi-over">
+    <header><strong>{title}</strong><small>综合经营洞察</small></header>
+    <section className="report-analysis-long-kpis">{metrics.map((metric, index) => <article key={`${metric.name}-${index}`}>
+      <small>{metric.name}</small><strong>{metric.value}</strong><em className={metric.change < 0 ? 'is-negative' : ''}>{metric.change >= 0 ? <TrendUp size={12} /> : <TrendDown size={12} />}{metric.change >= 0 ? '+' : ''}{formatValue(component, metric.change)}</em>
+    </article>)}</section>
+    <section className="report-analysis-long-columns">{paragraphs.map((paragraph, index) => <p key={index}><b>{index + 1}</b>{paragraph}</p>)}</section>
+    <footer><CheckCircle size={14} weight="fill" />已基于绑定数据生成结论证据链</footer>
+  </div>
+  if (variant === '02') return <div className="report-analysis-long-form is-narrative-rail">
+    <main><header><small>经营分析结论</small><strong>{title}</strong></header><blockquote>{paragraphs[0]}</blockquote>{paragraphs.slice(1).map((paragraph, index) => <p key={index}>{paragraph}</p>)}</main>
+    <aside><article className="is-primary"><small>{metrics[0].name}</small><strong>{metrics[0].value}</strong><em>{metrics[0].change >= 0 ? '+' : ''}{formatValue(component, metrics[0].change)}</em></article>{metrics.slice(1).map((metric, index) => <article key={`${metric.name}-${index}`}><small>{metric.name}</small><strong>{metric.value}</strong></article>)}</aside>
+  </div>
+  const icons = [<Network size={19} key="network" />, <ChartDonut size={19} key="structure" />, <WarningCircle size={19} key="risk" />]
+  return <div className="report-analysis-long-form is-evidence-sections">
+    <header><span><Lightbulb size={20} weight="duotone" /></span><div><small>总体判断</small><strong>{title}</strong></div></header>
+    <section>{paragraphs.map((paragraph, index) => <article key={index}><span>{icons[index]}</span><div><strong>{index === 0 ? '规模与增长' : index === 1 ? '结构与效率' : '风险与行动'}</strong><p>{paragraph}</p></div><aside><small>{metrics[index].name}</small><strong>{metrics[index].value}</strong><em className={metrics[index].change < 0 ? 'is-negative' : ''}>{metrics[index].change >= 0 ? '+' : ''}{formatValue(component, metrics[index].change)}</em></aside></article>)}</section>
+    <footer>结论共引用 {Math.min(shape.measureNames.length || 4, 4)} 项受治理指标</footer>
+  </div>
+}
+
 function CardSupport({ item, component, shape, variant }: { item: AnalysisCardCatalogItem; component: ReportComponent; shape: DataShape; variant: AnalysisCardVariant }) {
   if (item.id === 6 && variant !== '01') return <BreakdownStrip component={component} shape={shape} limit={3} />
   if ([8, 9, 14, 16, 22, 24, 26, 28].includes(item.id)) return <StatStrip component={component} shape={shape} limit={variant === '03' ? 3 : 2} />
@@ -679,6 +721,7 @@ function specialCard(item: AnalysisCardCatalogItem, component: ReportComponent, 
     case 34: return <ActionCard component={component} shape={shape} variant={variant} />
     case 35: return <DataInfoCard component={component} shape={shape} variant={variant} />
     case 36: return <ScopeCard component={component} shape={shape} variant={variant} />
+    case 37: return <LongFormConclusionCard component={component} shape={shape} variant={variant} />
     default: return undefined
   }
 }

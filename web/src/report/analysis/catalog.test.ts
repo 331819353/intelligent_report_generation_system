@@ -21,11 +21,11 @@ type CatalogItem = {
 
 const catalog = JSON.parse(readFileSync(new URL('./analysis-card-catalog.json', import.meta.url), 'utf8')) as CatalogItem[]
 
-test('analysis catalog contains exactly 36 unique semantic card families', () => {
-  assert.equal(catalog.length, 36)
-  assert.equal(new Set(catalog.map(item => item.id)).size, 36)
-  assert.equal(new Set(catalog.map(item => item.slug)).size, 36)
-  assert.equal(new Set(catalog.map(item => item.type)).size, 36)
+test('analysis catalog contains exactly 37 unique semantic card families', () => {
+  assert.equal(catalog.length, 37)
+  assert.equal(new Set(catalog.map(item => item.id)).size, 37)
+  assert.equal(new Set(catalog.map(item => item.slug)).size, 37)
+  assert.equal(new Set(catalog.map(item => item.type)).size, 37)
   assert.equal(catalog.every(item => item.name && item.question), true)
 })
 
@@ -40,7 +40,7 @@ test('every card family declares governed metric, dimension and filter-ready con
   }
 })
 
-test('three visual variants produce 108 selectable cards', () => {
+test('three visual variants produce 111 selectable cards', () => {
   const variants = ['01', '02', '03']
-  assert.equal(catalog.length * variants.length, 108)
+  assert.equal(catalog.length * variants.length, 111)
 })

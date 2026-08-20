@@ -579,5 +579,21 @@
       { "id": "filters", "label": "范围字段", "description": "时间、地区、产品、渠道、人群或组织", "kind": "DIMENSION", "roles": ["DIMENSION", "TIME", "CATEGORY", "LABEL", "DETAIL"], "min": 1, "max": 5, "addLabel": "添加范围字段" },
       { "id": "result-count", "label": "结果数量", "description": "当前范围内的对象数、记录数或业务总量", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 1, "addLabel": "选择结果数量" }
     ]
+  },
+  {
+    "id": 37,
+    "slug": "long-form-conclusion",
+    "type": "analysis-long-form-conclusion",
+    "name": "长文本结论类",
+    "question": "如何完整表达综合分析结论？",
+    "subtypes": ["综合结论", "经营复盘", "问题总结", "证据链", "管理层摘要", "专题分析"],
+    "presentations": ["指标上置双栏正文", "正文主栏指标侧栏", "分段论据嵌入指标"],
+    "rendererKind": "long-form",
+    "category": "CONTENT",
+    "bindingGroups": [
+      { "id": "scope", "label": "结论对象", "description": "业务链群、区域、产品或其他结论适用对象", "kind": "DIMENSION", "roles": ["LABEL", "DETAIL"], "min": 1, "max": 3, "addLabel": "添加结论对象" },
+      { "id": "evidence", "label": "核心证据", "description": "正文重点引用的指标、比率与业务结果", "kind": "MEASURE", "roles": ["VALUE"], "min": 1, "max": 4, "addLabel": "添加证据指标" },
+      { "id": "comparison", "label": "变化证据", "description": "可选，用同比、环比或目标差补充论据", "kind": "MEASURE", "roles": ["TOOLTIP"], "min": 0, "max": 4, "addLabel": "添加变化指标" }
+    ]
   }
 ]

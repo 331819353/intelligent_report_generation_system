@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { ArrowRight, CheckCircle, Circle, Info, MagnifyingGlass, SpinnerGap, WarningCircle, X } from '@phosphor-icons/react'
 import { useNavigate } from 'react-router-dom'
 import { reportEditorAPI, type DataContextCandidate } from '../api/editor.ts'
-import type { ReportType } from '../render/schema.ts'
+import { ReportHeaderChooser } from '../render/ReportHeader.tsx'
+import type { ReportHeaderStyle, ReportType } from '../render/schema.ts'
 
 /**
  * 「新建报告」向导弹窗：① 选类型并命名 → ② 勾选报告要用到的数据集 → 创建并进入编辑器。
@@ -20,6 +21,7 @@ export function NewReportDialog({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate()
   const [step, setStep] = useState<1 | 2>(1)
   const [reportType, setReportType] = useState<ReportType>('DASHBOARD')
+  const [headerStyle, setHeaderStyle] = useState<ReportHeaderStyle>()
   const [name, setName] = useState('')
   const [contexts, setContexts] = useState<DataContextCandidate[]>([])
   const [loading, setLoading] = useState(true)
@@ -48,7 +50,7 @@ export function NewReportDialog({ onClose }: { onClose: () => void }) {
     if (creating || !name.trim() || selected.length === 0) return
     setCreating(true); setError('')
     try {
-      const result = await reportEditorAPI.createBlank({ name: name.trim(), reportType, dataContextIds: selected })
+      const result = await reportEditorAPI.createBlank({ name: name.trim(), reportType, headerStyle, dataContextIds: selected })
       onClose()
       navigate(`/reports/${result.report.id}?mode=edit`)
     } catch (cause) {
@@ -70,9 +72,10 @@ export function NewReportDialog({ onClose }: { onClose: () => void }) {
             <strong>{choice.name}</strong><small>{choice.hint}</small>
           </button>)}
         </div>
+        {reportType === 'REPORT' && <ReportHeaderChooser value={headerStyle} onChange={setHeaderStyle} />}
         <label className="report-new-name">名称
           <input autoFocus value={name} maxLength={80} placeholder={reportType === 'DASHBOARD' ? '例如：经营看板' : '例如：2026 年 7 月经营月报'} onChange={event => setName(event.target.value)}
-            onKeyDown={event => { if (event.key === 'Enter' && name.trim()) setStep(2) }} />
+            onKeyDown={event => { if (event.key === 'Enter' && name.trim() && (reportType !== 'REPORT' || headerStyle)) setStep(2) }} />
         </label>
         <p className="report-editor-binding-note"><Info size={15} />之后在编辑器里：从左侧组件面板拖卡片到画布 → 点击卡片绑定数据集、选择指标/维度 → 配置过滤字段 → 发布。</p>
       </div>}
@@ -102,7 +105,7 @@ export function NewReportDialog({ onClose }: { onClose: () => void }) {
         {step === 2 && <button className="quiet-button" type="button" disabled={creating} onClick={() => setStep(1)}>上一步</button>}
         <button className="quiet-button" type="button" disabled={creating} onClick={onClose}>取消</button>
         {step === 1
-          ? <button className="primary-button" type="button" disabled={!name.trim()} onClick={() => setStep(2)}>选择数据集<ArrowRight size={16} /></button>
+          ? (reportType !== 'REPORT' || headerStyle) && <button className="primary-button" type="button" disabled={!name.trim()} onClick={() => setStep(2)}>选择数据集<ArrowRight size={16} /></button>
           : <button className="primary-button" type="button" disabled={creating || selected.length === 0} onClick={() => void create()}>
             {creating ? <SpinnerGap className="is-spinning" size={16} /> : <ArrowRight size={16} />}{creating ? '正在创建…' : `创建${typeChoice.name}并进入编辑器`}
           </button>}

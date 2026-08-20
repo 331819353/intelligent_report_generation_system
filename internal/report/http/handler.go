@@ -237,6 +237,7 @@ func (handler *Handler) createAI(writer http.ResponseWriter, request *http.Reque
 	var body struct {
 		Intent        string     `json:"intent"`
 		ReportType    string     `json:"reportType"`
+		HeaderStyle   string     `json:"headerStyle"`
 		DataContextID askdata.ID `json:"dataContextId"`
 	}
 	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.Intent) == "" {
@@ -246,6 +247,11 @@ func (handler *Handler) createAI(writer http.ResponseWriter, request *http.Reque
 	reportType, typeOK := resolveReportType(body.ReportType)
 	if !typeOK {
 		writeError(writer, http.StatusBadRequest, "REPORT_AI_REQUEST_INVALID", "reportType must be REPORT or DASHBOARD")
+		return
+	}
+	headerStyle, headerOK := resolveHeaderStyle(body.HeaderStyle, reportType)
+	if !headerOK {
+		writeError(writer, http.StatusBadRequest, "REPORT_AI_REQUEST_INVALID", "headerStyle must be 01, 02 or 03")
 		return
 	}
 	body.Intent = strings.TrimSpace(body.Intent)
@@ -276,7 +282,7 @@ func (handler *Handler) createAI(writer http.ResponseWriter, request *http.Reque
 			break
 		}
 	}
-	base := applyReportType(newAIReportDefinition(reportID, selection.ReportName, body.Intent, selected.DataContext), reportType)
+	base := applyCreationPresentation(newAIReportDefinition(reportID, selection.ReportName, body.Intent, selected.DataContext), reportType, headerStyle, []reportai.DataContextCandidate{selected})
 	reportRecord, initial, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
 		ID: reportID, Code: base.Metadata.Code, Name: base.Metadata.Name,
 		ReportType: base.Metadata.ReportType, Definition: base,
@@ -351,6 +357,7 @@ func (handler *Handler) createAIFromBlueprint(writer http.ResponseWriter, reques
 	var body struct {
 		Intent        string     `json:"intent"`
 		ReportType    string     `json:"reportType"`
+		HeaderStyle   string     `json:"headerStyle"`
 		DataContextID askdata.ID `json:"dataContextId"`
 	}
 	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.Intent) == "" {
@@ -360,6 +367,11 @@ func (handler *Handler) createAIFromBlueprint(writer http.ResponseWriter, reques
 	reportType, typeOK := resolveReportType(body.ReportType)
 	if !typeOK {
 		writeError(writer, http.StatusBadRequest, "REPORT_AI_REQUEST_INVALID", "reportType must be REPORT or DASHBOARD")
+		return
+	}
+	headerStyle, headerOK := resolveHeaderStyle(body.HeaderStyle, reportType)
+	if !headerOK {
+		writeError(writer, http.StatusBadRequest, "REPORT_AI_REQUEST_INVALID", "headerStyle must be 01, 02 or 03")
 		return
 	}
 	body.Intent = strings.TrimSpace(body.Intent)
@@ -410,7 +422,7 @@ func (handler *Handler) createAIFromBlueprint(writer http.ResponseWriter, reques
 		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_CONTEXT_REJECTED", err.Error())
 		return
 	}
-	base := applyReportType(newAIReportDefinition(reportID, selection.ReportName, body.Intent, selected.DataContext), reportType)
+	base := applyCreationPresentation(newAIReportDefinition(reportID, selection.ReportName, body.Intent, selected.DataContext), reportType, headerStyle, []reportai.DataContextCandidate{selected})
 	reportRecord, initial, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
 		ID: reportID, Code: base.Metadata.Code, Name: base.Metadata.Name, ReportType: base.Metadata.ReportType, Definition: base,
 	})
@@ -508,6 +520,95 @@ func applyReportType(definition reportmodel.ReportDefinition, reportType reportm
 				definition.Pages[index].Name = "看板"
 			}
 		}
+	}
+	return definition
+}
+
+// resolveHeaderStyle keeps older API callers compatible while new REPORT
+// creation flows persist an explicit visual choice. Dashboards may omit it.
+func resolveHeaderStyle(raw string, reportType reportmodel.ReportType) (reportmodel.ReportHeaderStyle, bool) {
+	switch strings.TrimSpace(raw) {
+	case "":
+		if reportType == reportmodel.ReportTypeReport {
+			return reportmodel.ReportHeaderStyle01, true
+		}
+		return "", true
+	case string(reportmodel.ReportHeaderStyle01):
+		return reportmodel.ReportHeaderStyle01, true
+	case string(reportmodel.ReportHeaderStyle02):
+		return reportmodel.ReportHeaderStyle02, true
+	case string(reportmodel.ReportHeaderStyle03):
+		return reportmodel.ReportHeaderStyle03, true
+	default:
+		return "", false
+	}
+}
+
+func defaultReportFilters(candidates []reportai.DataContextCandidate) []reportmodel.GlobalFilter {
+	filters := make([]reportmodel.GlobalFilter, 0, 4)
+	seen := map[string]bool{}
+	appendFields := func(wantTime bool) {
+		for _, candidate := range candidates {
+			for _, field := range candidate.FieldDefinitions {
+				if len(filters) >= 4 {
+					return
+				}
+				role := strings.ToUpper(strings.TrimSpace(field.Role))
+				isTime := role == "TIME" || strings.Contains(strings.ToUpper(field.CanonicalType), "DATE") || strings.Contains(strings.ToUpper(field.CanonicalType), "TIME")
+				if role == "MEASURE" || isTime != wantTime || strings.TrimSpace(field.Code) == "" {
+					continue
+				}
+				key := string(candidate.DataContext.ID) + ":" + field.Code
+				if seen[key] {
+					continue
+				}
+				filterType := reportmodel.FilterSingleSelect
+				if isTime {
+					filterType = reportmodel.FilterDateRange
+				}
+				filters = append(filters, reportmodel.GlobalFilter{
+					ID: askdata.ID(uuid.NewString()), Type: filterType,
+					FieldRef: reportmodel.FieldReference{DataContextID: candidate.DataContext.ID, Field: field.Code},
+					Scope:    reportmodel.FilterScope{Type: reportmodel.FilterScopeReport, TargetIDs: []askdata.ID{}},
+				})
+				seen[key] = true
+			}
+		}
+	}
+	appendFields(true)
+	appendFields(false)
+	// Compatibility catalogs may expose only the governed field allow-list.
+	// Keep the header usable there too; richer catalogs still use role metadata
+	// above so measures are never suggested as filters.
+	for _, candidate := range candidates {
+		if len(candidate.FieldDefinitions) != 0 {
+			continue
+		}
+		for _, field := range candidate.Fields {
+			if len(filters) >= 4 {
+				break
+			}
+			field = strings.TrimSpace(field)
+			key := string(candidate.DataContext.ID) + ":" + field
+			if field == "" || seen[key] {
+				continue
+			}
+			filters = append(filters, reportmodel.GlobalFilter{
+				ID: askdata.ID(uuid.NewString()), Type: reportmodel.FilterSingleSelect,
+				FieldRef: reportmodel.FieldReference{DataContextID: candidate.DataContext.ID, Field: field},
+				Scope:    reportmodel.FilterScope{Type: reportmodel.FilterScopeReport, TargetIDs: []askdata.ID{}},
+			})
+			seen[key] = true
+		}
+	}
+	return filters
+}
+
+func applyCreationPresentation(definition reportmodel.ReportDefinition, reportType reportmodel.ReportType, headerStyle reportmodel.ReportHeaderStyle, candidates []reportai.DataContextCandidate) reportmodel.ReportDefinition {
+	definition = applyReportType(definition, reportType)
+	definition.Metadata.HeaderStyle = headerStyle
+	if len(definition.GlobalFilters) == 0 {
+		definition.GlobalFilters = defaultReportFilters(candidates)
 	}
 	return definition
 }
@@ -630,9 +731,15 @@ func (handler *Handler) expandBlueprint(writer http.ResponseWriter, request *htt
 	var body struct {
 		Blueprint      blueprint.Blueprint `json:"blueprint"`
 		DataContextIDs []askdata.ID        `json:"dataContextIds"`
+		HeaderStyle    string              `json:"headerStyle"`
 	}
 	if decodeJSON(request, &body) != nil {
 		writeError(writer, http.StatusBadRequest, "REPORT_BLUEPRINT_REQUEST_INVALID", "blueprint request body is invalid")
+		return
+	}
+	headerStyle, headerOK := resolveHeaderStyle(body.HeaderStyle, body.Blueprint.ReportType)
+	if !headerOK {
+		writeError(writer, http.StatusBadRequest, "REPORT_BLUEPRINT_REQUEST_INVALID", "headerStyle must be 01, 02 or 03")
 		return
 	}
 	candidates, err := handler.ai.Contexts.Candidates(request.Context(), identity, 30)
@@ -649,7 +756,7 @@ func (handler *Handler) expandBlueprint(writer http.ResponseWriter, request *htt
 		return
 	}
 	reportID := askdata.ID(uuid.NewString())
-	base := applyReportType(newReportDefinition(reportID, body.Blueprint.Title, "", catalog.Datasets[0].DataContext, reportmodel.CreatedManually), body.Blueprint.ReportType)
+	base := applyCreationPresentation(newReportDefinition(reportID, body.Blueprint.Title, "", catalog.Datasets[0].DataContext, reportmodel.CreatedManually), body.Blueprint.ReportType, headerStyle, reportCandidatesByID(candidates, body.DataContextIDs))
 	definition, err := blueprint.Expand(body.Blueprint, blueprint.ExpandInput{
 		Base: base, Catalog: catalog, CreatedFrom: reportmodel.CreatedManually,
 		Kinds: handler.ai.Kinds, Components: handler.ai.Components, Methods: handler.ai.Methods,
@@ -707,6 +814,7 @@ func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Re
 		// report will use up front; the first one becomes the primary context.
 		DataContextIDs []askdata.ID `json:"dataContextIds"`
 		ReportType     string       `json:"reportType"`
+		HeaderStyle    string       `json:"headerStyle"`
 	}
 	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.Name) == "" {
 		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "report name is required")
@@ -715,6 +823,11 @@ func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Re
 	reportType, typeOK := resolveReportType(body.ReportType)
 	if !typeOK {
 		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "reportType must be REPORT or DASHBOARD")
+		return
+	}
+	headerStyle, headerOK := resolveHeaderStyle(body.HeaderStyle, reportType)
+	if !headerOK {
+		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "headerStyle must be 01, 02 or 03")
 		return
 	}
 	candidates, err := handler.ai.Contexts.Candidates(request.Context(), identity, 30)
@@ -732,6 +845,7 @@ func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Re
 		requested = append([]askdata.ID{body.DataContextID}, requested...)
 	}
 	selectedContexts := make([]reportmodel.DataContext, 0, len(requested)+1)
+	selectedCandidates := make([]reportai.DataContextCandidate, 0, len(requested)+1)
 	seenContexts := map[askdata.ID]bool{}
 	for _, wanted := range requested {
 		if seenContexts[wanted] {
@@ -741,6 +855,7 @@ func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Re
 		for _, candidate := range candidates {
 			if candidate.DataContext.ID == wanted {
 				selectedContexts = append(selectedContexts, candidate.DataContext)
+				selectedCandidates = append(selectedCandidates, candidate)
 				seenContexts[wanted] = true
 				found = true
 				break
@@ -753,12 +868,13 @@ func (handler *Handler) createBlank(writer http.ResponseWriter, request *http.Re
 	}
 	if len(selectedContexts) == 0 {
 		selectedContexts = append(selectedContexts, candidates[0].DataContext)
+		selectedCandidates = append(selectedCandidates, candidates[0])
 	}
 	reportID := askdata.ID(uuid.NewString())
-	definition := applyReportType(newReportDefinition(
+	definition := applyCreationPresentation(newReportDefinition(
 		reportID, strings.TrimSpace(body.Name), strings.TrimSpace(body.Description),
 		selectedContexts[0], reportmodel.CreatedManually,
-	), reportType)
+	), reportType, headerStyle, selectedCandidates)
 	definition.DataContexts = selectedContexts
 	if reportType == reportmodel.ReportTypeReport {
 		definition.Pages[0].Sections = blankReportTemplateSections()
@@ -822,6 +938,7 @@ func (handler *Handler) instantiateTemplate(writer http.ResponseWriter, request 
 		Description   string     `json:"description"`
 		DataContextID askdata.ID `json:"dataContextId"`
 		ReportType    string     `json:"reportType"`
+		HeaderStyle   string     `json:"headerStyle"`
 	}
 	if decodeJSON(request, &body) != nil || strings.TrimSpace(body.Name) == "" {
 		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "report name is required")
@@ -830,6 +947,11 @@ func (handler *Handler) instantiateTemplate(writer http.ResponseWriter, request 
 	reportType, typeOK := resolveReportType(body.ReportType)
 	if !typeOK {
 		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "reportType must be REPORT or DASHBOARD")
+		return
+	}
+	headerStyle, headerOK := resolveHeaderStyle(body.HeaderStyle, reportType)
+	if !headerOK {
+		writeError(writer, http.StatusBadRequest, "REPORT_REQUEST_INVALID", "headerStyle must be 01, 02 or 03")
 		return
 	}
 	candidates, err := handler.ai.Contexts.Candidates(request.Context(), identity, 30)
@@ -848,7 +970,7 @@ func (handler *Handler) instantiateTemplate(writer http.ResponseWriter, request 
 		writeError(writer, http.StatusUnprocessableEntity, "REPORT_TEMPLATE_NOT_APPLICABLE", err.Error())
 		return
 	}
-	definition = applyReportType(definition, reportType)
+	definition = applyCreationPresentation(definition, reportType, headerStyle, []reportai.DataContextCandidate{selected})
 	reportRecord, draft, err := handler.repository.CreateReport(request.Context(), identity, store.CreateInput{
 		ID: reportID, Code: definition.Metadata.Code, Name: definition.Metadata.Name,
 		ReportType: definition.Metadata.ReportType, Definition: definition,
@@ -873,6 +995,22 @@ func selectReportDataContext(candidates []reportai.DataContextCandidate, request
 		}
 	}
 	return reportai.DataContextCandidate{}, false
+}
+
+func reportCandidatesByID(candidates []reportai.DataContextCandidate, requested []askdata.ID) []reportai.DataContextCandidate {
+	selected := make([]reportai.DataContextCandidate, 0, len(requested))
+	for _, wanted := range requested {
+		for _, candidate := range candidates {
+			if candidate.DataContext.ID == wanted {
+				selected = append(selected, candidate)
+				break
+			}
+		}
+	}
+	if len(selected) == 0 && len(candidates) > 0 {
+		return []reportai.DataContextCandidate{candidates[0]}
+	}
+	return selected
 }
 
 func instantiateStarterDefinition(reportID askdata.ID, name, description, templateID string, candidate reportai.DataContextCandidate) (reportmodel.ReportDefinition, error) {
