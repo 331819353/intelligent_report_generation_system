@@ -7,7 +7,7 @@ import { useBlockInteraction, type DragMode } from './use-block-interaction.ts'
 import { useGridInteraction, zoneGridCellSize } from './use-grid-interaction.ts'
 import { ComponentView, type ComponentResult } from './ComponentView.tsx'
 import { minimumSize, type ManifestIndex } from './manifests.ts'
-import { paletteDragType } from '../designer/operations.ts'
+import { frameSlotLabels, frameSlotRole, paletteDragType } from '../designer/operations.ts'
 import {
   blockComponentIDs, canvasOf, orderedSections,
   type Block, type Canvas, type GlobalFilter, type GridRect, type Page, type ReportComponent, type ReportDefinition, type Section, type Zone,
@@ -193,20 +193,25 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
     </div>}
     {zone.slots.map(slot => {
       const component = slot.componentId ? components.get(slot.componentId) : undefined
+      const frameRole = frameSlotRole(slot.cardKind)
       const selected = Boolean(component && component.id === selectedComponentId)
       const rect = slotDrag.rectFor(slot.id, slot.grid)
       const dragging = slotDrag.drag?.id === slot.id
       const acceptsDrop = Boolean(editing?.onComponentDrop && !slot.componentId)
       const authoring = Boolean(editing || props.templatePreview)
-      const emptyLabel = block.type === 'TABLE' ? '拖入数据表格'
+      const emptyLabel = frameRole ? `拖入${frameSlotLabels[frameRole]}`
+        : block.type === 'TABLE' ? '拖入数据表格'
         : block.type === 'CHART' ? '拖入图表组件'
           : zone.type === 'INSIGHT' ? '拖入智能结论或富文本'
             : zone.type === 'CONTENT' ? '拖入图表、指标或表格' : '拖入内容组件'
       const authoringHint = editing ? '从左侧选择或拖拽到这里' : '创建后可选择或拖拽组件填充'
-      const EmptyIcon = block.type === 'TABLE' ? Table : block.type === 'CHART' ? ChartLineUp : Lightbulb
+      const EmptyIcon = frameRole === 'EVIDENCE' ? ChartLineUp
+        : frameRole === 'DETAIL' ? Table
+          : block.type === 'TABLE' ? Table : block.type === 'CHART' ? ChartLineUp : Lightbulb
       return <div className={`report-render-slot ${selected ? 'is-selected' : ''} ${dragging ? 'is-dragging' : ''} ${dropSlotId === slot.id ? 'is-drop-target' : ''}`.trim()}
         key={slot.id}
         data-slot-id={slot.id}
+        data-frame-role={frameRole}
         data-empty-slot={!slot.componentId ? 'true' : undefined}
         style={{
           gridColumn: `${rect.x + 1} / span ${Math.max(rect.w, 1)}`,
@@ -228,7 +233,7 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
           event.preventDefault(); event.stopPropagation(); setDropSlotId('')
           editing?.onComponentDrop?.(block.id, zone.id, slot.id, ref)
         } : undefined}>
-        {editing && slot.cardKind && !slot.cardKind.startsWith('TEMPLATE_') && <span className="report-slot-kind-badge">{slot.cardKind}</span>}
+        {editing && slot.cardKind && !slot.cardKind.startsWith('TEMPLATE_') && <span className="report-slot-kind-badge">{frameRole ? frameSlotLabels[frameRole] : slot.cardKind}</span>}
         {component
           ? <ReportComponentBoundary fallback={<ComponentStateView state="ERROR" onAction={() => onRetryBlock?.(block.id)} />}>
             <ComponentView component={component} manifests={manifests} mobile={mobile} designMode={designMode}
@@ -432,12 +437,12 @@ function RuntimeAutoPage(props: ReportPageViewProps & { mobile?: boolean }) {
     {sections.map((section, sectionIndex) => {
       const entriesFor = (block: Block) => block.zones.flatMap(zone => zone.slots.flatMap(slot => {
         const component = slot.componentId ? components.get(slot.componentId) : undefined
-        return component ? [{ block, zone, component }] : []
+        return component ? [{ block, zone, slot, component }] : []
       }))
       const elements = section.blocks.flatMap(entriesFor)
       if (elements.length === 0) return null
       const displayTemplate = isDisplayTemplateSection(section)
-      const renderElement = ({ block, zone, component }: ReturnType<typeof entriesFor>[number]) => {
+      const renderElement = ({ block, zone, slot, component }: ReturnType<typeof entriesFor>[number], preserveFrameGrid = false) => {
         const manifest = manifests.get(component.templateRef.type, component.templateRef.version)
         const kind = manifest?.renderer === 'CONTROL' || zone.type === 'FILTER' ? 'filter'
           : manifest?.category === 'TABLE' ? 'table'
@@ -450,7 +455,12 @@ function RuntimeAutoPage(props: ReportPageViewProps & { mobile?: boolean }) {
         const role = interaction?.roleFor(component.id)
         return <ReportBlockBoundary key={`${block.id}:${component.id}`}>
           <div className={`report-runtime-element is-${kind}`} data-block-id={block.id} data-component-id={component.id}
-            data-metric-count={metricCount || undefined}>
+            data-frame-role={frameSlotRole(slot.cardKind)}
+            data-metric-count={metricCount || undefined}
+            style={preserveFrameGrid ? {
+              gridColumn: `${slot.grid.x + 1} / span ${Math.max(slot.grid.w, 1)}`,
+              gridRow: `${slot.grid.y + 1} / span ${Math.max(slot.grid.h, 1)}`,
+            } : undefined}>
             <ReportComponentBoundary fallback={<ComponentStateView state="ERROR" onAction={() => onRetryBlock?.(block.id)} />}>
               <ComponentView component={component} manifests={manifests} mobile={mobile} designMode={designMode}
                 item={results?.get(component.id)} onRetry={() => onRetryBlock?.(block.id)}
@@ -470,10 +480,19 @@ function RuntimeAutoPage(props: ReportPageViewProps & { mobile?: boolean }) {
           {section.blocks.map(block => {
             const entries = entriesFor(block)
             if (entries.length === 0) return null
-            if (!block.cardKind?.startsWith('LAYOUT_')) return entries.map(renderElement)
+            if (!block.cardKind?.startsWith('LAYOUT_')) return entries.map(entry => renderElement(entry))
+            const subsection = block.cardKind.startsWith('LAYOUT_SUBSECTION_')
             return <section className="report-runtime-frame" data-layout-frame={block.cardKind} key={block.id}>
               <header><span aria-hidden="true" /><h3>{block.title}</h3></header>
-              <div className="report-runtime-frame-grid">{entries.map(renderElement)}</div>
+              {subsection
+                ? <div className="report-runtime-frame-zones">{block.zones.map(zone => {
+                    const zoneEntries = entries.filter(entry => entry.zone.id === zone.id)
+                    return zoneEntries.length > 0 && <div className="report-runtime-frame-zone" key={zone.id} style={{
+                      gridTemplateColumns: `repeat(${Math.max(zone.layout.columns, 1)}, minmax(0, 1fr))`,
+                      gridTemplateRows: `repeat(${Math.max(zone.layout.rows, 1)}, minmax(28px, auto))`,
+                    }}>{zoneEntries.map(entry => renderElement(entry, true))}</div>
+                  })}</div>
+                : <div className="report-runtime-frame-grid">{entries.map(entry => renderElement(entry))}</div>}
             </section>
           })}
         </div>

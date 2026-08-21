@@ -33,12 +33,12 @@ import {
 } from '../report/render/schema'
 import {
   addDataContextOperations, bindingForField, bundle, createFilterOperations, createInteractionOperations,
-  createLayoutFrameOperations, createSectionOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, layoutFrameLabels, layoutOperations,
+  createSectionOperations, createSubsectionFrameOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, layoutOperations,
   findCompatibleTemplateSlot, placeComponentInSlotOperations,
   removeBlockOperations, removeComponentOperations, removeDataContextOperations, renameSectionOperations,
   renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations,
   decodePalettePayload, paletteDragType, zoneKindForManifest, zoneKindLabels, zoneReorderOperations,
-  type FilterDraft, type InteractionDraft, type LayoutFrameKind,
+  type FilterDraft, type FrameworkRequest, type InteractionDraft,
 } from '../report/designer/operations'
 
 const reportTypeLabels: Record<ReportType, { name: string; hint: string }> = {
@@ -1255,11 +1255,12 @@ export function ReportEditorPage() {
       setComponentBusy(false)
       return
     }
-    // 没有可用槽位时自动补一个主题框，保证数据组件不会再以游离卡片的形式
-    // 直接落在页面上；框架创建与组件落位在同一次受控修订中完成。
-    const frame = createLayoutFrameOperations({
-      definition: draft.definition, page, sectionId: activeSection?.id, kind: 'TOPIC',
-      title: `主题 ${Math.max((activeSection?.blocks.length ?? 0) + 1, 1)}`,
+    // 没有可用槽位时自动补一个标准小节，保证数据组件始终属于“主题—分析角度—
+    // 小节”的叙事结构；框架创建与组件落位仍在同一次受控修订中完成。
+    const frame = createSubsectionFrameOperations({
+      definition: draft.definition, page, sectionId: activeSection?.id,
+      layout: 'CONCLUSION_TOP', chartCount: 2, includeDetail: false, includeAppendix: false,
+      title: `小节 ${Math.max((activeSection?.blocks.length ?? 0) + 1, 1)}`,
       sectionName: `${sectionNoun} 1`, newId: () => crypto.randomUUID(),
     })
     const frameOperation = frame.operations[0]
@@ -1276,7 +1277,7 @@ export function ReportEditorPage() {
         }
     const freshTarget = findCompatibleTemplateSlot(framedPage, frame.sectionId, manifest)
     if (!freshTarget) {
-      setActionError('新建主题框无法容纳该组件，请选择更宽的框架')
+      setActionError('新建小节没有适合该组件的内容区域，请先选择对应的小节布局')
       setComponentBusy(false)
       return
     }
@@ -1288,7 +1289,7 @@ export function ReportEditorPage() {
       setActionError(placed.error); setComponentError(placed.error); setComponentBusy(false)
       return
     }
-    const saved = await commit([...frame.operations, ...placed.operations], `${manifest.displayName}已加入新主题框`, setActionError)
+    const saved = await commit([...frame.operations, ...placed.operations], `${manifest.displayName}已加入新小节`, setActionError)
     if (saved) {
       setActiveSectionId(frame.sectionId); setSelectedComponentId(placed.componentId)
       setSidePanel('data'); setComponentLibraryOpen(false)
@@ -1344,7 +1345,7 @@ export function ReportEditorPage() {
     if (saved && selectedCardId === blockId) setSelectedComponentId('')
   }
 
-  const sectionNoun = draft?.definition.metadata.reportType === 'DASHBOARD' ? '分区' : '章节'
+  const sectionNoun = draft?.definition.metadata.reportType === 'DASHBOARD' ? '分区' : '分析角度'
 
   const addSection = async () => {
     if (!draft || !page || !canEdit) return
@@ -1353,24 +1354,26 @@ export function ReportEditorPage() {
     if (saved) { setActiveSectionId(sectionId); setRenamingSectionId(sectionId) }
   }
 
-  const addFramework = async (kind: 'CHAPTER' | LayoutFrameKind) => {
-    if (kind === 'CHAPTER') {
+  const addFramework = async (request: FrameworkRequest) => {
+    if (request.kind === 'ANGLE') {
       await addSection()
       return
     }
     if (!draft || !page || !canEdit) return
-    const sameKindCount = activeSection?.blocks.filter(block => block.cardKind === `LAYOUT_${kind}`).length ?? 0
-    const label = layoutFrameLabels[kind]
-    const result = createLayoutFrameOperations({
+    const subsectionCount = activeSection?.blocks.filter(block => block.cardKind?.startsWith('LAYOUT_SUBSECTION_')).length ?? 0
+    const result = createSubsectionFrameOperations({
       definition: draft.definition,
       page,
       sectionId: activeSection?.id,
-      kind,
-      title: `${label} ${sameKindCount + 1}`,
+      layout: request.layout,
+      chartCount: request.chartCount,
+      includeDetail: request.includeDetail,
+      includeAppendix: request.includeAppendix,
+      title: `小节 ${subsectionCount + 1}`,
       sectionName: `${sectionNoun} 1`,
       newId: () => crypto.randomUUID(),
     })
-    const saved = await commit(result.operations, `${label}已加入当前${sectionNoun}`, setActionError)
+    const saved = await commit(result.operations, `小节已加入当前${sectionNoun}`, setActionError)
     if (saved) {
       setActiveSectionId(result.sectionId)
       setSelectedComponentId('')
@@ -1603,6 +1606,7 @@ export function ReportEditorPage() {
         <div className="report-editor-main">
           <nav className="report-editor-outline report-editor-sidebar" aria-label="组件面板与大纲">
             <ComponentPalette manifests={latestComponentManifests(manifests.list())} disabled={!canEdit}
+              themeName={draft.definition.metadata.name}
               onPick={pickComponentForSlot} onAddFramework={kind => void addFramework(kind)} />
             <details className="report-editor-structure-panel">
               <summary><span>页面结构</span><em>{sections.length}</em><CaretRight size={14} /></summary>

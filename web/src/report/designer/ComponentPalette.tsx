@@ -1,7 +1,7 @@
 import {
   ArrowsClockwise, ArrowsLeftRight, CalendarDots, ChartBar, ChartBarHorizontal, ChartDonut,
   ChartLineUp, ChartScatter, ClockCounterClockwise, Flask, Funnel, Gauge, GitBranch, GridFour,
-  FileText, Info, Kanban, Lightbulb, ListChecks, MagnifyingGlass, MapTrifold, Path, Pulse, Ranking,
+  FileText, Info, Kanban, Lightbulb, ListChecks, MagnifyingGlass, MapTrifold, Minus, Path, Plus, Pulse, Ranking,
   SlidersHorizontal, Table, Target, TreeStructure, UsersThree, Warning,
 } from '@phosphor-icons/react'
 import { useMemo, useState, type ReactNode } from 'react'
@@ -11,7 +11,7 @@ import {
 } from '../analysis/catalog.ts'
 import type { ComponentManifest } from '../render/manifests.ts'
 import type { ComponentOptions } from '../render/schema.ts'
-import { encodePalettePayload, paletteDragType, type LayoutFrameKind } from './operations.ts'
+import { encodePalettePayload, paletteDragType, type FrameworkRequest, type SubsectionLayout } from './operations.ts'
 
 const groups = [
   { id: 'overview', label: '概览与变化', range: [1, 6] },
@@ -22,20 +22,24 @@ const groups = [
   { id: 'operations', label: '运营与表达', range: [27, 37] },
 ] as const
 
-const frameworkItems: Array<{
-  kind: 'CHAPTER' | LayoutFrameKind
-  name: string
-  description: string
-  badge: string
-  icon: ReactNode
-}> = [
-  { kind: 'CHAPTER', name: '章节框', description: '一级叙事结构，承载多个主题与分析组', badge: '一级结构', icon: <FileText size={18} weight="duotone" /> },
-  { kind: 'TOPIC', name: '主题框', description: '围绕一个业务问题组织相关数据卡片', badge: '2 个槽位', icon: <TreeStructure size={18} weight="duotone" /> },
-  { kind: 'COLUMNS_2', name: '双栏框', description: '两张卡片并排，用于对比或主辅分析', badge: '1 : 1', icon: <GridFour size={18} weight="duotone" /> },
-  { kind: 'COLUMNS_3', name: '三栏框', description: '并列展示三张轻量指标或图表卡片', badge: '1 : 1 : 1', icon: <Kanban size={18} weight="duotone" /> },
-  { kind: 'CONCLUSION', name: '结论框', description: '结论在上、两组证据在下，形成完整论证', badge: '结论 + 证据', icon: <Lightbulb size={18} weight="duotone" /> },
-  { kind: 'APPENDIX', name: '附录框', description: '全宽承载明细、口径说明或补充材料', badge: '全宽', icon: <Table size={18} weight="duotone" /> },
+const subsectionLayouts: Array<{ id: SubsectionLayout; name: string; description: string }> = [
+  { id: 'CONCLUSION_TOP', name: '结论上置', description: '结论通栏，论据图表在下方自适应排列' },
+  { id: 'CONCLUSION_LEFT', name: '结论左置', description: '结论占左半区，论据图表在右侧自动成行' },
 ]
+
+function SubsectionLayoutPreview({ layout, chartCount }: { layout: SubsectionLayout; chartCount: number }) {
+  const perRow = layout === 'CONCLUSION_TOP' ? Math.min(chartCount, 4) : Math.min(chartCount, 2)
+  const rowCount = Math.ceil(chartCount / perRow)
+  const cells = Array.from({ length: chartCount }, (_, index) => {
+    const row = Math.floor(index / perRow)
+    const itemsInRow = row === rowCount - 1 ? chartCount - row * perRow : perRow
+    return <span key={index} style={{ gridColumn: `span ${perRow / itemsInRow}` }}>图表</span>
+  })
+  return <span className={`report-subsection-layout-preview is-${layout.toLocaleLowerCase().replaceAll('_', '-')}`} aria-hidden="true">
+    <strong>结论</strong>
+    <i style={{ gridTemplateColumns: `repeat(${perRow}, minmax(0, 1fr))` }}>{cells}</i>
+  </span>
+}
 
 function familyIcon(kind: AnalysisRendererKind, size = 17): ReactNode {
   const props = { size, weight: 'duotone' as const }
@@ -90,13 +94,17 @@ function FallbackPalette({ manifests, disabled, onPick }: {
 }
 
 /** 按业务问题组织的分析卡片库；每个语义类型固定提供三种可复用版式。 */
-export function ComponentPalette({ manifests, disabled, onPick, onAddFramework }: {
+export function ComponentPalette({ manifests, disabled, themeName, onPick, onAddFramework }: {
   manifests: ComponentManifest[]
   disabled: boolean
+  themeName: string
   onPick: (manifest: ComponentManifest, options?: Partial<ComponentOptions>) => void
-  onAddFramework: (kind: 'CHAPTER' | LayoutFrameKind) => void
+  onAddFramework: (request: FrameworkRequest) => void
 }) {
   const [mode, setMode] = useState<'framework' | 'data'>('framework')
+  const [chartCount, setChartCount] = useState(4)
+  const [includeDetail, setIncludeDetail] = useState(false)
+  const [includeAppendix, setIncludeAppendix] = useState(false)
   const [query, setQuery] = useState('')
   const [filterOpen, setFilterOpen] = useState(false)
   const [group, setGroup] = useState('')
@@ -118,16 +126,46 @@ export function ComponentPalette({ manifests, disabled, onPick, onAddFramework }
         onClick={() => setMode('data')}>数据组件</button>
     </div>
     {mode === 'framework' ? <>
-      <header className="report-palette-section-title"><strong>报告框架</strong><small>先搭结构，再把数据组件放入对应容器</small></header>
-      <div className="report-framework-list">
-        {frameworkItems.map(item => <button type="button" key={item.kind} disabled={disabled}
-          onClick={() => onAddFramework(item.kind)}>
-          <span className="report-framework-icon">{item.icon}</span>
-          <span><strong>{item.name}</strong><small>{item.description}</small></span>
-          <em>{item.badge}</em>
-        </button>)}
-      </div>
-      <p className="report-framework-page-note"><Info size={15} />页面由系统按 1920 × 1080 自动分页，不需要手动放置页面框。</p>
+      <header className="report-palette-section-title"><strong>报告框架</strong><small>主题 → 分析角度 → 小节 → 内容</small></header>
+      <section className="report-framework-hierarchy" aria-label="报告结构层级">
+        <div><span className="report-framework-step">1</span><span><strong>主题</strong><small title={themeName}>{themeName}</small></span><em>报告级</em></div>
+        <button type="button" disabled={disabled} onClick={() => onAddFramework({ kind: 'ANGLE' })}>
+          <span className="report-framework-step">2</span><span><strong>新增分析角度</strong><small>围绕主题建立一条独立分析线</small></span><Plus size={15} />
+        </button>
+        <div><span className="report-framework-step">3</span><span><strong>小节</strong><small>在当前分析角度中组织结论与证据</small></span><em>下方创建</em></div>
+      </section>
+
+      <section className="report-subsection-builder" aria-label="小节布局">
+        <header><span><strong>小节内容布局</strong><small>结论、论据、明细与附录组合为一个整体</small></span></header>
+        <div className="report-subsection-controls">
+          <span><strong>论据图表</strong><small>1–6 个</small></span>
+          <div aria-label="论据图表数量">
+            <button type="button" aria-label="减少图表" disabled={disabled || chartCount <= 1}
+              onClick={() => setChartCount(value => Math.max(1, value - 1))}><Minus size={13} /></button>
+            <output>{chartCount}</output>
+            <button type="button" aria-label="增加图表" disabled={disabled || chartCount >= 6}
+              onClick={() => setChartCount(value => Math.min(6, value + 1))}><Plus size={13} /></button>
+          </div>
+        </div>
+        <div className="report-subsection-layouts">
+          {subsectionLayouts.map(item => <button type="button" key={item.id} disabled={disabled}
+            onClick={() => onAddFramework({
+              kind: 'SUBSECTION', layout: item.id, chartCount, includeDetail, includeAppendix,
+            })}>
+            <SubsectionLayoutPreview layout={item.id} chartCount={chartCount} />
+            <span><strong>{item.name}</strong><small>{item.description}</small></span>
+            <em><Plus size={12} />添加</em>
+          </button>)}
+        </div>
+        <div className="report-subsection-extras" aria-label="附加内容区域">
+          <span><strong>附加区域</strong><small>按需添加，可为空</small></span>
+          <button type="button" aria-pressed={includeDetail} className={includeDetail ? 'is-active' : ''}
+            onClick={() => setIncludeDetail(value => !value)}><Table size={14} />明细</button>
+          <button type="button" aria-pressed={includeAppendix} className={includeAppendix ? 'is-active' : ''}
+            onClick={() => setIncludeAppendix(value => !value)}><FileText size={14} />附录</button>
+        </div>
+      </section>
+      <p className="report-framework-page-note"><Info size={15} />当前报告即主题；分析角度对应画布一级分区，小节可整体拖动。输出按 1920 × 1080 自动分页。</p>
     </> : <>
     <header className="report-palette-section-title"><strong>数据组件</strong><small>37 类业务问题 · 每类 3 种版式</small></header>
     <div className="report-palette-search">

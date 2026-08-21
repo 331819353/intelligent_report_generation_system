@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  addToCardOperations, createLayoutFrameOperations, createStructuredBlockOperations, decodePalettePayload, encodePalettePayload,
+  addToCardOperations, createLayoutFrameOperations, createStructuredBlockOperations, createSubsectionFrameOperations, decodePalettePayload, encodePalettePayload,
+  frameSlotRole,
   findCompatibleTemplateSlot, placeComponentInSlotOperations, removeComponentOperations,
 } from './operations.ts'
 import type { Block, Page, ReportDefinition, ZoneType } from '../render/schema.ts'
@@ -135,6 +136,64 @@ test('report framework creates a persistent three-column container', () => {
   assert.deepEqual(block.zones[0].slots.map(slot => slot.grid.w), [8, 8, 8])
   const chartManifest: ComponentManifest = { ...manifest, type: 'line-trend', category: 'CHART', renderer: 'ECHARTS' }
   assert.equal(findCompatibleTemplateSlot(pageWith([block]), 'section-1', chartManifest)?.blockId, block.id)
+})
+
+test('a top-conclusion subsection creates a full-width conclusion and a configurable chart row', () => {
+  const page = pageWith([])
+  const definition = { canvas: { desktop: { columns: 24 } } } as ReportDefinition
+  const result = createSubsectionFrameOperations({
+    definition, page, sectionId: 'section-1', layout: 'CONCLUSION_TOP', chartCount: 4,
+    includeDetail: false, includeAppendix: false, sectionName: '分析角度 1', newId,
+  })
+  const block = (result.operations[0].payload as { block: Block }).block
+  assert.equal(block.cardKind, 'LAYOUT_SUBSECTION_CONCLUSION_TOP')
+  assert.deepEqual(block.zones[0].slots.map(slot => frameSlotRole(slot.cardKind)), [
+    'CONCLUSION', 'EVIDENCE', 'EVIDENCE', 'EVIDENCE', 'EVIDENCE',
+  ])
+  assert.deepEqual(block.zones[0].slots[0].grid, { x: 0, y: 0, w: 24, h: 3 })
+  assert.deepEqual(block.zones[0].slots.slice(1).map(slot => slot.grid), [
+    { x: 0, y: 3, w: 6, h: 4 }, { x: 6, y: 3, w: 6, h: 4 },
+    { x: 12, y: 3, w: 6, h: 4 }, { x: 18, y: 3, w: 6, h: 4 },
+  ])
+})
+
+test('a left-conclusion subsection adapts two or four charts on the right', () => {
+  const page = pageWith([])
+  const definition = { canvas: { desktop: { columns: 24 } } } as ReportDefinition
+  const result = createSubsectionFrameOperations({
+    definition, page, sectionId: 'section-1', layout: 'CONCLUSION_LEFT', chartCount: 4,
+    includeDetail: true, includeAppendix: true, sectionName: '分析角度 1', newId,
+  })
+  const block = (result.operations[0].payload as { block: Block }).block
+  assert.deepEqual(block.zones[0].slots[0].grid, { x: 0, y: 0, w: 12, h: 8 })
+  assert.deepEqual(block.zones[0].slots.slice(1).map(slot => slot.grid), [
+    { x: 12, y: 0, w: 6, h: 4 }, { x: 18, y: 0, w: 6, h: 4 },
+    { x: 12, y: 4, w: 6, h: 4 }, { x: 18, y: 4, w: 6, h: 4 },
+  ])
+  assert.deepEqual(block.zones.flatMap(item => item.slots.map(slot => frameSlotRole(slot.cardKind))), [
+    'CONCLUSION', 'EVIDENCE', 'EVIDENCE', 'EVIDENCE', 'EVIDENCE', 'DETAIL', 'APPENDIX',
+  ])
+})
+
+test('subsection slot matching prefers conclusion, detail and appendix by component role', () => {
+  const definition = { canvas: { desktop: { columns: 24 } } } as ReportDefinition
+  const result = createSubsectionFrameOperations({
+    definition, page: pageWith([]), sectionId: 'section-1', layout: 'CONCLUSION_TOP', chartCount: 2,
+    includeDetail: true, includeAppendix: true, sectionName: '分析角度 1', newId,
+  })
+  const block = (result.operations[0].payload as { block: Block }).block
+  const page = pageWith([block])
+  const chartManifest: ComponentManifest = { ...manifest, type: 'line-trend', category: 'CHART', renderer: 'ECHARTS' }
+  const tableManifest: ComponentManifest = { ...manifest, type: 'analysis-detail-query', category: 'TABLE', renderer: 'REACT' }
+  const appendixManifest: ComponentManifest = { ...manifest, type: 'analysis-data-explanation', category: 'CONTENT', renderer: 'REACT' }
+  const roleFor = (candidate: ComponentManifest) => {
+    const target = findCompatibleTemplateSlot(page, 'section-1', candidate)
+    return frameSlotRole(block.zones.flatMap(item => item.slots).find(slot => slot.id === target?.slotId)?.cardKind)
+  }
+  assert.equal(roleFor(manifest), 'CONCLUSION')
+  assert.equal(roleFor(chartManifest), 'EVIDENCE')
+  assert.equal(roleFor(tableManifest), 'DETAIL')
+  assert.equal(roleFor(appendixManifest), 'APPENDIX')
 })
 
 test('removing the last component from a report framework keeps its empty slot', () => {

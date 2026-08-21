@@ -97,7 +97,8 @@ export const zoneKindLabels: Record<ZoneKind, string> = {
 /** 分块槽位只接收符合语义角色的组件，避免把筛选控件误放到图表区。 */
 export function zoneKindForManifest(manifest: ComponentManifest): ZoneKind {
   if (manifest.category === 'CONTROL' || manifest.renderer === 'CONTROL') return 'FILTER'
-  if (manifest.type === 'insight-text' || manifest.type === 'rich-text') return 'INSIGHT'
+  if (manifest.type === 'insight-text' || manifest.type === 'rich-text' ||
+    manifest.type === 'analysis-insight-conclusion' || manifest.type === 'analysis-long-form-conclusion') return 'INSIGHT'
   return 'CONTENT'
 }
 
@@ -112,8 +113,59 @@ export type TemplateSlotTarget = { sectionId: string; blockId: string; zoneId: s
 
 const templateSlotPrefix = 'TEMPLATE_'
 const layoutFramePrefix = 'LAYOUT_'
+const frameSlotPrefix = 'FRAME_'
+
+export type FrameSlotRole = 'CONCLUSION' | 'EVIDENCE' | 'DETAIL' | 'APPENDIX'
+
+export const frameSlotLabels: Record<FrameSlotRole, string> = {
+  CONCLUSION: '结论',
+  EVIDENCE: '论据图表',
+  DETAIL: '明细',
+  APPENDIX: '附录',
+}
+
+export function frameSlotRole(cardKind?: string): FrameSlotRole | undefined {
+  if (!cardKind?.startsWith(frameSlotPrefix)) return undefined
+  const role = cardKind.slice(frameSlotPrefix.length) as FrameSlotRole
+  return Object.prototype.hasOwnProperty.call(frameSlotLabels, role) ? role : undefined
+}
+
+/** 小节中的槽位带有业务角色，数据组件只能进入与其用途匹配的位置。 */
+export function manifestFitsFrameSlot(manifest: ComponentManifest, cardKind?: string): boolean {
+  const role = frameSlotRole(cardKind)
+  if (!role) return true
+  if (role === 'CONCLUSION') return zoneKindForManifest(manifest) === 'INSIGHT'
+  if (role === 'DETAIL') return manifest.category === 'TABLE'
+  if (role === 'APPENDIX') {
+    return manifest.category === 'CONTENT' && zoneKindForManifest(manifest) !== 'INSIGHT'
+  }
+  return manifest.category !== 'CONTROL' && zoneKindForManifest(manifest) !== 'INSIGHT'
+}
+
+function manifestFitsSlot(manifest: ComponentManifest, zone: Zone, slot: Zone['slots'][number]): boolean {
+  return frameSlotRole(slot.cardKind)
+    ? manifestFitsFrameSlot(manifest, slot.cardKind)
+    : manifestFitsZone(manifest, zone.type)
+}
 
 export type LayoutFrameKind = 'TOPIC' | 'COLUMNS_2' | 'COLUMNS_3' | 'CONCLUSION' | 'APPENDIX'
+
+export type SubsectionLayout = 'CONCLUSION_TOP' | 'CONCLUSION_LEFT'
+
+export type FrameworkRequest =
+  | { kind: 'ANGLE' }
+  | {
+      kind: 'SUBSECTION'
+      layout: SubsectionLayout
+      chartCount: number
+      includeDetail: boolean
+      includeAppendix: boolean
+    }
+
+export const subsectionLayoutLabels: Record<SubsectionLayout, string> = {
+  CONCLUSION_TOP: '结论上置',
+  CONCLUSION_LEFT: '结论左置',
+}
 
 export const layoutFrameLabels: Record<LayoutFrameKind, string> = {
   TOPIC: '主题框',
@@ -139,19 +191,31 @@ function manifestFitsTemplateBlock(manifest: ComponentManifest, block: Block): b
 export function findCompatibleTemplateSlot(
   page: Page, sectionId: string | undefined, manifest: ComponentManifest,
 ): TemplateSlotTarget | undefined {
+  const preferredRole: FrameSlotRole = zoneKindForManifest(manifest) === 'INSIGHT' ? 'CONCLUSION'
+    : manifest.category === 'TABLE' ? 'DETAIL'
+      : manifest.category === 'CONTENT' ? 'APPENDIX' : 'EVIDENCE'
   const sections = orderedSections(page)
   const preferred = sections.find(section => section.id === sectionId)
   const candidates = preferred ? [preferred, ...sections.filter(section => section.id !== preferred.id)] : sections
   for (const section of candidates) {
     for (const block of section.blocks) {
       if (!manifestFitsTemplateBlock(manifest, block)) continue
+      const matches: Array<{ target: TemplateSlotTarget; score: number }> = []
       for (const zone of block.zones.slice().sort((left, right) => (left.order ?? 0) - (right.order ?? 0))) {
-        if (!manifestFitsZone(manifest, zone.type)) continue
         const isLayoutFrame = block.cardKind?.startsWith(layoutFramePrefix)
-        const slot = zone.slots.find(item => !item.componentId &&
-          (item.cardKind?.startsWith(templateSlotPrefix) || isLayoutFrame))
-        if (slot) return { sectionId: section.id, blockId: block.id, zoneId: zone.id, slotId: slot.id }
+        for (const slot of zone.slots) {
+          if (slot.componentId ||
+            (!slot.cardKind?.startsWith(templateSlotPrefix) && !isLayoutFrame) ||
+            !manifestFitsSlot(manifest, zone, slot)) continue
+          const role = frameSlotRole(slot.cardKind)
+          matches.push({
+            target: { sectionId: section.id, blockId: block.id, zoneId: zone.id, slotId: slot.id },
+            score: role === preferredRole ? 0 : role ? 1 : 2,
+          })
+        }
       }
+      const match = matches.sort((left, right) => left.score - right.score)[0]
+      if (match) return match.target
     }
   }
   return undefined
@@ -190,8 +254,9 @@ export function placeComponentInSlotOperations(input: PlaceComponentInSlotInput)
   const slot = zone?.slots.find(item => item.id === input.slotId)
   if (!located || !zone || !slot) return { operations: [], componentId: '', error: '目标槽位不存在' }
   if (slot.componentId) return { operations: [], componentId: '', error: '这个槽位已经有组件' }
-  if (!manifestFitsZone(input.manifest, zone.type)) {
-    return { operations: [], componentId: '', error: `${input.manifest.displayName}不能放入${zoneKindLabels[zone.type]}` }
+  if (!manifestFitsSlot(input.manifest, zone, slot)) {
+    const role = frameSlotRole(slot.cardKind)
+    return { operations: [], componentId: '', error: `${input.manifest.displayName}不能放入${role ? frameSlotLabels[role] : zoneKindLabels[zone.type]}` }
   }
   const minimum = minimumSize(input.manifest)
   if (slot.grid.w < minimum.w || slot.grid.h < minimum.h) {
@@ -294,6 +359,136 @@ export function createLayoutFrameOperations(input: {
       mobile: { order: (target?.blocks.length ?? 0) + 1, visible: true, heightMode: 'AUTO', slotMode: 'STACK' },
     },
     zones: frameZones(input.kind, columns, input.newId),
+  }
+  if (target) {
+    return {
+      sectionId: target.id, blockId,
+      operations: [{ op: 'BLOCK_CREATE', targetId: target.id, payload: { block } }],
+    }
+  }
+  const sectionId = input.newId()
+  return {
+    sectionId, blockId,
+    operations: [{
+      op: 'SECTION_CREATE', targetId: input.page.id,
+      payload: { section: { id: sectionId, name: input.sectionName, order: 1, blocks: [block] } },
+    }],
+  }
+}
+
+function subsectionMainZone(
+  layout: SubsectionLayout, chartCount: number, columns: number, newId: () => string,
+): Zone {
+  const count = Math.min(Math.max(Math.round(chartCount), 1), 6)
+  const evidenceSlots: Zone['slots'] = []
+  let rows: number
+  const conclusion = {
+    id: newId(),
+    grid: { x: 0, y: 0, w: columns, h: 3 },
+    cardKind: `${frameSlotPrefix}CONCLUSION`,
+  }
+
+  if (layout === 'CONCLUSION_TOP') {
+    const perRow = Math.min(count, 4)
+    const rowCount = Math.ceil(count / perRow)
+    rows = 3 + rowCount * 4
+    for (let index = 0; index < count; index += 1) {
+      const row = Math.floor(index / perRow)
+      const column = index % perRow
+      const itemsInRow = row === rowCount - 1 ? count - row * perRow : perRow
+      const width = Math.floor(columns / itemsInRow)
+      evidenceSlots.push({
+        id: newId(), cardKind: `${frameSlotPrefix}EVIDENCE`,
+        grid: {
+          x: column * width, y: 3 + row * 4,
+          w: column === itemsInRow - 1 ? columns - column * width : width, h: 4,
+        },
+      })
+    }
+  } else {
+    const evidenceColumns = Math.min(count, 2)
+    const rowCount = Math.ceil(count / evidenceColumns)
+    rows = Math.max(rowCount * 4, 4)
+    conclusion.grid = { x: 0, y: 0, w: Math.floor(columns / 2), h: rows }
+    const rightStart = conclusion.grid.w
+    const rightWidth = columns - rightStart
+    for (let index = 0; index < count; index += 1) {
+      const row = Math.floor(index / evidenceColumns)
+      const column = index % evidenceColumns
+      const itemsInRow = row === rowCount - 1 ? count - row * evidenceColumns : evidenceColumns
+      const width = Math.floor(rightWidth / itemsInRow)
+      evidenceSlots.push({
+        id: newId(), cardKind: `${frameSlotPrefix}EVIDENCE`,
+        grid: {
+          x: rightStart + column * width, y: row * 4,
+          w: column === itemsInRow - 1 ? rightWidth - column * width : width, h: 4,
+        },
+      })
+    }
+  }
+
+  return {
+    id: newId(), order: 1, type: 'CONTENT',
+    layout: zoneLayoutFor('CONTENT', columns, rows),
+    slots: [conclusion, ...evidenceSlots],
+  }
+}
+
+/**
+ * 小节是“结论—论据—明细—附录”的最小叙事单元。结论和论据共享一个子网格，
+ * 因而可以精确表达结论上置、结论左置等复合版式；图表数量由作者在创建时决定。
+ */
+export function createSubsectionFrameOperations(input: {
+  definition: ReportDefinition
+  page: Page
+  sectionId?: string
+  layout: SubsectionLayout
+  chartCount: number
+  includeDetail: boolean
+  includeAppendix: boolean
+  title?: string
+  sectionName: string
+  newId: () => string
+}): { operations: EditorOperation[]; sectionId: string; blockId: string } {
+  const columns = canvasOf(input.definition).desktop.columns
+  const sections = orderedSections(input.page)
+  const target = sections.find(section => section.id === input.sectionId) ?? sections.at(-1)
+  const mainZone = subsectionMainZone(input.layout, input.chartCount, columns, input.newId)
+  const zones: Zone[] = [mainZone]
+  if (input.includeDetail) {
+    zones.push({
+      id: input.newId(), order: zones.length + 1, type: 'CONTENT',
+      layout: zoneLayoutFor('CONTENT', columns, 6),
+      slots: [{
+        id: input.newId(), cardKind: `${frameSlotPrefix}DETAIL`,
+        grid: { x: 0, y: 0, w: columns, h: 6 },
+      }],
+    })
+  }
+  if (input.includeAppendix) {
+    zones.push({
+      id: input.newId(), order: zones.length + 1, type: 'FOOTER',
+      layout: zoneLayoutFor('FOOTER', columns, 5),
+      slots: [{
+        id: input.newId(), cardKind: `${frameSlotPrefix}APPENDIX`,
+        grid: { x: 0, y: 0, w: columns, h: 5 },
+      }],
+    })
+  }
+  const structuralRows = zones.reduce((sum, zone) => sum + zone.layout.rows, 0)
+  const rect = target
+    ? findFreeRect(target.blocks, { w: columns, h: structuralRows + 3 }, columns)
+    : { x: 0, y: 0, w: columns, h: structuralRows + 3 }
+  const blockId = input.newId()
+  const block: Block = {
+    id: blockId, type: 'ANALYSIS_CARD',
+    title: input.title?.trim() || '未命名小节',
+    cardKind: `${layoutFramePrefix}SUBSECTION_${input.layout}`,
+    layout: {
+      desktop: rect,
+      mobile: { order: (target?.blocks.length ?? 0) + 1, visible: true, heightMode: 'AUTO', slotMode: 'STACK' },
+    },
+    zones,
   }
   if (target) {
     return {
