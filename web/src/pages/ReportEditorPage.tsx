@@ -968,6 +968,12 @@ export function ReportEditorPage() {
   const paperRef = useRef<HTMLElement>(null)
 
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2600) }
+  const revealSidePanel = (panel: 'ai' | 'data' | 'appearance' | 'interaction') => {
+    setSidePanel(panel)
+    if (!canvasFocused) return
+    setCanvasFocused(false)
+    setEditorScale(current => Math.min(current, .5))
+  }
 
   useEffect(() => {
     if (newMode || designSnapshot) return undefined
@@ -1435,7 +1441,7 @@ export function ReportEditorPage() {
       const saved = await commit(result.operations, `${manifest.displayName}已填入展示模板`, setActionError)
       if (saved) {
         setActiveSectionId(templateTarget.sectionId); setSelectedComponentId(result.componentId)
-        setSidePanel('data'); setComponentLibraryOpen(false)
+        revealSidePanel('data'); setComponentLibraryOpen(false)
       }
       setComponentBusy(false)
       return
@@ -1463,7 +1469,7 @@ export function ReportEditorPage() {
     if (result.error) { setActionError(result.error); setComponentError(result.error); setComponentBusy(false); return }
     const saved = await commit(result.operations, `${manifest.displayName}已放入现有元素组`, setActionError)
     if (saved) {
-      setSelectedComponentId(result.componentId); setSidePanel('data'); setComponentLibraryOpen(false); setSlotPickerTarget(null)
+      setSelectedComponentId(result.componentId); revealSidePanel('data'); setComponentLibraryOpen(false); setSlotPickerTarget(null)
     }
     setComponentBusy(false)
   }
@@ -1821,7 +1827,7 @@ export function ReportEditorPage() {
           <button type="button" aria-label="撤销" disabled={!canEdit || applying} onClick={() => void undoRedo(false)}><ArrowUDownLeft size={20} /></button>
           <button type="button" aria-label="重做" disabled={!canEdit || applying} onClick={() => void undoRedo(true)}><ArrowUDownRight size={20} /></button>
           <button className={`report-editor-ai-trigger ${sidePanel === 'ai' ? 'is-active' : ''}`} type="button" disabled={!canAIEdit}
-            aria-label="AI 改稿" title="AI 改稿" onClick={() => { setEditorView('edit'); setSidePanel('ai') }}><Sparkle size={18} weight="fill" /></button>
+            aria-label="AI 改稿" title="AI 改稿" onClick={() => { setEditorView('edit'); revealSidePanel('ai') }}><Sparkle size={18} weight="fill" /></button>
           <button className="report-editor-publish primary-button" type="button" disabled={!canPublish || Boolean(aiPreview)} title={aiPreview ? '请先应用或退回当前 AI 方案' : ''} onClick={() => navigate(`/reports/${reportId}/publish-review`)}><Eye size={17} />发布</button>
           <button className="report-editor-more" type="button" aria-label="打开报告定义" title="打开报告定义 JSON" onClick={() => setJsonOpen(true)}><DotsThreeVertical size={20} /></button>
         </div>
@@ -1919,7 +1925,7 @@ export function ReportEditorPage() {
                 filters={displayedGlobalFilters} values={designFilterValues}
                 onChange={(filterId, value) => setDesignFilterValues(current => ({ ...current, [filterId]: value }))}
                 onApply={() => notify('筛选条件已应用到报告预览')} applying={executing}
-                onConfigure={editorView === 'edit' ? () => { setSelectedComponentId(''); setSidePanel('data'); setReportInspectorView('filters') } : undefined}
+                onConfigure={editorView === 'edit' ? () => { setSelectedComponentId(''); revealSidePanel('data'); setReportInspectorView('filters') } : undefined}
                 onExport={() => notify('发布后可导出报告')} locked={editorView === 'edit'} />
               {/* 框架创建发生在画布内；左侧只负责把数据组件填入已确认的小节槽位。 */}
               {page.sections.length > 0 && <ReportPageView definition={draft.definition} page={page} manifests={manifests} results={results}
@@ -1927,7 +1933,7 @@ export function ReportEditorPage() {
                 selectedComponentId={editorView === 'edit' ? selectedComponentId : ''}
                 onSelectComponent={editorView === 'edit' ? (componentId, blockId) => {
                   setSelectedComponentId(componentId)
-                  if (componentId) setSidePanel('data')
+                  if (componentId) revealSidePanel('data')
                   const located = findComponentBlock(page, componentId)
                   if (located) setActiveSectionId(located.section.id)
                   else if (blockId) setActiveSectionId(activeSectionId)
