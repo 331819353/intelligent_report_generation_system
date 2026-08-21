@@ -34,7 +34,7 @@ import { defaultFactDataContextId } from '../report/designer/default-data-contex
 import { sectionChartsReady, smartInsightIsPending, subsectionChartsReady } from '../report/designer/smart-insight-readiness'
 import { analysisCardCatalog } from '../report/analysis/catalog'
 import {
-  editorBindingGroups, editorBindingsValid, emptyManifestIndex, indexManifests, latestComponentManifests, listComponentManifests, minimumSize,
+  editorBindingsValid, emptyManifestIndex, indexManifests, latestComponentManifests, listComponentManifests, minimumSize,
   type ComponentManifest, type ManifestIndex,
 } from '../report/render/manifests'
 import {
@@ -525,60 +525,6 @@ type FilterFieldSummary = {
   scope: string
 }
 
-/**
- * 把卡片的作者表单翻译成一份可核验的数据合同摘要。这里展示的是当前真实绑定，
- * 而不是模板示例值；未填写的合同角色会明确标成「待配置」。
- */
-function BindingMappingSummary({ manifest, dataset, fields, dimensions, measures, filters }: {
-  manifest: ComponentManifest
-  dataset: string
-  fields: DataContextField[]
-  dimensions: FieldBinding[]
-  measures: FieldBinding[]
-  filters: FilterFieldSummary[]
-}) {
-  const groups = editorBindingGroups(manifest)
-  const fieldLabel = (code: string) => {
-    const field = fields.find(item => item.code === code)
-    return field?.name && field.name !== code ? `${field.name} · ${code}` : code
-  }
-  const bindingsFor = (kind: 'DIMENSION' | 'MEASURE') => kind === 'DIMENSION' ? dimensions : measures
-
-  return <section className="report-binding-map" aria-label="字段映射总览">
-    <header>
-      <div><strong>字段映射总览</strong><small>应用后，卡片将严格按以下数据合同查询</small></div>
-      <span>{groups.length} 类字段角色</span>
-    </header>
-    <div className="report-binding-map-row is-dataset">
-      <span><Database size={14} />数据集</span>
-      <strong>{dataset || '待选择数据集'}</strong>
-    </div>
-    {groups.map(group => {
-      const bindings = bindingsFor(group.kind).filter(binding => group.roles.includes(binding.role))
-      return <div className="report-binding-map-row" key={group.id}>
-        <span>{group.kind === 'MEASURE' ? '指标字段' : '维度字段'}<small>{group.label}</small></span>
-        <div className="report-binding-map-values">
-          {bindings.length > 0
-            ? bindings.map((binding, index) => <strong key={`${binding.role}-${binding.field}-${index}`} className={binding.field ? '' : 'is-empty'}>
-                {binding.field ? fieldLabel(binding.field) : '待配置'}
-              </strong>)
-            : <strong className="is-empty">{group.min > 0 ? '待配置' : '可选'}</strong>}
-        </div>
-      </div>
-    })}
-    <div className="report-binding-map-row is-filter">
-      <span><Funnel size={14} />过滤字段<small>报告级 / 卡片级</small></span>
-      <div className="report-binding-map-values">
-        {filters.length > 0
-          ? filters.map((filter, index) => <strong key={`${filter.dataset}-${filter.field}-${filter.scope}-${index}`}>
-              {filter.field}<small>{filter.dataset} · {filter.scope}</small>
-            </strong>)
-          : <strong className="is-empty">未设置（可选）</strong>}
-      </div>
-    </div>
-  </section>
-}
-
 /** 只保留组件清单 optionSchema 声明的表现属性；标题/副标题/富文本是所有清单共有的基础项。 */
 function pruneOptions(options: ComponentOptions, manifest: ComponentManifest): ComponentOptions {
   const allowed = new Set(['title', 'subtitle', 'richText', ...Object.keys(manifest.optionSchema.properties ?? {})])
@@ -796,8 +742,6 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
             <ComponentBindingEditor manifest={manifest} dimensions={dimensions} measures={measures}
               dimensionFields={dimensionFields} measureFields={measureFields}
               onDimensionsChange={setDimensions} onMeasuresChange={setMeasures} />
-            <BindingMappingSummary manifest={manifest} dataset={contextNameOf(dataContextId)} fields={fields}
-              dimensions={dimensions} measures={measures} filters={filterFields} />
           </>}
           {!bindingValid && <p className="report-editor-inline-error"><WarningCircle size={15} />请完成该组件要求的核心字段配置</p>}
           {!metricStatus && manifest.editorProfile && <section className="report-profile-result">
