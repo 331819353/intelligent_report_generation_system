@@ -111,6 +111,17 @@ export function manifestFitsZone(manifest: ComponentManifest, kind: ZoneKind): b
 export type TemplateSlotTarget = { sectionId: string; blockId: string; zoneId: string; slotId: string }
 
 const templateSlotPrefix = 'TEMPLATE_'
+const layoutFramePrefix = 'LAYOUT_'
+
+export type LayoutFrameKind = 'TOPIC' | 'COLUMNS_2' | 'COLUMNS_3' | 'CONCLUSION' | 'APPENDIX'
+
+export const layoutFrameLabels: Record<LayoutFrameKind, string> = {
+  TOPIC: '主题框',
+  COLUMNS_2: '双栏框',
+  COLUMNS_3: '三栏框',
+  CONCLUSION: '结论框',
+  APPENDIX: '附录框',
+}
 
 function manifestFitsTemplateBlock(manifest: ComponentManifest, block: Block): boolean {
   if (block.type === 'CHART') return manifest.category === 'CHART'
@@ -136,7 +147,9 @@ export function findCompatibleTemplateSlot(
       if (!manifestFitsTemplateBlock(manifest, block)) continue
       for (const zone of block.zones.slice().sort((left, right) => (left.order ?? 0) - (right.order ?? 0))) {
         if (!manifestFitsZone(manifest, zone.type)) continue
-        const slot = zone.slots.find(item => !item.componentId && item.cardKind?.startsWith(templateSlotPrefix))
+        const isLayoutFrame = block.cardKind?.startsWith(layoutFramePrefix)
+        const slot = zone.slots.find(item => !item.componentId &&
+          (item.cardKind?.startsWith(templateSlotPrefix) || isLayoutFrame))
         if (slot) return { sectionId: section.id, blockId: block.id, zoneId: zone.id, slotId: slot.id }
       }
     }
@@ -222,6 +235,79 @@ function structuredBlock(title: string, rect: GridRect, order: number, newId: ()
       mobile: { order, visible: true, heightMode: 'AUTO', slotMode: 'STACK' },
     },
     zones: [zone('FILTER', 1, 2, 2), zone('INSIGHT', 2, 3, 1), zone('CONTENT', 3, 6, 2)],
+  }
+}
+
+function frameZones(kind: LayoutFrameKind, columns: number, newId: () => string): Zone[] {
+  const zone = (type: ZoneKind, order: number, rows: number, slotCount: number): Zone => {
+    const slotWidth = Math.floor(columns / slotCount)
+    return {
+      id: newId(), order, type,
+      layout: zoneLayoutFor(type, columns, rows),
+      slots: Array.from({ length: slotCount }, (_, index) => ({
+        id: newId(),
+        grid: {
+          x: index * slotWidth, y: 0,
+          w: index === slotCount - 1 ? columns - index * slotWidth : slotWidth,
+          h: rows,
+        },
+      })),
+    }
+  }
+  switch (kind) {
+    case 'COLUMNS_2': return [zone('CONTENT', 1, 7, 2)]
+    case 'COLUMNS_3': return [zone('CONTENT', 1, 7, 3)]
+    case 'CONCLUSION': return [zone('INSIGHT', 1, 3, 1), zone('CONTENT', 2, 6, 2)]
+    case 'APPENDIX': return [zone('CONTENT', 1, 9, 1)]
+    default: return [zone('CONTENT', 1, 7, 2)]
+  }
+}
+
+/**
+ * 报告框架是 Definition 中的真实容器，而不是画布装饰。后续从组件库点击或拖入
+ * 的数据组件会优先填充这些空槽位；即使移除最后一个组件，框架本身也会保留。
+ */
+export function createLayoutFrameOperations(input: {
+  definition: ReportDefinition
+  page: Page
+  sectionId?: string
+  kind: LayoutFrameKind
+  title?: string
+  sectionName: string
+  newId: () => string
+}): { operations: EditorOperation[]; sectionId: string; blockId: string } {
+  const columns = canvasOf(input.definition).desktop.columns
+  const sections = orderedSections(input.page)
+  const target = sections.find(section => section.id === input.sectionId) ?? sections.at(-1)
+  const rows = input.kind === 'CONCLUSION' ? 12 : input.kind === 'APPENDIX' ? 11 : 10
+  const rect = target
+    ? findFreeRect(target.blocks, { w: columns, h: rows }, columns)
+    : { x: 0, y: 0, w: columns, h: rows }
+  const blockId = input.newId()
+  const block: Block = {
+    id: blockId,
+    type: 'ANALYSIS_CARD',
+    title: input.title?.trim() || layoutFrameLabels[input.kind],
+    cardKind: `${layoutFramePrefix}${input.kind}`,
+    layout: {
+      desktop: rect,
+      mobile: { order: (target?.blocks.length ?? 0) + 1, visible: true, heightMode: 'AUTO', slotMode: 'STACK' },
+    },
+    zones: frameZones(input.kind, columns, input.newId),
+  }
+  if (target) {
+    return {
+      sectionId: target.id, blockId,
+      operations: [{ op: 'BLOCK_CREATE', targetId: target.id, payload: { block } }],
+    }
+  }
+  const sectionId = input.newId()
+  return {
+    sectionId, blockId,
+    operations: [{
+      op: 'SECTION_CREATE', targetId: input.page.id,
+      payload: { section: { id: sectionId, name: input.sectionName, order: 1, blocks: [block] } },
+    }],
   }
 }
 
@@ -483,7 +569,8 @@ export function removeComponentOperations(page: Page, componentId: string): Edit
     const structured = Boolean(block.title) && (['FILTER', 'INSIGHT', 'CONTENT'] as ZoneKind[])
       .every(kind => block.zones.some(item => item.type === kind))
     const templateSlot = slot?.cardKind?.startsWith(templateSlotPrefix)
-    if ((structured || templateSlot) && slot) {
+    const layoutFrame = block.cardKind?.startsWith(layoutFramePrefix)
+    if ((structured || templateSlot || layoutFrame) && slot) {
       operations.push({ op: 'SLOT_UPDATE', targetId: slot.id, payload: { grid: slot.grid, componentId: '' } })
     } else if (!zone || block.zones.length <= 1) {
       operations.push({ op: 'BLOCK_DELETE', targetId: block.id, payload: {} })

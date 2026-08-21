@@ -3,7 +3,7 @@ import {
   CheckCircle, CirclesFour, Database, DotsThreeVertical, Eye, Funnel, Info, MagicWand,
   NotePencil, PencilSimple, Plus, ShieldCheck, Sparkle, SpinnerGap, Trash, WarningCircle, X,
 } from '@phosphor-icons/react'
-import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import '../styles/report.css'
@@ -29,16 +29,16 @@ import {
 } from '../report/render/manifests'
 import {
   canvasOf, findBlock, findComponentBlock, orderedPages, orderedSections,
-  type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type Page, type ReportDefinition, type ReportHeaderStyle, type ReportType,
+  type Block, type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type Page, type ReportDefinition, type ReportHeaderStyle, type ReportType, type Section,
 } from '../report/render/schema'
 import {
-  addComponentOperations, addDataContextOperations, bindingForField, bundle, createFilterOperations, createInteractionOperations,
-  createSectionOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, layoutOperations,
+  addDataContextOperations, bindingForField, bundle, createFilterOperations, createInteractionOperations,
+  createLayoutFrameOperations, createSectionOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, layoutFrameLabels, layoutOperations,
   findCompatibleTemplateSlot, placeComponentInSlotOperations,
   removeBlockOperations, removeComponentOperations, removeDataContextOperations, renameSectionOperations,
   renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations,
   decodePalettePayload, paletteDragType, zoneKindForManifest, zoneKindLabels, zoneReorderOperations,
-  type FilterDraft, type InteractionDraft,
+  type FilterDraft, type InteractionDraft, type LayoutFrameKind,
 } from '../report/designer/operations'
 
 const reportTypeLabels: Record<ReportType, { name: string; hint: string }> = {
@@ -546,7 +546,7 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
       <div className="report-editor-manual-form">
         {mode === 'data' && <>
         <section className="report-profile-source">
-          <header><Database size={16} /><div><strong>{metricStatus ? '数据源' : '先确定分析基础'}</strong><small>{metricStatus ? '指标值与局部过滤值均来自所选数据集' : '选择这张图使用的数据和呈现方式'}</small></div></header>
+          <header className="report-profile-heading"><span className="report-profile-heading-icon"><Database size={16} /></span><div><strong>{metricStatus ? '数据源' : '先确定分析基础'}</strong><small>{metricStatus ? '指标值与局部过滤值均来自所选数据集' : '选择这张图使用的数据和呈现方式'}</small></div></header>
           {!semanticBound && reportContexts.length > 0 && <label>{metricStatus ? '数据集' : '数据来源'}
             <select aria-label="卡片数据集" value={dataContextId} onChange={event => changeContext(event.target.value)}>
               {reportContexts.map(context => <option key={context.id} value={context.id}>{contextNameOf(context.id)}</option>)}
@@ -575,7 +575,7 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
 
         {bindable && contract && manifest && <section className="report-profile-fields">
           <header>
-            <div><strong>{metricStatus ? '卡片配置' : '再回答几个业务问题'}</strong><small>{metricStatus ? '配置主指标、按需添加辅助指标与过滤项' : '不同图表只显示各自真正需要的内容'}</small></div>
+            <div className="report-profile-heading"><span className="report-profile-heading-icon"><CirclesFour size={16} /></span><div><strong>{metricStatus ? '卡片配置' : '再回答几个业务问题'}</strong><small>{metricStatus ? '配置主指标、按需添加辅助指标与过滤项' : '不同图表只显示各自真正需要的内容'}</small></div></div>
             <div className="report-editor-binding-assist">
               <button type="button" disabled={busy || suggesting} title={canAI && onSuggest ? '根据图表用途智能选择合适字段' : '按字段类型生成一套可用配置'} onClick={recommend}>
                 {suggesting ? <SpinnerGap className="is-spinning" size={14} /> : <MagicWand size={14} />}{suggesting ? '推荐中…' : '智能推荐'}
@@ -796,9 +796,13 @@ export function ReportEditorPage() {
   const [reportInspectorView, setReportInspectorView] = useState<'overview' | 'datasets' | 'filters'>('overview')
   const [designFilterValues, setDesignFilterValues] = useState<Record<string, unknown>>({})
   const [editorView, setEditorView] = useState<'edit' | 'preview'>('edit')
+  const [editorScale, setEditorScale] = useState(.5)
+  const [previewPageCount, setPreviewPageCount] = useState(1)
   const [lastReceipt, setLastReceipt] = useState<{ from: number; to: number; count: number; source: string } | null>(null)
   const [renamingSectionId, setRenamingSectionId] = useState('')
   const [renamingTitle, setRenamingTitle] = useState(false)
+  const canvasRef = useRef<HTMLElement>(null)
+  const paperRef = useRef<HTMLElement>(null)
 
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2600) }
 
@@ -974,6 +978,47 @@ export function ReportEditorPage() {
     () => new Map((execution?.components ?? []).map(item => [item.componentId, item])),
     [execution],
   )
+
+  // Definition 始终在 1920px 设计宽度上排版；编辑器只改变观看比例，不再让
+  // 纸张宽度随面板挤压而重排。这样编辑态、预览态和最终导出使用同一套坐标。
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || editorView !== 'edit') return undefined
+    const update = () => {
+      const available = Math.max(canvas.clientWidth - 52, 480)
+      setEditorScale(Math.min(.62, Math.max(.25, available / 1920)))
+    }
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  }, [editorView])
+
+  // 预览态使用真实 1920×1080 页面，并把内容高度向上补齐到完整页数。
+  useEffect(() => {
+    const paper = paperRef.current
+    if (!paper || editorView !== 'preview') return undefined
+    let frame = 0
+    const measure = () => {
+      window.cancelAnimationFrame(frame)
+      frame = window.requestAnimationFrame(() => {
+        paper.style.height = 'auto'
+        const pages = Math.max(1, Math.ceil(paper.scrollHeight / 1080))
+        paper.style.height = `${pages * 1080}px`
+        setPreviewPageCount(pages)
+      })
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    Array.from(paper.children).forEach(child => observer.observe(child))
+    window.addEventListener('resize', measure)
+    return () => {
+      window.cancelAnimationFrame(frame)
+      window.removeEventListener('resize', measure)
+      observer.disconnect()
+      paper.style.removeProperty('height')
+    }
+  }, [draft?.revisionNo, editorView, execution?.asOf, displayedGlobalFilters.length])
 
   /** 所有画布写操作的唯一出口：提交受控 Operation 并换回服务端归一化后的草稿。 */
   const commit = async (operations: EditorOperation[], message: string, onError: (text: string) => void) => {
@@ -1210,15 +1255,42 @@ export function ReportEditorPage() {
       setComponentBusy(false)
       return
     }
-    const result = addComponentOperations({
-      definition: draft.definition, page, sectionId: activeSection?.id,
-      manifest, title, dataContextId, fields: fieldsOf(dataContextId),
-      initialOptions,
+    // 没有可用槽位时自动补一个主题框，保证数据组件不会再以游离卡片的形式
+    // 直接落在页面上；框架创建与组件落位在同一次受控修订中完成。
+    const frame = createLayoutFrameOperations({
+      definition: draft.definition, page, sectionId: activeSection?.id, kind: 'TOPIC',
+      title: `主题 ${Math.max((activeSection?.blocks.length ?? 0) + 1, 1)}`,
       sectionName: `${sectionNoun} 1`, newId: () => crypto.randomUUID(),
     })
-    const saved = await commit(result.operations, `${manifest.displayName}已加入画布并自动排布`, setActionError)
+    const frameOperation = frame.operations[0]
+    const framedPage: Page = frameOperation.op === 'BLOCK_CREATE'
+      ? {
+          ...page,
+          sections: page.sections.map(section => section.id === frame.sectionId
+            ? { ...section, blocks: [...section.blocks, (frameOperation.payload as { block: Block }).block] }
+            : section),
+        }
+      : {
+          ...page,
+          sections: [...page.sections, (frameOperation.payload as { section: Section }).section],
+        }
+    const freshTarget = findCompatibleTemplateSlot(framedPage, frame.sectionId, manifest)
+    if (!freshTarget) {
+      setActionError('新建主题框无法容纳该组件，请选择更宽的框架')
+      setComponentBusy(false)
+      return
+    }
+    const placed = placeComponentInSlotOperations({
+      page: framedPage, ...freshTarget, manifest, title, dataContextId,
+      fields: fieldsOf(dataContextId), initialOptions, newId: () => crypto.randomUUID(),
+    })
+    if (placed.error) {
+      setActionError(placed.error); setComponentError(placed.error); setComponentBusy(false)
+      return
+    }
+    const saved = await commit([...frame.operations, ...placed.operations], `${manifest.displayName}已加入新主题框`, setActionError)
     if (saved) {
-      setActiveSectionId(result.sectionId); setSelectedComponentId(result.componentId)
+      setActiveSectionId(frame.sectionId); setSelectedComponentId(placed.componentId)
       setSidePanel('data'); setComponentLibraryOpen(false)
     }
     setComponentBusy(false)
@@ -1279,6 +1351,31 @@ export function ReportEditorPage() {
     const { operations, sectionId } = createSectionOperations(page, `${sectionNoun} ${sections.length + 1}`, () => crypto.randomUUID())
     const saved = await commit(operations, `已新建${sectionNoun}`, setActionError)
     if (saved) { setActiveSectionId(sectionId); setRenamingSectionId(sectionId) }
+  }
+
+  const addFramework = async (kind: 'CHAPTER' | LayoutFrameKind) => {
+    if (kind === 'CHAPTER') {
+      await addSection()
+      return
+    }
+    if (!draft || !page || !canEdit) return
+    const sameKindCount = activeSection?.blocks.filter(block => block.cardKind === `LAYOUT_${kind}`).length ?? 0
+    const label = layoutFrameLabels[kind]
+    const result = createLayoutFrameOperations({
+      definition: draft.definition,
+      page,
+      sectionId: activeSection?.id,
+      kind,
+      title: `${label} ${sameKindCount + 1}`,
+      sectionName: `${sectionNoun} 1`,
+      newId: () => crypto.randomUUID(),
+    })
+    const saved = await commit(result.operations, `${label}已加入当前${sectionNoun}`, setActionError)
+    if (saved) {
+      setActiveSectionId(result.sectionId)
+      setSelectedComponentId('')
+      document.getElementById(`report-section-${result.sectionId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    }
   }
 
   const renameBlock = async (sectionId: string, blockId: string, title: string) => {
@@ -1506,7 +1603,7 @@ export function ReportEditorPage() {
         <div className="report-editor-main">
           <nav className="report-editor-outline report-editor-sidebar" aria-label="组件面板与大纲">
             <ComponentPalette manifests={latestComponentManifests(manifests.list())} disabled={!canEdit}
-              onPick={pickComponentForSlot} />
+              onPick={pickComponentForSlot} onAddFramework={kind => void addFramework(kind)} />
             <details className="report-editor-structure-panel">
               <summary><span>页面结构</span><em>{sections.length}</em><CaretRight size={14} /></summary>
               <header><strong>{sectionNoun}</strong><span>{canEdit && <>
@@ -1537,10 +1634,20 @@ export function ReportEditorPage() {
               {sections.length === 0 && <p>添加第一个元素后自动创建{sectionNoun}</p>}
             </details>
           </nav>
-          <main className={`report-editor-canvas ${aiPreview ? 'has-ai-proposal' : ''}`.trim()}
+          <main ref={canvasRef} className={`report-editor-canvas ${aiPreview ? 'has-ai-proposal' : ''}`.trim()}
             onDragOver={event => { if (event.dataTransfer.types.includes(paletteDragType)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' } }}
             onDrop={dropFromPalette}>
-            <article className="report-editor-paper report-editor-live-paper" onClick={event => { if (editorView !== 'edit' || (event.target as HTMLElement).closest('.report-render-block')) return; setSelectedComponentId('') }}>
+            <div className="report-editor-canvas-spec" aria-live="polite">
+              <span>{editorView === 'edit' ? `编辑缩放 ${Math.round(editorScale * 100)}%` : '输出预览'}</span>
+              <strong>1920 × 1080</strong><em>{editorView === 'preview' ? `${previewPageCount} 页` : '自动分页'}</em>
+            </div>
+            <article ref={paperRef} className="report-editor-paper report-editor-live-paper"
+              data-page-count={editorView === 'preview' ? previewPageCount : undefined}
+              style={{ zoom: editorView === 'edit' ? editorScale : 1 }}
+              onClick={event => { if (editorView !== 'edit' || (event.target as HTMLElement).closest('.report-render-block')) return; setSelectedComponentId('') }}>
+              {editorView === 'preview' && previewPageCount > 1 && <div className="report-editor-page-guides" aria-hidden="true">
+                {Array.from({ length: previewPageCount - 1 }, (_, index) => <span key={index} style={{ top: `${(index + 1) * 1080}px` }} />)}
+              </div>}
               <ReportHeader style={draft.definition.metadata.headerStyle || '01'} title={draft.definition.metadata.name}
                 description={draft.definition.metadata.description}
                 meta={[

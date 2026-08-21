@@ -5450,3 +5450,189 @@ body:has(.report-editor-shell) { height: 100%; overflow: hidden; }
   .report-modal.is-delete-report { width: 100%; }
   .report-drawer-meta > div { grid-template-columns: 78px minmax(0, 1fr); }
 }
+
+/* Report editor structural system: framework library + fixed HD canvas. */
+.report-editor-shell > .main-stage {
+  height: 100vh;
+  min-height: 0;
+}
+.report-palette-mode-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  margin-bottom: 18px;
+  border-radius: 9px;
+  padding: 3px;
+  background: #f1f4f8;
+}
+.report-palette-mode-tabs button {
+  min-height: 34px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #718096;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 680;
+  cursor: pointer;
+}
+.report-palette-mode-tabs button.is-active {
+  background: #fff;
+  color: #126fbe;
+  box-shadow: 0 1px 4px rgb(38 63 91 / 10%);
+}
+.report-palette > header.report-palette-section-title { margin-bottom: 14px; }
+.report-framework-list { display: grid; gap: 7px; }
+.report-framework-list > button {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid #e1e8f0;
+  border-radius: 10px;
+  padding: 10px;
+  background: #fff;
+  color: #2a3c52;
+  text-align: left;
+  cursor: pointer;
+}
+.report-framework-list > button:hover:not(:disabled) { border-color: #9fc5e7; background: #f7fbff; }
+.report-framework-list > button:disabled { opacity: .5; cursor: not-allowed; }
+.report-framework-icon {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: #edf6ff;
+  color: #1676c8;
+}
+.report-framework-list > button > span:nth-child(2) { min-width: 0; display: grid; gap: 3px; }
+.report-framework-list strong { color: #263950; font-size: 12px; font-weight: 720; }
+.report-framework-list small { color: #8794a6; font-size: 9px; line-height: 1.45; }
+.report-framework-list em {
+  border-radius: 999px;
+  padding: 3px 6px;
+  background: #f1f5f9;
+  color: #728197;
+  font-size: 8px;
+  font-style: normal;
+  white-space: nowrap;
+}
+.report-framework-page-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 14px 2px 0;
+  color: #7d8b9d;
+  font-size: 9px;
+  line-height: 1.55;
+}
+.report-framework-page-note svg { flex: none; margin-top: 1px; color: #3e85c3; }
+
+.report-profile-heading { min-width: 0; display: flex !important; align-items: center; gap: 9px; }
+.report-profile-heading > div { min-width: 0; display: grid; gap: 2px; }
+.report-profile-heading-icon {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #edf6ff;
+  color: #1977c5;
+}
+.report-profile-source > header.report-profile-heading { color: inherit; }
+.report-profile-fields > header > .report-profile-heading { flex: 1; }
+
+.report-editor-panel-body.is-data:has(> .report-card-inspector) {
+  height: 100%;
+  align-self: stretch;
+}
+.report-editor-panel-body.is-data > .report-card-inspector {
+  height: 100%;
+  overflow: hidden;
+}
+.report-card-inspector > footer.report-card-inspector-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  flex: none;
+  padding: 12px 4px 14px;
+  background: #fff;
+}
+
+.report-editor-canvas { position: relative; }
+.report-editor-canvas-spec {
+  position: sticky;
+  top: 14px;
+  left: 18px;
+  z-index: 8;
+  width: max-content;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 14px 0 -2px 18px;
+  border: 1px solid #d5e1ec;
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: rgb(255 255 255 / 92%);
+  color: #75859a;
+  font-size: 9px;
+  box-shadow: 0 4px 12px rgb(38 62 89 / 7%);
+  backdrop-filter: blur(10px);
+}
+.report-editor-canvas-spec strong { color: #28567d; font-size: 10px; }
+.report-editor-canvas-spec em { color: #1780cc; font-style: normal; }
+.report-editor-paper,
+.report-editor-paper.report-editor-live-paper,
+.report-editor-workspace.is-preview-view .report-editor-paper {
+  width: 1920px;
+  max-width: none;
+  min-height: 1080px;
+  margin: 22px auto 80px;
+}
+.report-editor-workspace.is-edit-view .report-editor-paper { transform-origin: top center; }
+.report-editor-workspace.is-preview-view .report-editor-paper {
+  position: relative;
+  border-radius: 0;
+  background-size: 1920px 1080px;
+}
+.report-editor-page-guides { position: absolute; inset: 0; z-index: 7; pointer-events: none; }
+.report-editor-page-guides > span {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px dashed rgb(79 126 168 / 38%);
+}
+
+.report-render-section.is-framework-section {
+  border: 1px solid rgb(205 221 236 / 92%);
+  border-radius: 18px;
+  padding: 20px;
+  background: rgb(255 255 255 / 42%);
+}
+.report-render-block[data-layout-frame] {
+  border-style: solid;
+  border-color: #bcd5ea;
+  background: rgb(249 252 255 / 92%);
+}
+.report-render-block[data-layout-frame] > .report-block-kind-badge { display: none; }
+.report-runtime-frame {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 14px;
+  border: 1px solid #cbddec;
+  border-radius: 16px;
+  padding: 18px;
+  background: rgb(255 255 255 / 72%);
+}
+.report-runtime-frame > header { display: flex; align-items: center; gap: 9px; border-bottom: 1px solid #e1eaf2; padding-bottom: 10px; }
+.report-runtime-frame > header span { width: 8px; height: 8px; border-radius: 50%; background: #2582ce; }
+.report-runtime-frame > header h3 { margin: 0; color: #263b52; font-size: 13px; font-weight: 720; }
+.report-runtime-frame-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 14px; }
+.report-runtime-frame-grid > .report-runtime-element { grid-column: span 6; }
+.report-runtime-frame[data-layout-frame="LAYOUT_COLUMNS_3"] .report-runtime-frame-grid > .report-runtime-element { grid-column: span 4; }
+.report-runtime-frame[data-layout-frame="LAYOUT_APPENDIX"] .report-runtime-frame-grid > .report-runtime-element { grid-column: 1 / -1; }
+.report-runtime-frame[data-layout-frame="LAYOUT_CONCLUSION"] .report-runtime-frame-grid > .report-runtime-element.is-narrative { grid-column: 1 / -1; }

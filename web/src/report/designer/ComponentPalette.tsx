@@ -11,7 +11,7 @@ import {
 } from '../analysis/catalog.ts'
 import type { ComponentManifest } from '../render/manifests.ts'
 import type { ComponentOptions } from '../render/schema.ts'
-import { encodePalettePayload, paletteDragType } from './operations.ts'
+import { encodePalettePayload, paletteDragType, type LayoutFrameKind } from './operations.ts'
 
 const groups = [
   { id: 'overview', label: '概览与变化', range: [1, 6] },
@@ -21,6 +21,21 @@ const groups = [
   { id: 'decision', label: '预测与决策', range: [22, 26] },
   { id: 'operations', label: '运营与表达', range: [27, 37] },
 ] as const
+
+const frameworkItems: Array<{
+  kind: 'CHAPTER' | LayoutFrameKind
+  name: string
+  description: string
+  badge: string
+  icon: ReactNode
+}> = [
+  { kind: 'CHAPTER', name: '章节框', description: '一级叙事结构，承载多个主题与分析组', badge: '一级结构', icon: <FileText size={18} weight="duotone" /> },
+  { kind: 'TOPIC', name: '主题框', description: '围绕一个业务问题组织相关数据卡片', badge: '2 个槽位', icon: <TreeStructure size={18} weight="duotone" /> },
+  { kind: 'COLUMNS_2', name: '双栏框', description: '两张卡片并排，用于对比或主辅分析', badge: '1 : 1', icon: <GridFour size={18} weight="duotone" /> },
+  { kind: 'COLUMNS_3', name: '三栏框', description: '并列展示三张轻量指标或图表卡片', badge: '1 : 1 : 1', icon: <Kanban size={18} weight="duotone" /> },
+  { kind: 'CONCLUSION', name: '结论框', description: '结论在上、两组证据在下，形成完整论证', badge: '结论 + 证据', icon: <Lightbulb size={18} weight="duotone" /> },
+  { kind: 'APPENDIX', name: '附录框', description: '全宽承载明细、口径说明或补充材料', badge: '全宽', icon: <Table size={18} weight="duotone" /> },
+]
 
 function familyIcon(kind: AnalysisRendererKind, size = 17): ReactNode {
   const props = { size, weight: 'duotone' as const }
@@ -75,11 +90,13 @@ function FallbackPalette({ manifests, disabled, onPick }: {
 }
 
 /** 按业务问题组织的分析卡片库；每个语义类型固定提供三种可复用版式。 */
-export function ComponentPalette({ manifests, disabled, onPick }: {
+export function ComponentPalette({ manifests, disabled, onPick, onAddFramework }: {
   manifests: ComponentManifest[]
   disabled: boolean
   onPick: (manifest: ComponentManifest, options?: Partial<ComponentOptions>) => void
+  onAddFramework: (kind: 'CHAPTER' | LayoutFrameKind) => void
 }) {
+  const [mode, setMode] = useState<'framework' | 'data'>('framework')
   const [query, setQuery] = useState('')
   const [filterOpen, setFilterOpen] = useState(false)
   const [group, setGroup] = useState('')
@@ -93,8 +110,26 @@ export function ComponentPalette({ manifests, disabled, onPick }: {
     return inGroup && matches && analysisManifests.has(item.type)
   }), [analysisManifests, group, normalized])
 
-  return <div className="report-palette" aria-label="分析卡片库">
-    <header><strong>分析卡片</strong><small>37 类业务问题 · 每类 3 种版式</small></header>
+  return <div className="report-palette" aria-label="报告组件库">
+    <div className="report-palette-mode-tabs" role="tablist" aria-label="组件类型">
+      <button type="button" role="tab" aria-selected={mode === 'framework'} className={mode === 'framework' ? 'is-active' : ''}
+        onClick={() => setMode('framework')}>报告框架</button>
+      <button type="button" role="tab" aria-selected={mode === 'data'} className={mode === 'data' ? 'is-active' : ''}
+        onClick={() => setMode('data')}>数据组件</button>
+    </div>
+    {mode === 'framework' ? <>
+      <header className="report-palette-section-title"><strong>报告框架</strong><small>先搭结构，再把数据组件放入对应容器</small></header>
+      <div className="report-framework-list">
+        {frameworkItems.map(item => <button type="button" key={item.kind} disabled={disabled}
+          onClick={() => onAddFramework(item.kind)}>
+          <span className="report-framework-icon">{item.icon}</span>
+          <span><strong>{item.name}</strong><small>{item.description}</small></span>
+          <em>{item.badge}</em>
+        </button>)}
+      </div>
+      <p className="report-framework-page-note"><Info size={15} />页面由系统按 1920 × 1080 自动分页，不需要手动放置页面框。</p>
+    </> : <>
+    <header className="report-palette-section-title"><strong>数据组件</strong><small>37 类业务问题 · 每类 3 种版式</small></header>
     <div className="report-palette-search">
       <MagnifyingGlass size={16} />
       <input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索问题、类型或图形" aria-label="搜索分析卡片" />
@@ -136,5 +171,6 @@ export function ComponentPalette({ manifests, disabled, onPick }: {
         })}
       </div>}
     {analysisManifests.size > 0 && visible.length === 0 && <p className="report-interaction-note"><Info size={15} />没有匹配的分析卡片。</p>}
+    </>}
   </div>
 }

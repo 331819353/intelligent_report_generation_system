@@ -357,6 +357,7 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
       return <ReportBlockBoundary key={block.id}>
         <div className={`report-render-block is-${block.type.toLocaleLowerCase()} ${componentIds.length === 0 ? 'is-empty-block' : ''} ${dragging ? 'is-dragging' : ''} ${selected ? 'is-selected' : ''}`.trim()}
           data-block-id={block.id}
+          data-layout-frame={block.cardKind?.startsWith('LAYOUT_') ? block.cardKind : undefined}
           style={{
             gridColumn: singleBlock ? '1 / -1' : `${rect.x + 1} / span ${Math.max(rect.w, 1)}`,
             gridRow: `${rect.y - originY + 1} / span ${Math.max(rect.h, 1)}`,
@@ -403,7 +404,7 @@ function DesktopPage(props: ReportPageViewProps) {
     {sections.map((section, sectionIndex) => {
       const titleOwnedByBlock = section.blocks.length === 1 && section.blocks[0]?.title === section.name
       const displayTemplate = isDisplayTemplateSection(section)
-      return <section className="report-render-section"
+      return <section className="report-render-section is-framework-section"
         id={`report-section-${section.id}`} data-section-id={section.id} key={section.id}>
         {!titleOwnedByBlock && !displayTemplate && <header className="report-render-section-head">
           <div><span className="report-render-section-index">{String(sectionIndex + 1).padStart(2, '0')}</span><h2>{section.name}</h2></div>
@@ -429,41 +430,51 @@ function RuntimeAutoPage(props: ReportPageViewProps & { mobile?: boolean }) {
 
   return <div className={`report-render-page is-auto ${mobile ? 'is-mobile' : ''}`.trim()}>
     {sections.map((section, sectionIndex) => {
-      const elements = section.blocks.flatMap(block => block.zones.flatMap(zone => zone.slots.flatMap(slot => {
+      const entriesFor = (block: Block) => block.zones.flatMap(zone => zone.slots.flatMap(slot => {
         const component = slot.componentId ? components.get(slot.componentId) : undefined
         return component ? [{ block, zone, component }] : []
-      })))
+      }))
+      const elements = section.blocks.flatMap(entriesFor)
       if (elements.length === 0) return null
       const displayTemplate = isDisplayTemplateSection(section)
-      return <section className="report-render-section report-runtime-auto-section"
+      const renderElement = ({ block, zone, component }: ReturnType<typeof entriesFor>[number]) => {
+        const manifest = manifests.get(component.templateRef.type, component.templateRef.version)
+        const kind = manifest?.renderer === 'CONTROL' || zone.type === 'FILTER' ? 'filter'
+          : manifest?.category === 'TABLE' ? 'table'
+            : component.templateRef.type === 'metric-card' ? 'metric'
+              : manifest?.renderer === 'TEXT' || zone.type === 'INSIGHT' ? 'narrative'
+                : manifest?.renderer === 'IMAGE' ? 'image' : 'visual'
+        const metricCount = component.templateRef.type === 'metric-card'
+          ? component.dataBinding?.measures?.filter(binding => binding.role === 'VALUE').length ?? 0
+          : undefined
+        const role = interaction?.roleFor(component.id)
+        return <ReportBlockBoundary key={`${block.id}:${component.id}`}>
+          <div className={`report-runtime-element is-${kind}`} data-block-id={block.id} data-component-id={component.id}
+            data-metric-count={metricCount || undefined}>
+            <ReportComponentBoundary fallback={<ComponentStateView state="ERROR" onAction={() => onRetryBlock?.(block.id)} />}>
+              <ComponentView component={component} manifests={manifests} mobile={mobile} designMode={designMode}
+                item={results?.get(component.id)} onRetry={() => onRetryBlock?.(block.id)}
+                inlineFilter={inlineFilterFor(component, props.inlineFilters)} selected={role?.selected} dimmed={role?.dimmed}
+                onSelect={interaction && role?.source ? values => interaction.onSelect(component.id, values) : undefined} />
+            </ReportComponentBoundary>
+          </div>
+        </ReportBlockBoundary>
+      }
+      return <section className="report-render-section report-runtime-auto-section is-framework-section"
         id={`report-section-${section.id}`} data-section-id={section.id} key={section.id}>
         {!displayTemplate && <header className="report-render-section-head"><div>
           <span className="report-render-section-index">{String(sectionIndex + 1).padStart(2, '0')}</span>
           <h2>{section.name}</h2>
         </div>{section.question && <p>{section.question}</p>}</header>}
         <div className="report-runtime-auto-grid">
-          {elements.map(({ block, zone, component }) => {
-            const manifest = manifests.get(component.templateRef.type, component.templateRef.version)
-            const kind = manifest?.renderer === 'CONTROL' || zone.type === 'FILTER' ? 'filter'
-              : manifest?.category === 'TABLE' ? 'table'
-                : component.templateRef.type === 'metric-card' ? 'metric'
-                  : manifest?.renderer === 'TEXT' || zone.type === 'INSIGHT' ? 'narrative'
-                    : manifest?.renderer === 'IMAGE' ? 'image' : 'visual'
-            const metricCount = component.templateRef.type === 'metric-card'
-              ? component.dataBinding?.measures?.filter(binding => binding.role === 'VALUE').length ?? 0
-              : undefined
-            const role = interaction?.roleFor(component.id)
-            return <ReportBlockBoundary key={`${block.id}:${component.id}`}>
-              <div className={`report-runtime-element is-${kind}`} data-block-id={block.id} data-component-id={component.id}
-                data-metric-count={metricCount || undefined}>
-                <ReportComponentBoundary fallback={<ComponentStateView state="ERROR" onAction={() => onRetryBlock?.(block.id)} />}>
-                  <ComponentView component={component} manifests={manifests} mobile={mobile} designMode={designMode}
-                    item={results?.get(component.id)} onRetry={() => onRetryBlock?.(block.id)}
-                    inlineFilter={inlineFilterFor(component, props.inlineFilters)} selected={role?.selected} dimmed={role?.dimmed}
-                    onSelect={interaction && role?.source ? values => interaction.onSelect(component.id, values) : undefined} />
-                </ReportComponentBoundary>
-              </div>
-            </ReportBlockBoundary>
+          {section.blocks.map(block => {
+            const entries = entriesFor(block)
+            if (entries.length === 0) return null
+            if (!block.cardKind?.startsWith('LAYOUT_')) return entries.map(renderElement)
+            return <section className="report-runtime-frame" data-layout-frame={block.cardKind} key={block.id}>
+              <header><span aria-hidden="true" /><h3>{block.title}</h3></header>
+              <div className="report-runtime-frame-grid">{entries.map(renderElement)}</div>
+            </section>
           })}
         </div>
       </section>

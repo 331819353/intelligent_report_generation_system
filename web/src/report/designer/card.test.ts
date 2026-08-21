@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  addToCardOperations, createStructuredBlockOperations, decodePalettePayload, encodePalettePayload,
+  addToCardOperations, createLayoutFrameOperations, createStructuredBlockOperations, decodePalettePayload, encodePalettePayload,
   findCompatibleTemplateSlot, placeComponentInSlotOperations, removeComponentOperations,
 } from './operations.ts'
 import type { Block, Page, ReportDefinition, ZoneType } from '../render/schema.ts'
@@ -120,6 +120,29 @@ test('a structured block starts with filter, insight and content slots', () => {
   assert.deepEqual(payload.block.zones.map(item => item.type), ['FILTER', 'INSIGHT', 'CONTENT'])
   assert.deepEqual(payload.block.zones.map(item => item.slots.length), [2, 1, 2])
   assert.equal(payload.block.zones.every(item => item.slots.every(slot => !slot.componentId)), true)
+})
+
+test('report framework creates a persistent three-column container', () => {
+  const page = pageWith([])
+  const definition = { canvas: { desktop: { columns: 24 } } } as ReportDefinition
+  const result = createLayoutFrameOperations({
+    definition, page, sectionId: 'section-1', kind: 'COLUMNS_3', sectionName: '章节 1', newId,
+  })
+  const block = (result.operations[0].payload as { block: Block }).block
+  assert.equal(block.cardKind, 'LAYOUT_COLUMNS_3')
+  assert.equal(block.layout.desktop.w, 24)
+  assert.equal(block.zones.length, 1)
+  assert.deepEqual(block.zones[0].slots.map(slot => slot.grid.w), [8, 8, 8])
+  const chartManifest: ComponentManifest = { ...manifest, type: 'line-trend', category: 'CHART', renderer: 'ECHARTS' }
+  assert.equal(findCompatibleTemplateSlot(pageWith([block]), 'section-1', chartManifest)?.blockId, block.id)
+})
+
+test('removing the last component from a report framework keeps its empty slot', () => {
+  const block = card('layout-block', [zone('layout-zone', 'CONTENT', ['chart'])])
+  block.cardKind = 'LAYOUT_TOPIC'
+  const operations = removeComponentOperations(pageWith([block]), 'chart')
+  assert.deepEqual(operations.map(operation => operation.op), ['SLOT_UPDATE', 'COMPONENT_DELETE'])
+  assert.equal(operations[0].targetId, 'slot-chart')
 })
 
 test('dropping a component fills an existing slot without creating another block', () => {
