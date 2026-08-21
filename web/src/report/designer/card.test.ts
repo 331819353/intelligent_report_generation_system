@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  addToCardOperations, createLayoutFrameOperations, createStructuredBlockOperations, createSubsectionFrameOperations, decodePalettePayload, encodePalettePayload,
+  addToCardOperations, createLayoutFrameOperations, createSectionOperations, createStructuredBlockOperations, createSubsectionFrameOperations, decodePalettePayload, encodePalettePayload,
   frameSlotRole,
   findCompatibleTemplateSlot, placeComponentInSlotOperations, removeComponentOperations, renameBlockOperations, renameSectionOperations,
 } from './operations.ts'
@@ -155,6 +155,27 @@ test('a top-conclusion subsection creates a full-width conclusion and a configur
     { x: 0, y: 3, w: 6, h: 4 }, { x: 6, y: 3, w: 6, h: 4 },
     { x: 12, y: 3, w: 6, h: 4 }, { x: 18, y: 3, w: 6, h: 4 },
   ])
+})
+
+test('canvas quick add creates an angle before placing its first subsection at position one', () => {
+  const emptyPage: Page = { id: 'page-empty', name: '报告正文', order: 1, sections: [] }
+  const angle = createSectionOperations(emptyPage, '分析角度 1', newId)
+  const section = (angle.operations[0].payload as { section: Page['sections'][number] }).section
+  assert.equal(angle.operations[0].op, 'SECTION_CREATE')
+  assert.equal(section.blocks.length, 0)
+
+  const pageWithAngle: Page = { ...emptyPage, sections: [section] }
+  const subsection = createSubsectionFrameOperations({
+    definition: { canvas: { desktop: { columns: 24 } } } as ReportDefinition,
+    page: pageWithAngle, sectionId: angle.sectionId, layout: 'CONCLUSION_TOP', chartCount: 4,
+    includeDetail: false, includeAppendix: false, title: '小节 1', sectionName: '分析角度 1', newId,
+  })
+  assert.equal(subsection.operations[0].op, 'BLOCK_CREATE')
+  assert.equal(subsection.operations[0].targetId, angle.sectionId)
+  const block = (subsection.operations[0].payload as { block: Block }).block
+  assert.equal(block.title, '小节 1')
+  assert.equal(block.layout.desktop.y, 0)
+  assert.equal(block.layout.mobile.order, 1)
 })
 
 test('a left-conclusion subsection adapts two or four charts on the right', () => {

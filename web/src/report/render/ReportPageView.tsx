@@ -1,4 +1,4 @@
-import { type CSSProperties, useRef, useState } from 'react'
+import { type CSSProperties, type ReactNode, useRef, useState } from 'react'
 import { ChartLineUp, Copy, Lightbulb, Table, Trash } from '@phosphor-icons/react'
 import { ReportBlockBoundary, ReportComponentBoundary, ComponentStateView } from '../runtime/ComponentStateView.tsx'
 import { useMobileViewport } from './use-mobile-viewport.ts'
@@ -52,6 +52,9 @@ export type EditingHandlers = {
   /** 卡片工具条：复制 / 删除整张卡片。未提供时不显示工具条。 */
   onDuplicateBlock?(sectionId: string, blockId: string): void
   onDeleteBlock?(sectionId: string, blockId: string): void
+  /** 编辑器可在空分析角度与现有小节末尾注入画布内的框架创建控件。 */
+  renderEmptySection?(section: Section): ReactNode
+  renderSectionFooter?(section: Section): ReactNode
 }
 
 export type ReportPageViewProps = {
@@ -415,9 +418,12 @@ function DesktopPage(props: ReportPageViewProps) {
           <div><span className="report-render-section-index">{String(sectionIndex + 1).padStart(2, '0')}</span><h2>{section.name}</h2></div>
           {section.question && <p>{section.question}</p>}
         </header>}
-        <SectionGrid section={section} canvas={canvas} editing={editing} manifests={manifests} components={components}
-          selectedComponentId={props.selectedComponentId} onSelectComponent={props.onSelectComponent}
-          content={block => <BlockZones {...props} block={block} components={components} manifests={manifests} />} />
+        {section.blocks.length === 0 && editing?.renderEmptySection
+          ? editing.renderEmptySection(section)
+          : <SectionGrid section={section} canvas={canvas} editing={editing} manifests={manifests} components={components}
+              selectedComponentId={props.selectedComponentId} onSelectComponent={props.onSelectComponent}
+              content={block => <BlockZones {...props} block={block} components={components} manifests={manifests} />} />}
+        {section.blocks.length > 0 && editing?.renderSectionFooter?.(section)}
       </section>
     })}
   </div>

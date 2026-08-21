@@ -152,16 +152,6 @@ export type LayoutFrameKind = 'TOPIC' | 'COLUMNS_2' | 'COLUMNS_3' | 'CONCLUSION'
 
 export type SubsectionLayout = 'CONCLUSION_TOP' | 'CONCLUSION_LEFT'
 
-export type FrameworkRequest =
-  | { kind: 'ANGLE' }
-  | {
-      kind: 'SUBSECTION'
-      layout: SubsectionLayout
-      chartCount: number
-      includeDetail: boolean
-      includeAppendix: boolean
-    }
-
 export const subsectionLayoutLabels: Record<SubsectionLayout, string> = {
   CONCLUSION_TOP: '结论上置',
   CONCLUSION_LEFT: '结论左置',

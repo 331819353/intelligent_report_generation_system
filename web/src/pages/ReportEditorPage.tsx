@@ -21,6 +21,9 @@ import { InteractionPanel } from '../report/designer/InteractionPanel'
 import { EvidencePanel } from '../report/designer/EvidencePanel'
 import { DataContextPanel, DefinitionJSONDialog, FilterPanel } from '../report/designer/DataPanels'
 import { ComponentPalette } from '../report/designer/ComponentPalette'
+import {
+  CanvasQuickAdd, CanvasSubsectionComposer, type SubsectionComposerValue,
+} from '../report/designer/CanvasFrameworkControls'
 import { ComponentBindingEditor } from '../report/designer/ComponentBindingEditor'
 import { MetricStatusConfiguration } from '../report/designer/MetricStatusConfiguration'
 import {
@@ -38,7 +41,7 @@ import {
   removeBlockOperations, removeComponentOperations, removeDataContextOperations, renameSectionOperations,
   renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations,
   decodePalettePayload, paletteDragType, zoneKindForManifest, zoneKindLabels, zoneReorderOperations,
-  type FilterDraft, type FrameworkRequest, type InteractionDraft,
+  type FilterDraft, type InteractionDraft,
 } from '../report/designer/operations'
 
 const reportTypeLabels: Record<ReportType, { name: string; hint: string }> = {
@@ -84,6 +87,20 @@ const reportEditorSnapshotDraft: ReportDraft = {
   },
 }
 
+const reportEditorCanvasAddSnapshotDraft: ReportDraft = {
+  ...reportEditorSnapshotDraft,
+  definitionHash: 'snapshot-report-editor-canvas-add',
+  definition: {
+    ...reportEditorSnapshotDraft.definition,
+    metadata: {
+      ...reportEditorSnapshotDraft.definition.metadata,
+      name: '空白经营分析报告',
+      description: '从画布添加分析对象并组织小节。',
+    },
+    pages: [{ id: 'snapshot-canvas-page', name: '报告正文', order: 1, sections: [] }],
+  },
+}
+
 const reportEditorSnapshotAsset: ReportAsset = {
   id: 'snapshot-report-editor', code: 'RP-EDITOR-SNAPSHOT', name: '经营分析报告', reportType: 'REPORT',
   ownerUserId: 'snapshot-owner', ownerName: '程', lifecycle: 'DRAFT_ONLY', draftRevisionNo: 18,
@@ -120,6 +137,39 @@ function subsectionLayoutName(cardKind: string) {
   if (cardKind.endsWith('CONCLUSION_LEFT')) return '结论左置'
   if (cardKind.endsWith('CONCLUSION_TOP')) return '结论上置'
   return '自定义布局'
+}
+
+function applySnapshotOperations(draft: ReportDraft, operations: EditorOperation[]): ReportDraft {
+  const next = structuredClone(draft)
+  for (const operation of operations) {
+    if (operation.op === 'SECTION_CREATE') {
+      const targetPage = next.definition.pages.find(page => page.id === operation.targetId)
+      const section = (operation.payload as { section?: Section }).section
+      if (targetPage && section) targetPage.sections.push(section)
+    } else if (operation.op === 'BLOCK_CREATE') {
+      const section = next.definition.pages.flatMap(page => page.sections).find(item => item.id === operation.targetId)
+      const block = (operation.payload as { block?: Block }).block
+      if (section && block) section.blocks.push(block)
+    } else if (operation.op === 'SECTION_UPDATE') {
+      const section = next.definition.pages.flatMap(page => page.sections).find(item => item.id === operation.targetId)
+      const name = (operation.payload as { name?: string }).name
+      if (section && name) section.name = name
+    } else if (operation.op === 'BLOCK_UPDATE') {
+      const block = next.definition.pages.flatMap(page => page.sections).flatMap(section => section.blocks).find(item => item.id === operation.targetId)
+      const title = (operation.payload as { title?: string }).title
+      if (block && title) block.title = title
+    } else if (operation.op === 'SECTION_DELETE') {
+      next.definition.pages.forEach(page => { page.sections = page.sections.filter(section => section.id !== operation.targetId) })
+    } else if (operation.op === 'BLOCK_DELETE') {
+      next.definition.pages.flatMap(page => page.sections).forEach(section => {
+        section.blocks = section.blocks.filter(block => block.id !== operation.targetId)
+      })
+    }
+  }
+  next.revisionNo += 1
+  next.updatedAt = new Date().toISOString()
+  next.definitionHash = `snapshot-${next.revisionNo}`
+  return next
 }
 
 /**
@@ -799,8 +849,9 @@ export function ReportEditorPage() {
   const newMode = location.pathname === '/reports/new'
   const reportId = routeReportId ?? ''
   const snapshotMode = new URLSearchParams(location.search).get('snapshot')
-  const designSnapshot = import.meta.env.DEV && snapshotMode === 'report-editor-framework'
-  const [draft, setDraft] = useState<ReportDraft | null>(designSnapshot ? reportEditorSnapshotDraft : null)
+  const designSnapshot = import.meta.env.DEV && (snapshotMode === 'report-editor-framework' || snapshotMode === 'report-editor-canvas-add')
+  const snapshotDraft = snapshotMode === 'report-editor-canvas-add' ? reportEditorCanvasAddSnapshotDraft : reportEditorSnapshotDraft
+  const [draft, setDraft] = useState<ReportDraft | null>(designSnapshot ? snapshotDraft : null)
   const [asset, setAsset] = useState<ReportAsset | null>(designSnapshot ? reportEditorSnapshotAsset : null)
   const [execution, setExecution] = useState<DraftExecution | null>(null)
   // 与草稿加载一致：执行中的状态由「已结算的数据签名」推导，避免在 effect 内
@@ -827,7 +878,7 @@ export function ReportEditorPage() {
   const [selectedTemplateId, setSelectedTemplateId] = useState('')
   const [newCreating, setNewCreating] = useState<'' | NewReportMode>('')
   const [scopeMode, setScopeMode] = useState<'page' | 'section'>('page')
-  const [activeSectionId, setActiveSectionId] = useState(designSnapshot ? 'snapshot-angle-revenue' : '')
+  const [activeSectionId, setActiveSectionId] = useState(snapshotMode === 'report-editor-framework' ? 'snapshot-angle-revenue' : '')
   const [selectedComponentId, setSelectedComponentId] = useState('')
   const [selectionInitialized, setSelectionInitialized] = useState(false)
   const [aiPreview, setAIPreview] = useState<AIPreviewResponse | undefined>()
@@ -849,6 +900,8 @@ export function ReportEditorPage() {
   const [frameworkTitle, setFrameworkTitle] = useState('')
   const [frameworkConfigBusy, setFrameworkConfigBusy] = useState(false)
   const [frameworkConfigError, setFrameworkConfigError] = useState('')
+  const [frameworkCreating, setFrameworkCreating] = useState(false)
+  const [subsectionBuilderSectionId, setSubsectionBuilderSectionId] = useState('')
   const [interactionBusy, setInteractionBusy] = useState(false)
   const [interactionError, setInteractionError] = useState('')
   const [dataBusy, setDataBusy] = useState(false)
@@ -1090,6 +1143,12 @@ export function ReportEditorPage() {
   /** 所有画布写操作的唯一出口：提交受控 Operation 并换回服务端归一化后的草稿。 */
   const commit = async (operations: EditorOperation[], message: string, onError: (text: string) => void) => {
     if (!draft || operations.length === 0) return null
+    if (designSnapshot) {
+      const saved = applySnapshotOperations(draft, operations)
+      setDraft(saved)
+      if (message) notify(message)
+      return saved
+    }
     try {
       const saved = await reportEditorAPI.applyOperations(reportId, bundle(reportId, draft.revisionNo, operations))
       setDraft(saved.draft)
@@ -1325,45 +1384,7 @@ export function ReportEditorPage() {
       setComponentBusy(false)
       return
     }
-    // 没有可用槽位时自动补一个标准小节，保证数据组件始终属于“主题—分析角度—
-    // 小节”的叙事结构；框架创建与组件落位仍在同一次受控修订中完成。
-    const frame = createSubsectionFrameOperations({
-      definition: draft.definition, page, sectionId: activeSection?.id,
-      layout: 'CONCLUSION_TOP', chartCount: 2, includeDetail: false, includeAppendix: false,
-      title: `小节 ${Math.max((activeSection?.blocks.length ?? 0) + 1, 1)}`,
-      sectionName: `${sectionNoun} 1`, newId: () => crypto.randomUUID(),
-    })
-    const frameOperation = frame.operations[0]
-    const framedPage: Page = frameOperation.op === 'BLOCK_CREATE'
-      ? {
-          ...page,
-          sections: page.sections.map(section => section.id === frame.sectionId
-            ? { ...section, blocks: [...section.blocks, (frameOperation.payload as { block: Block }).block] }
-            : section),
-        }
-      : {
-          ...page,
-          sections: [...page.sections, (frameOperation.payload as { section: Section }).section],
-        }
-    const freshTarget = findCompatibleTemplateSlot(framedPage, frame.sectionId, manifest)
-    if (!freshTarget) {
-      setActionError('新建小节没有适合该组件的内容区域，请先选择对应的小节布局')
-      setComponentBusy(false)
-      return
-    }
-    const placed = placeComponentInSlotOperations({
-      page: framedPage, ...freshTarget, manifest, title, dataContextId,
-      fields: fieldsOf(dataContextId), initialOptions, newId: () => crypto.randomUUID(),
-    })
-    if (placed.error) {
-      setActionError(placed.error); setComponentError(placed.error); setComponentBusy(false)
-      return
-    }
-    const saved = await commit([...frame.operations, ...placed.operations], `${manifest.displayName}已加入新小节`, setActionError)
-    if (saved) {
-      setActiveSectionId(frame.sectionId); setSelectedComponentId(placed.componentId)
-      setSidePanel('data'); setComponentLibraryOpen(false)
-    }
+    setActionError('请先在画布中添加分析对象并确认小节布局，再选择数据组件')
     setComponentBusy(false)
   }
 
@@ -1472,23 +1493,29 @@ export function ReportEditorPage() {
   }
 
   const addSection = async () => {
-    if (!draft || !page || !canEdit) return
+    if (!draft || !page || !canEdit || frameworkCreating) return
+    setFrameworkCreating(true); setActionError('')
     const { operations, sectionId } = createSectionOperations(page, `${sectionNoun} ${sections.length + 1}`, () => crypto.randomUUID())
-    const saved = await commit(operations, `已新建${sectionNoun}`, setActionError)
-    if (saved) { setActiveSectionId(sectionId); setRenamingSectionId(sectionId) }
+    const saved = await commit(operations, `已新建${sectionNoun}，请设置首个小节`, setActionError)
+    if (saved) {
+      setActiveSectionId(sectionId)
+      setSelectedComponentId('')
+      setSubsectionBuilderSectionId(sectionId)
+      window.setTimeout(() => document.getElementById(`report-section-${sectionId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 0)
+    }
+    setFrameworkCreating(false)
   }
 
-  const addFramework = async (request: FrameworkRequest) => {
-    if (request.kind === 'ANGLE') {
-      await addSection()
-      return
-    }
-    if (!draft || !page || !canEdit) return
-    const subsectionCount = activeSection?.blocks.filter(block => block.cardKind?.startsWith('LAYOUT_SUBSECTION_')).length ?? 0
+  const addSubsection = async (sectionId: string, request: SubsectionComposerValue) => {
+    if (!draft || !page || !canEdit || frameworkCreating) return
+    const section = sections.find(item => item.id === sectionId)
+    if (!section) return
+    setFrameworkCreating(true); setActionError('')
+    const subsectionCount = subsectionBlocks(section).length
     const result = createSubsectionFrameOperations({
       definition: draft.definition,
       page,
-      sectionId: activeSection?.id,
+      sectionId,
       layout: request.layout,
       chartCount: request.chartCount,
       includeDetail: request.includeDetail,
@@ -1501,8 +1528,10 @@ export function ReportEditorPage() {
     if (saved) {
       setActiveSectionId(result.sectionId)
       setSelectedComponentId('')
-      document.getElementById(`report-section-${result.sectionId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      setSubsectionBuilderSectionId('')
+      window.setTimeout(() => document.querySelector<HTMLElement>(`[data-block-id="${result.blockId}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 0)
     }
+    setFrameworkCreating(false)
   }
 
   const renameBlock = async (sectionId: string, blockId: string, title: string) => {
@@ -1670,6 +1699,13 @@ export function ReportEditorPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [newMode, selectedComponentId, draft?.revisionNo, canEdit])
 
+  const subsectionComposer = (section: Section, required: boolean) => <CanvasSubsectionComposer
+    key={`${section.id}:${subsectionBlocks(section).length}`}
+    disabled={frameworkCreating || !canEdit}
+    required={required}
+    onCancel={required ? undefined : () => setSubsectionBuilderSectionId('')}
+    onConfirm={value => void addSubsection(section.id, value)} />
+
   if (newMode) return <AppShell className="report-editor-shell" lockBusinessDomain>
     <div className="report-editor-workspace report-editor-new-workspace">
       <header className="report-editor-header"><div><button type="button" onClick={() => navigate('/reports')}><ArrowLeft size={15} />返回报告工作台</button><div className="report-editor-title"><h1>新建报告</h1><span>草稿 r0</span><small>创建后进入编辑器</small></div></div></header>
@@ -1731,7 +1767,7 @@ export function ReportEditorPage() {
         <div className="report-editor-main">
           <nav className="report-editor-outline report-editor-sidebar" aria-label="组件面板与大纲">
             <ComponentPalette manifests={latestComponentManifests(manifests.list())} disabled={!canEdit}
-              onPick={pickComponentForSlot} onAddFramework={kind => void addFramework(kind)} />
+              onPick={pickComponentForSlot} />
             <details className="report-editor-structure-panel">
               <summary><span>报告结构</span><em>{sections.length} / {subsectionTotal}</em><CaretRight size={14} /></summary>
               <header><strong>{sectionNoun}</strong><span>{canEdit && <>
@@ -1803,7 +1839,7 @@ export function ReportEditorPage() {
                 onApply={() => notify('筛选条件已应用到报告预览')} applying={executing}
                 onConfigure={editorView === 'edit' ? () => { setSelectedComponentId(''); setSidePanel('data'); setReportInspectorView('filters') } : undefined}
                 onExport={() => notify('发布后可导出报告')} locked={editorView === 'edit'} />
-              {/* 空白报告只显示报告头与筛选；首次拖入组件时会自动创建首个分区。 */}
+              {/* 框架创建发生在画布内；左侧只负责把数据组件填入已确认的小节槽位。 */}
               {page.sections.length > 0 && <ReportPageView definition={draft.definition} page={page} manifests={manifests} results={results}
                 designMode={!execution}
                 selectedComponentId={editorView === 'edit' ? selectedComponentId : ''}
@@ -1822,7 +1858,15 @@ export function ReportEditorPage() {
                   onBlockTitleChange: (sectionId, blockId, title) => void renameBlock(sectionId, blockId, title),
                   onDuplicateBlock: (_sectionId, blockId) => void duplicateBlock(blockId),
                   onDeleteBlock: (_sectionId, blockId) => void deleteBlock(blockId),
+                  renderEmptySection: section => subsectionComposer(section, true),
+                  renderSectionFooter: section => subsectionBuilderSectionId === section.id
+                    ? subsectionComposer(section, false)
+                    : <CanvasQuickAdd kind="SUBSECTION" disabled={frameworkCreating} onClick={() => {
+                        setActiveSectionId(section.id)
+                        setSubsectionBuilderSectionId(section.id)
+                      }} />,
                 } : undefined} />}
+              {editorView === 'edit' && <CanvasQuickAdd kind="ANGLE" disabled={frameworkCreating || !canEdit} onClick={() => void addSection()} />}
             </article>
             {aiPreview && <span className="report-editor-preview-label">AI 方案预览，不会自动保存</span>}
           </main>
