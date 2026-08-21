@@ -533,7 +533,7 @@ export function ReportAssetsPage() {
               <span><strong>{lifecycleCounts.PUBLISHED}</strong>已发布</span>
               <span><strong>{lifecycleCounts.CHANGED + lifecycleCounts.DRAFT_ONLY}</strong>待处理</span>
             </div>
-            <AppButton variant="primary" size="small" type="button" onClick={() => snapshot ? navigate('/reports/new?snapshot=runtime-draft') : setNewOpen(true)}><Plus size={16} weight="bold" />创建报告</AppButton>
+            <AppButton variant="primary" size="small" type="button" onClick={() => setNewOpen(true)}><Plus size={16} weight="bold" />创建报告</AppButton>
           </div>
         </header>
 
@@ -561,7 +561,7 @@ export function ReportAssetsPage() {
           {viewMode === 'list' && !loading && !error && visibleAssets.length > 0 && <div className="report-library-table-head" aria-hidden="true"><span>报告名称 / 编码</span><span>所有者</span><span>版本 / 草稿</span><span>状态</span><span>最近更新</span><span>可见范围</span><i /></div>}
           {loading && <div className="report-assets-feedback"><span className="report-loading-spinner" />正在加载报告资产…</div>}
           {!loading && error && <div className="report-assets-feedback is-error"><WarningCircle size={24} /><strong>报告暂时无法加载</strong><p>{error}</p><AppButton link type="button" onClick={() => void loadAssets()}>重新加载</AppButton></div>}
-          {!loading && !error && visibleAssets.length === 0 && <div className="report-assets-feedback"><Archive size={27} /><strong>{query || lifecycle !== 'ALL' || scope !== 'all' ? '没有符合条件的报告' : '当前领域还没有报告'}</strong><p>{query || lifecycle !== 'ALL' || scope !== 'all' ? '调整搜索或筛选条件后重试。' : '创建第一份受治理报告，或等待有权限的报告共享给你。'}</p>{query || lifecycle !== 'ALL' || scope !== 'all' ? <AppButton link type="button" onClick={() => { setQuery(''); setLifecycle('ALL'); setScope('all') }}>清除筛选</AppButton> : <AppButton variant="primary" size="small" type="button" onClick={() => snapshot ? navigate('/reports/new?snapshot=runtime-draft') : setNewOpen(true)}>新建报告</AppButton>}</div>}
+          {!loading && !error && visibleAssets.length === 0 && <div className="report-assets-feedback"><Archive size={27} /><strong>{query || lifecycle !== 'ALL' || scope !== 'all' ? '没有符合条件的报告' : '当前领域还没有报告'}</strong><p>{query || lifecycle !== 'ALL' || scope !== 'all' ? '调整搜索或筛选条件后重试。' : '创建第一份受治理报告，或等待有权限的报告共享给你。'}</p>{query || lifecycle !== 'ALL' || scope !== 'all' ? <AppButton link type="button" onClick={() => { setQuery(''); setLifecycle('ALL'); setScope('all') }}>清除筛选</AppButton> : <AppButton variant="primary" size="small" type="button" onClick={() => setNewOpen(true)}>新建报告</AppButton>}</div>}
           {!loading && !error && viewMode === 'list' && visibleAssets.map(asset => <AssetListRow key={asset.id} asset={asset} selected={asset.id === selected?.id} onSelect={() => setSelectedID(asset.id)} />)}
           {!loading && !error && viewMode === 'grid' && <div className="report-library-grid">{visibleAssets.map(asset => <AssetGridCard key={asset.id} asset={asset} selected={asset.id === selected?.id} onSelect={() => setSelectedID(asset.id)} />)}</div>}
           {!loading && !error && visibleAssets.length > 0 && nextCursor && <AppButton plain size="small" className="report-load-more" type="button" disabled={loadingMore} onClick={() => void loadAssets(nextCursor, true)}>{loadingMore ? '正在加载…' : '加载更多报告'}</AppButton>}
@@ -589,7 +589,7 @@ export function ReportAssetsPage() {
     {archiveAsset && <LifecycleDialog asset={archiveAsset} busy={transitionBusy} error={transitionError} onClose={() => setArchiveAsset(null)} onConfirm={reason => void transition(archiveAsset, reason, false)} />}
     {restoreAsset && <LifecycleDialog asset={restoreAsset} restore busy={transitionBusy} error={transitionError} onClose={() => setRestoreAsset(null)} onConfirm={reason => void transition(restoreAsset, reason, true)} />}
     {deleteAsset && <DeleteReportDialog asset={deleteAsset} busy={transitionBusy} error={transitionError} onClose={() => setDeleteAsset(null)} onConfirm={reason => void remove(deleteAsset, reason)} />}
-    {newOpen && <NewReportDialog onClose={() => setNewOpen(false)} />}
+    {newOpen && <NewReportDialog snapshot={snapshot} onClose={() => setNewOpen(false)} />}
     {toast && <div className="report-toast" role="status"><Check size={16} weight="bold" />{toast}</div>}
   </AppShell>
 }
