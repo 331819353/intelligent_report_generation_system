@@ -65,7 +65,7 @@ export function SubsectionInsightConfigPanel({ block, component, components, bus
       </section>
 
       <section className="angle-insight-config-card is-items">
-        <header><span><ListChecks size={16} /></span><div><strong>分析项</strong><small>选择本小节中参与结论生成的论据、明细或附录</small></div></header>
+        <header><span><ListChecks size={16} /></span><div><strong>分析项</strong><small>默认使用本小节全部图表；仅在需要覆盖默认策略时调整</small></div></header>
         <div className="angle-insight-items">
           {candidates.map(candidate => {
             const item = config.analysisItems.find(value => value.componentId === candidate.componentId)

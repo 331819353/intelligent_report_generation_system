@@ -136,6 +136,33 @@ func TestBuildSubsectionSummaryRequestUsesSelectedContentAndExcludesConclusion(t
 	}
 }
 
+func TestBuildSubsectionSummaryRequestDefaultsToAllChartsAndExcludesDetail(t *testing.T) {
+	sectionID := askdata.ID("31000000-0000-4000-8000-000000000001")
+	subsectionID := askdata.ID("31000000-0000-4000-8000-000000000002")
+	chartID := askdata.ID("31000000-0000-4000-8000-000000000003")
+	detailID := askdata.ID("31000000-0000-4000-8000-000000000004")
+	definition := report.ReportDefinition{
+		Pages: []report.Page{{Sections: []report.Section{{ID: sectionID, Blocks: []report.Block{{
+			ID: subsectionID, CardKind: "LAYOUT_SUBSECTION_CONCLUSION_TOP", Zones: []report.Zone{{Slots: []report.Slot{
+				{CardKind: "FRAME_EVIDENCE", ComponentID: chartID},
+				{CardKind: "FRAME_DETAIL", ComponentID: detailID},
+			}}},
+		}}}}}},
+		Components: []report.Component{
+			{ID: chartID, TemplateRef: report.ComponentTemplateReference{Type: "line-trend", Version: "1.0.0"}, Options: report.ComponentOptions{Title: "收入趋势"}},
+			{ID: detailID, TemplateRef: report.ComponentTemplateReference{Type: "analysis-detail-query", Version: "1.0.0"}, Options: report.ComponentOptions{Title: "订单明细"}},
+		},
+	}
+
+	result, err := BuildSubsectionSummaryRequestWithConfig(definition, sectionID, subsectionID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Items) != 1 || result.Items[0].ComponentID != chartID || result.Items[0].Weight != 100 {
+		t.Fatalf("unexpected default subsection items: %#v", result.Items)
+	}
+}
+
 func TestSectionSummaryContentProducesReadableRichText(t *testing.T) {
 	content, err := ValidateSectionSummaryContent(SectionSummaryContent{
 		Summary: "综合结论", Findings: []string{"发现"}, Risks: []string{"风险"}, Actions: []string{"行动"},

@@ -26,7 +26,7 @@ test('subsection insight candidates contain content slots but never the conclusi
   const candidates = subsectionInsightCandidates(block, components)
   assert.deepEqual(candidates.map(item => [item.componentId, item.role]), [['chart', 'EVIDENCE'], ['detail', 'DETAIL']])
   assert.deepEqual(defaultSubsectionInsightConfig(candidates).analysisItems, [
-    { componentId: 'chart', weight: 50 }, { componentId: 'detail', weight: 50 },
+    { componentId: 'chart', weight: 100 },
   ])
 })
 
@@ -40,6 +40,6 @@ test('invalid persisted selections fall back to the remaining available content'
     },
   } as ReportComponent
   const config = effectiveSubsectionInsightConfig(component, subsectionInsightCandidates(block, components))
-  assert.deepEqual(config.analysisItems, [{ componentId: 'chart', weight: 50 }, { componentId: 'detail', weight: 50 }])
+  assert.deepEqual(config.analysisItems, [{ componentId: 'chart', weight: 100 }])
   assert.ok(config.analysisApproach.howToAnalyze)
 })

@@ -290,6 +290,13 @@ test('a subsection conclusion is created directly in its native slot and legacy 
   assert.equal(component.dataBinding, undefined)
   assert.deepEqual(component.options.subsectionInsightConfig, config)
 
+  const defaulted = createSubsectionInsightOperations({
+    page: pageWith([block]), blockId: block.id, zoneId: block.zones[0].id, slotId: conclusionSlot.id,
+    manifest: richTextManifest, richText: '智能结论正在生效，待所有图表配置完成后生效。', newId,
+  })
+  const defaultedComponent = (defaulted.operations[0].payload as { component: ReportDefinition['components'][number] }).component
+  assert.equal(defaultedComponent.options.subsectionInsightConfig, undefined)
+
   const legacy = {
     id: created.componentId,
     templateRef: { type: 'analysis-long-form-conclusion', version: '1.0.0' },

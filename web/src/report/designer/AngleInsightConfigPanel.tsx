@@ -68,7 +68,7 @@ export function AngleInsightConfigPanel({ section, component, busy, error, onClo
       </section>
 
       <section className="angle-insight-config-card is-items">
-        <header><span><ListChecks size={16} /></span><div><strong>分析项</strong><small>选择本分析角度下参与结论生成的小节</small></div></header>
+        <header><span><ListChecks size={16} /></span><div><strong>分析项</strong><small>默认使用本分析角度全部小节；仅在需要覆盖默认策略时调整</small></div></header>
         <div className="angle-insight-items">
           {subsections.map((block, index) => {
             const item = config.analysisItems.find(candidate => candidate.subsectionId === block.id)

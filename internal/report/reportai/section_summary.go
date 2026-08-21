@@ -308,7 +308,12 @@ func BuildSubsectionSummaryRequestWithConfig(definition report.ReportDefinition,
 				if config == nil {
 					ids := make([]askdata.ID, 0, len(candidates))
 					for _, item := range candidates {
-						ids = append(ids, item.id)
+						if item.role == "EVIDENCE" {
+							ids = append(ids, item.id)
+						}
+					}
+					if len(ids) == 0 {
+						return SubsectionSummaryRequest{}, errors.New("subsection has no configured charts")
 					}
 					fallback := report.DefaultSubsectionInsightConfig(ids)
 					config = &fallback

@@ -1173,6 +1173,8 @@ export function createAngleInsightOperations(input: {
   return { operations, blockId, componentId }
 }
 
+export const smartInsightPendingText = '智能结论正在生效，待所有图表配置完成后生效。'
+
 export function updateAngleInsightOperations(component: ReportComponent, richText: string, config?: AngleInsightConfig, manifest?: ComponentManifest): EditorOperation[] {
   const next = richText.trim()
   if (!next) return []
@@ -1200,7 +1202,7 @@ export function createSubsectionInsightOperations(input: {
   slotId: string
   manifest: ComponentManifest
   richText: string
-  config: SubsectionInsightConfig
+  config?: SubsectionInsightConfig
   newId: () => string
 }): { operations: EditorOperation[]; componentId: string; error?: string } {
   const located = findBlock(input.page, input.blockId)
@@ -1217,7 +1219,7 @@ export function createSubsectionInsightOperations(input: {
   const component: ReportComponent = {
     id: componentId,
     templateRef: { type: input.manifest.type, version: input.manifest.version },
-    options: { richText: input.richText.trim(), subsectionInsightConfig: input.config },
+    options: { richText: input.richText.trim(), ...(input.config ? { subsectionInsightConfig: input.config } : {}) },
   }
   return {
     componentId,

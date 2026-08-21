@@ -246,7 +246,7 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
           : zone.type === 'INSIGHT' ? '拖入智能结论或富文本'
             : zone.type === 'CONTENT' ? '拖入图表、指标或表格' : '拖入内容组件'
       const authoringHint = editing
-        ? frameRole === 'CONCLUSION' ? '点击创建并在右侧完成分析配置'
+        ? frameRole === 'CONCLUSION' ? '点击启用，默认分析本小节全部图表'
           : acceptsPick ? '点击选择卡片样式' : '请从小节布局中的添加入口配置'
         : '创建后可从小节空位选择内容'
       const EmptyIcon = frameRole === 'EVIDENCE' ? ChartLineUp
@@ -426,8 +426,8 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
               ? <EditableBlockTitle sectionId={section.id} block={block} onChange={editing.onBlockTitleChange} />
               : <h3>{block.title}</h3>}
             {block.cardKind === angleInsightCardKind && <small className="report-angle-insight-source">
-              已配置 {components.get(componentIds[0])?.options.angleInsightConfig?.analysisItems.length
-                ?? section.blocks.filter(item => item.cardKind?.startsWith('LAYOUT_SUBSECTION_')).length} 个分析项
+              {components.get(componentIds[0])?.options.angleInsightConfig ? '已配置' : '默认覆盖'} {components.get(componentIds[0])?.options.angleInsightConfig?.analysisItems.length
+                ?? section.blocks.filter(item => item.cardKind?.startsWith('LAYOUT_SUBSECTION_')).length} 个小节
             </small>}
             {section.question && <p>{section.question}</p>}
           </header>}

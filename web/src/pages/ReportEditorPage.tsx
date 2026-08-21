@@ -27,9 +27,10 @@ import { SlotComponentPicker, type SlotPickerTarget } from '../report/designer/S
 import { ComponentBindingEditor } from '../report/designer/ComponentBindingEditor'
 import { MetricStatusConfiguration } from '../report/designer/MetricStatusConfiguration'
 import { AngleInsightConfigPanel } from '../report/designer/AngleInsightConfigPanel'
-import { defaultAngleInsightConfig, effectiveAngleInsightConfig } from '../report/designer/angle-insight-config'
+import { effectiveAngleInsightConfig } from '../report/designer/angle-insight-config'
 import { SubsectionInsightConfigPanel } from '../report/designer/SubsectionInsightConfigPanel'
-import { defaultSubsectionInsightConfig, subsectionInsightCandidates } from '../report/designer/subsection-insight-config'
+import { subsectionInsightCandidates } from '../report/designer/subsection-insight-config'
+import { defaultFactDataContextId } from '../report/designer/default-data-context'
 import { analysisCardCatalog } from '../report/analysis/catalog'
 import {
   editorBindingGroups, editorBindingsValid, emptyManifestIndex, indexManifests, latestComponentManifests, listComponentManifests, minimumSize,
@@ -44,7 +45,7 @@ import {
   angleInsightBlock, angleInsightCardKind, createAngleInsightOperations, createSectionOperations, createSubsectionFrameOperations, createSubsectionInsightOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, frameSlotRole, layoutOperations,
   placeComponentInSlotOperations,
   removeBlockOperations, removeComponentOperations, removeDataContextOperations, renameSectionOperations,
-  renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateAngleInsightOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations, updateSubsectionInsightOperations,
+  renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, smartInsightPendingText, updateAngleInsightOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations, updateSubsectionInsightOperations,
   decodePalettePayload, encodePalettePayload, zoneReorderOperations,
   type FilterDraft, type InteractionDraft,
 } from '../report/designer/operations'
@@ -1103,14 +1104,14 @@ export function ReportEditorPage() {
     selectedCard.block.zones.some(zone => zone.slots.some(slot => slot.componentId === selectedComponent.id && frameSlotRole(slot.cardKind) === 'CONCLUSION'))
     ? { component: selectedComponent, section: selectedCard.section, block: selectedCard.block }
     : undefined
-  const currentDataContextId = draft?.definition.dataContexts[0]?.id ?? ''
+  const reportContexts = draft?.definition.dataContexts ?? []
+  const currentDataContextId = defaultFactDataContextId(reportContexts, contexts)
   // 绑定面板只能使用报告内数据集对应的、服务端已按列权限裁剪的字段。
   const fieldsByContext = useMemo(
     () => new Map(contexts.map(item => [item.dataContext.id, governedFieldDefinitions(item)])),
     [contexts],
   )
   const fieldsOf = (dataContextId: string): DataContextField[] => fieldsByContext.get(dataContextId) ?? []
-  const reportContexts = draft?.definition.dataContexts ?? []
   const reportFilterCount = draft?.definition.globalFilters?.length ?? 0
   // 旧草稿没有持久化 label 时也立即使用当前受治理目录中的中文业务名展示；
   // 新建和筛选器后续保存会把同一名称写回定义，发布制品不再依赖技术字段码。
@@ -1590,18 +1591,16 @@ export function ReportEditorPage() {
     if (subsectionBlocks(section).length === 0) { setActionError('请先添加至少一个分析小节'); return }
     setAngleInsightBusySectionId(sectionId); setActionError(''); setAngleInsightConfigError('')
     try {
-      const config = defaultAngleInsightConfig(section)
       const result = createAngleInsightOperations({
         definition: draft.definition, page, sectionId, manifest,
-        richText: '请在右侧完成分析思路、分析项与权重配置，然后生成智能结论。',
-        config, newId: () => crypto.randomUUID(),
+        richText: smartInsightPendingText,
+        newId: () => crypto.randomUUID(),
       })
       if (result.error) { setActionError(result.error); return }
-      const saved = await commit(result.operations, '智能结论已添加，请完成分析配置', setActionError)
+      const saved = await commit(result.operations, '智能结论已按默认策略启用', setActionError)
       if (saved) {
         setActiveSectionId(sectionId)
-        setSelectedComponentId(result.componentId)
-        revealSidePanel('data')
+        setSelectedComponentId('')
         window.setTimeout(() => document.querySelector<HTMLElement>(`[data-block-id="${result.blockId}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 0)
       }
     } catch (cause) {
@@ -1659,21 +1658,18 @@ export function ReportEditorPage() {
       return
     }
     if (!manifest) { setActionError('智能结论能力尚未注册，请刷新后重试'); return }
-    const candidates = subsectionInsightCandidates(located.block, draft.definition.components)
-    if (candidates.length === 0) { setActionError('请先在本小节添加至少一个论据、明细或附录内容'); return }
     setSubsectionInsightBusyId(located.block.id); setSubsectionInsightConfigError(''); setActionError('')
     try {
       const result = createSubsectionInsightOperations({
         page, ...target, manifest,
-        richText: '请在右侧完成分析思路、分析项与权重配置，然后生成小节智能结论。',
-        config: defaultSubsectionInsightConfig(candidates), newId: () => crypto.randomUUID(),
+        richText: smartInsightPendingText,
+        newId: () => crypto.randomUUID(),
       })
       if (result.error) { setActionError(result.error); return }
-      const saved = await commit(result.operations, '小节智能结论已添加，请完成分析配置', setActionError)
+      const saved = await commit(result.operations, '小节智能结论已按默认策略启用', setActionError)
       if (saved) {
         setActiveSectionId(located.section.id)
-        setSelectedComponentId(result.componentId)
-        revealSidePanel('data')
+        setSelectedComponentId('')
       }
     } finally { setSubsectionInsightBusyId('') }
   }
@@ -1707,7 +1703,7 @@ export function ReportEditorPage() {
       const existingText = String(component.options.richText ?? '').trim()
       const richText = generate
         ? await generateSubsectionInsightText(section, block, config)
-        : existingText || '配置已保存，请点击“应用配置并生成”生成小节智能结论。'
+        : existingText || smartInsightPendingText
       const saved = await commit(
         updateSubsectionInsightOperations(component, richText, config, manifest),
         generate ? '配置已保存，小节智能结论已重新生成' : '小节智能结论配置已保存',
@@ -2117,7 +2113,7 @@ export function ReportEditorPage() {
               )}
             /> : selectedComponent ? <>
               <CardInspector
-                key={`${selectedComponent.id}:${sidePanel}`}
+                key={`${selectedComponent.id}:${sidePanel}:${draft.revisionNo}`}
                 mode={sidePanel}
                 component={selectedComponent} manifest={selectedManifest} manifests={manifests.list()}
                 reportContexts={reportContexts} contextNameOf={contextNameOf} fieldsOf={fieldsOf} defaultContextId={currentDataContextId}

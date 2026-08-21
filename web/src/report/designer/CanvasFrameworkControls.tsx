@@ -63,8 +63,8 @@ export function CanvasAngleInsightAdd({ subsectionCount, disabled, busy, onClick
   return <button type="button" className="report-angle-insight-add" disabled={disabled || busy}
     onClick={event => { event.stopPropagation(); onClick() }}>
     <span className="report-angle-insight-add-icon"><Lightbulb size={18} weight="duotone" /></span>
-    <span><strong>配置智能结论</strong><small>选择当前分析角度 {subsectionCount} 个小节中的分析项并设置权重</small></span>
-    <em>{busy ? <><SpinnerGap className="is-spinning" size={15} />正在生成</> : <><Sparkle size={15} weight="fill" />智能生成</>}</em>
+    <span><strong>启用智能结论</strong><small>默认分析当前角度全部 {subsectionCount} 个小节，后续可按需调整</small></span>
+    <em>{busy ? <><SpinnerGap className="is-spinning" size={15} />正在启用</> : <><Sparkle size={15} weight="fill" />默认策略</>}</em>
   </button>
 }
 

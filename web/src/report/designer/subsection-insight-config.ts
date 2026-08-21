@@ -9,9 +9,9 @@ export type SubsectionInsightCandidate = {
 }
 
 export const defaultSubsectionInsightApproach: SubsectionInsightConfig['analysisApproach'] = {
-  howToAnalyze: '逐项阅读所选论据、图表、明细与附录的标题、指标、维度、过滤条件和已有叙事，识别相互印证、差异与证据缺口；按照权重分配分析篇幅。',
-  analyzeWhat: '分析本小节所选内容已经明确表达的核心发现、关系、风险与可执行建议，并形成小节级智能结论。',
-  doNotAnalyze: '不得补造未提供的指标值、趋势、因果关系、对比结论或业务事实；不得分析未选择的内容；不得把模板占位文案当作真实结论。',
+  howToAnalyze: '逐项阅读本小节所选分析项（默认全部图表）的标题、指标、维度、过滤条件和已有叙事，先识别共同结论，再识别差异、异常与证据缺口；按照权重分配分析篇幅。',
+  analyzeWhat: '分析图表已经明确表达的核心发现、变化、对比、结构、风险与可执行建议，并形成小节级智能结论。',
+  doNotAnalyze: '不得补造未提供的指标值、趋势、因果关系、对比结论或业务事实；不得分析未选择的内容；不得把空槽位、模板占位文案或字段名称猜测当作真实结论。',
   outputExample: '小节结论：……\n核心发现：……\n风险提示：……\n建议动作：……',
 }
 
@@ -44,9 +44,10 @@ export function equalSubsectionInsightItems(componentIds: string[]) {
 }
 
 export function defaultSubsectionInsightConfig(candidates: SubsectionInsightCandidate[]): SubsectionInsightConfig {
+  const charts = candidates.filter(item => item.role === 'EVIDENCE')
   return {
     analysisApproach: { ...defaultSubsectionInsightApproach },
-    analysisItems: equalSubsectionInsightItems(candidates.map(item => item.componentId)),
+    analysisItems: equalSubsectionInsightItems(charts.map(item => item.componentId)),
   }
 }
 
@@ -65,7 +66,9 @@ export function effectiveSubsectionInsightConfig(component: ReportComponent, can
     },
     analysisItems: selected.length > 0 && total === 100
       ? selected.map(item => ({ ...item }))
-      : equalSubsectionInsightItems(selected.length > 0 ? selected.map(item => item.componentId) : [...available]),
+      : equalSubsectionInsightItems(selected.length > 0
+        ? selected.map(item => item.componentId)
+        : candidates.filter(item => item.role === 'EVIDENCE').map(item => item.componentId)),
   }
 }
 
