@@ -1614,7 +1614,8 @@ func (handler *Handler) sectionSummary(writer http.ResponseWriter, request *http
 		return
 	}
 	var body struct {
-		SectionID askdata.ID `json:"sectionId"`
+		SectionID askdata.ID                      `json:"sectionId"`
+		Config    *reportmodel.AngleInsightConfig `json:"config,omitempty"`
 	}
 	if decodeJSON(request, &body) != nil || body.SectionID.Validate() != nil {
 		writeError(writer, http.StatusBadRequest, "REPORT_AI_REQUEST_INVALID", "report section summary request is invalid")
@@ -1625,7 +1626,7 @@ func (handler *Handler) sectionSummary(writer http.ResponseWriter, request *http
 		writeReportError(writer, err)
 		return
 	}
-	summaryRequest, err := reportai.BuildSectionSummaryRequest(draft.Definition, body.SectionID)
+	summaryRequest, err := reportai.BuildSectionSummaryRequestWithConfig(draft.Definition, body.SectionID, body.Config)
 	if err != nil {
 		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_SECTION_EMPTY", err.Error())
 		return
@@ -1638,7 +1639,7 @@ func (handler *Handler) sectionSummary(writer http.ResponseWriter, request *http
 	run, err := handler.aiAudit.StartRun(request.Context(), identity, reportai.StartRunInput{
 		ReportID: reportID, Kind: reportai.RunInsight, PromptVersion: "report-section-summary-v1",
 		ModelPolicy: "governed-default", Summary: reportai.RequestSummary{
-			Intent: "综合当前分析角度全部小节生成智能结论", SelectionIDs: selection,
+			Intent: "按已配置的分析项、分析思路和权重生成智能结论", SelectionIDs: selection,
 		}, BaseRevision: &draft.RevisionNo, Scope: scopeJSON,
 	})
 	if err != nil {

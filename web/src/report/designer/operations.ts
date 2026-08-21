@@ -3,7 +3,7 @@ import type { ComponentManifest, ManifestIndex } from '../render/manifests.ts'
 import { editorBindingGroups, minimumSize, recommendedSize } from '../render/manifests.ts'
 import {
   canvasOf, findBlock, findComponentBlock, orderedSections,
-  type BlockType, type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type MetricAggregation,
+  type AngleInsightConfig, type BlockType, type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type MetricAggregation,
   type Block, type GridRect, type Page, type ReportComponent, type ReportDefinition, type Section, type Zone,
 } from '../render/schema.ts'
 import { findFreeRect, resolveLayout, resolveSlotPlacement } from './placement.ts'
@@ -1127,6 +1127,7 @@ export function createAngleInsightOperations(input: {
   sectionId: string
   manifest: ComponentManifest
   richText: string
+  config?: AngleInsightConfig
   newId: () => string
 }): { operations: EditorOperation[]; blockId: string; componentId: string; error?: string } {
   const section = input.page.sections.find(item => item.id === input.sectionId)
@@ -1146,7 +1147,7 @@ export function createAngleInsightOperations(input: {
   const component: ReportComponent = {
     id: componentId,
     templateRef: { type: input.manifest.type, version: input.manifest.version },
-    options: { richText: input.richText.trim() },
+    options: { richText: input.richText.trim(), ...(input.config ? { angleInsightConfig: input.config } : {}) },
   }
   const block: Block = {
     id: blockId, type: 'CONTENT', title: '智能结论', cardKind: angleInsightCardKind,
@@ -1171,10 +1172,20 @@ export function createAngleInsightOperations(input: {
   return { operations, blockId, componentId }
 }
 
-export function updateAngleInsightOperations(component: ReportComponent, richText: string): EditorOperation[] {
+export function updateAngleInsightOperations(component: ReportComponent, richText: string, config?: AngleInsightConfig, manifest?: ComponentManifest): EditorOperation[] {
   const next = richText.trim()
   if (!next) return []
-  return [{ op: 'COMPONENT_UPDATE', targetId: component.id, payload: { options: { ...component.options, richText: next } } }]
+  const options = { ...component.options, richText: next, ...(config ? { angleInsightConfig: config } : {}) }
+  if (manifest && (component.templateRef.type !== manifest.type || component.templateRef.version !== manifest.version)) {
+    return [{
+      op: 'COMPONENT_REPLACE', targetId: component.id,
+      payload: { component: { ...component, templateRef: { type: manifest.type, version: manifest.version }, options } },
+    }]
+  }
+  return [{
+    op: 'COMPONENT_UPDATE', targetId: component.id,
+    payload: { options },
+  }]
 }
 
 export function renameSectionOperations(sectionId: string, name: string): EditorOperation[] {

@@ -499,23 +499,105 @@ type FieldBinding struct {
 // ComponentOptions contains only renderer-independent V1 options. The
 // component manifest further narrows this set for each type and version.
 type ComponentOptions struct {
-	Title            string           `json:"title,omitempty"`
-	Subtitle         string           `json:"subtitle,omitempty"`
-	ShowLegend       *bool            `json:"showLegend,omitempty"`
-	ShowLabel        *bool            `json:"showLabel,omitempty"`
-	Smooth           *bool            `json:"smooth,omitempty"`
-	Orientation      Orientation      `json:"orientation,omitempty"`
-	TopN             *int             `json:"topN,omitempty"`
-	ColorPaletteRef  string           `json:"colorPaletteRef,omitempty"`
-	NumberFormat     string           `json:"numberFormat,omitempty"`
-	NullPolicy       NullPolicy       `json:"nullPolicy,omitempty"`
-	Animation        *bool            `json:"animation,omitempty"`
-	MobileLegendMode MobileLegendMode `json:"mobileLegendMode,omitempty"`
-	RichText         string           `json:"richText,omitempty"`
-	ImageAssetID     *askdata.ID      `json:"imageAssetId,omitempty"`
-	InsightRole      string           `json:"insightRole,omitempty"`
-	TablePageSize    *int             `json:"tablePageSize,omitempty"`
-	CardVariant      string           `json:"cardVariant,omitempty"`
+	Title            string              `json:"title,omitempty"`
+	Subtitle         string              `json:"subtitle,omitempty"`
+	ShowLegend       *bool               `json:"showLegend,omitempty"`
+	ShowLabel        *bool               `json:"showLabel,omitempty"`
+	Smooth           *bool               `json:"smooth,omitempty"`
+	Orientation      Orientation         `json:"orientation,omitempty"`
+	TopN             *int                `json:"topN,omitempty"`
+	ColorPaletteRef  string              `json:"colorPaletteRef,omitempty"`
+	NumberFormat     string              `json:"numberFormat,omitempty"`
+	NullPolicy       NullPolicy          `json:"nullPolicy,omitempty"`
+	Animation        *bool               `json:"animation,omitempty"`
+	MobileLegendMode MobileLegendMode    `json:"mobileLegendMode,omitempty"`
+	RichText         string              `json:"richText,omitempty"`
+	ImageAssetID     *askdata.ID         `json:"imageAssetId,omitempty"`
+	InsightRole      string              `json:"insightRole,omitempty"`
+	TablePageSize    *int                `json:"tablePageSize,omitempty"`
+	CardVariant      string              `json:"cardVariant,omitempty"`
+	AngleInsight     *AngleInsightConfig `json:"angleInsightConfig,omitempty"`
+}
+
+// AngleInsightConfig is the author-owned analysis contract for an angle-level
+// intelligent conclusion. The model receives only the selected subsections and
+// treats Weight as attention priority, never as observed business evidence.
+type AngleInsightConfig struct {
+	AnalysisApproach AngleInsightApproach `json:"analysisApproach"`
+	AnalysisItems    []AngleInsightItem   `json:"analysisItems"`
+}
+
+type AngleInsightApproach struct {
+	HowToAnalyze  string `json:"howToAnalyze"`
+	AnalyzeWhat   string `json:"analyzeWhat"`
+	DoNotAnalyze  string `json:"doNotAnalyze"`
+	OutputExample string `json:"outputExample"`
+}
+
+type AngleInsightItem struct {
+	SubsectionID askdata.ID `json:"subsectionId"`
+	Weight       int        `json:"weight"`
+}
+
+func DefaultAngleInsightApproach() AngleInsightApproach {
+	return AngleInsightApproach{
+		HowToAnalyze:  "逐项阅读所选小节的结论、指标、维度、过滤条件与证据，识别相互印证、差异和证据缺口；按照权重分配分析篇幅。",
+		AnalyzeWhat:   "分析所选小节已经明确表达的核心发现、关联关系、风险与可执行建议，并形成分析角度级综合结论。",
+		DoNotAnalyze:  "不得补造未提供的指标值、趋势、因果关系、对比结论或业务事实；不得分析未选择的小节；不得把模板占位文案当作真实结论。",
+		OutputExample: "综合结论：……\n核心发现：……\n风险提示：……\n建议动作：……",
+	}
+}
+
+// DefaultAngleInsightConfig selects every subsection and distributes an exact
+// 100% authoring weight in stable subsection order.
+func DefaultAngleInsightConfig(subsectionIDs []askdata.ID) AngleInsightConfig {
+	items := make([]AngleInsightItem, 0, len(subsectionIDs))
+	if len(subsectionIDs) > 0 {
+		base, remainder := 100/len(subsectionIDs), 100%len(subsectionIDs)
+		for index, id := range subsectionIDs {
+			weight := base
+			if index < remainder {
+				weight++
+			}
+			items = append(items, AngleInsightItem{SubsectionID: id, Weight: weight})
+		}
+	}
+	return AngleInsightConfig{AnalysisApproach: DefaultAngleInsightApproach(), AnalysisItems: items}
+}
+
+func (config AngleInsightConfig) Validate() error {
+	for name, value := range map[string]string{
+		"howToAnalyze":  config.AnalysisApproach.HowToAnalyze,
+		"analyzeWhat":   config.AnalysisApproach.AnalyzeWhat,
+		"doNotAnalyze":  config.AnalysisApproach.DoNotAnalyze,
+		"outputExample": config.AnalysisApproach.OutputExample,
+	} {
+		if strings.TrimSpace(value) == "" || len([]rune(value)) > MaxStringLength {
+			return fmt.Errorf("analysisApproach.%s must contain 1..%d characters", name, MaxStringLength)
+		}
+	}
+	if len(config.AnalysisItems) == 0 || len(config.AnalysisItems) > MaxBlocks {
+		return fmt.Errorf("analysisItems must contain 1..%d items", MaxBlocks)
+	}
+	seen := make(map[askdata.ID]struct{}, len(config.AnalysisItems))
+	total := 0
+	for index, item := range config.AnalysisItems {
+		if err := item.SubsectionID.Validate(); err != nil {
+			return fmt.Errorf("analysisItems[%d].subsectionId: %w", index, err)
+		}
+		if _, duplicate := seen[item.SubsectionID]; duplicate {
+			return fmt.Errorf("analysisItems[%d].subsectionId is duplicated", index)
+		}
+		seen[item.SubsectionID] = struct{}{}
+		if item.Weight < 1 || item.Weight > 100 {
+			return fmt.Errorf("analysisItems[%d].weight must be between 1 and 100", index)
+		}
+		total += item.Weight
+	}
+	if total != 100 {
+		return fmt.Errorf("analysisItems weights must total 100, got %d", total)
+	}
+	return nil
 }
 
 type Orientation string
@@ -1322,6 +1404,11 @@ func (options ComponentOptions) validate() error {
 	}
 	if options.TablePageSize != nil && (*options.TablePageSize < 1 || *options.TablePageSize > 1_000) {
 		return errors.New("options.tablePageSize must be between 1 and 1000")
+	}
+	if options.AngleInsight != nil {
+		if err := options.AngleInsight.Validate(); err != nil {
+			return fmt.Errorf("options.angleInsightConfig: %w", err)
+		}
 	}
 	return nil
 }

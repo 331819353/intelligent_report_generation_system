@@ -108,11 +108,19 @@ type OptionSchema struct {
 }
 
 type OptionPropertySchema struct {
-	Type        OptionValueType `json:"type"`
-	Description string          `json:"description,omitempty"`
-	Enum        []string        `json:"enum,omitempty"`
-	Minimum     *float64        `json:"minimum,omitempty"`
-	Maximum     *float64        `json:"maximum,omitempty"`
+	Type                 OptionValueType                 `json:"type"`
+	Description          string                          `json:"description,omitempty"`
+	Enum                 []string                        `json:"enum,omitempty"`
+	Minimum              *float64                        `json:"minimum,omitempty"`
+	Maximum              *float64                        `json:"maximum,omitempty"`
+	MinLength            *int                            `json:"minLength,omitempty"`
+	MaxLength            *int                            `json:"maxLength,omitempty"`
+	MinItems             *int                            `json:"minItems,omitempty"`
+	MaxItems             *int                            `json:"maxItems,omitempty"`
+	AdditionalProperties bool                            `json:"additionalProperties,omitempty"`
+	Required             []string                        `json:"required,omitempty"`
+	Properties           map[string]OptionPropertySchema `json:"properties,omitempty"`
+	Items                *OptionPropertySchema           `json:"items,omitempty"`
 }
 
 type OptionValueType string
@@ -122,6 +130,8 @@ const (
 	OptionString  OptionValueType = "string"
 	OptionInteger OptionValueType = "integer"
 	OptionNumber  OptionValueType = "number"
+	OptionObject  OptionValueType = "object"
+	OptionArray   OptionValueType = "array"
 )
 
 type MobilePolicy struct {
@@ -319,7 +329,7 @@ func (schema OptionSchema) validate() error {
 }
 
 func (property OptionPropertySchema) validate() error {
-	if property.Type != OptionBoolean && property.Type != OptionString && property.Type != OptionInteger && property.Type != OptionNumber {
+	if property.Type != OptionBoolean && property.Type != OptionString && property.Type != OptionInteger && property.Type != OptionNumber && property.Type != OptionObject && property.Type != OptionArray {
 		return errors.New("type is invalid")
 	}
 	if len([]rune(property.Description)) > 4096 {
@@ -349,6 +359,52 @@ func (property OptionPropertySchema) validate() error {
 	}
 	if property.Minimum != nil && property.Maximum != nil && *property.Minimum > *property.Maximum {
 		return errors.New("minimum must not exceed maximum")
+	}
+	if property.MinLength != nil && *property.MinLength < 0 || property.MaxLength != nil && *property.MaxLength < 0 {
+		return errors.New("string length bounds must be non-negative")
+	}
+	if property.MinLength != nil && property.MaxLength != nil && *property.MinLength > *property.MaxLength {
+		return errors.New("minLength must not exceed maxLength")
+	}
+	if property.MinItems != nil && *property.MinItems < 0 || property.MaxItems != nil && *property.MaxItems < 0 {
+		return errors.New("array bounds must be non-negative")
+	}
+	if property.MinItems != nil && property.MaxItems != nil && *property.MinItems > *property.MaxItems {
+		return errors.New("minItems must not exceed maxItems")
+	}
+	if property.Type == OptionObject {
+		if property.AdditionalProperties || property.Properties == nil || property.Required == nil {
+			return errors.New("object options require closed properties and required")
+		}
+		if len(property.Properties) > MaxOptionProperties {
+			return fmt.Errorf("properties exceeds %d items", MaxOptionProperties)
+		}
+		for name, nested := range property.Properties {
+			if !optionNamePattern.MatchString(name) {
+				return fmt.Errorf("property %q has an invalid name", name)
+			}
+			if err := nested.validate(); err != nil {
+				return fmt.Errorf("property %q: %w", name, err)
+			}
+		}
+		seenRequired := map[string]struct{}{}
+		for index, name := range property.Required {
+			if _, exists := property.Properties[name]; !exists {
+				return fmt.Errorf("required[%d] references unknown property %q", index, name)
+			}
+			if _, exists := seenRequired[name]; exists {
+				return fmt.Errorf("required[%d] is duplicated", index)
+			}
+			seenRequired[name] = struct{}{}
+		}
+	}
+	if property.Type == OptionArray {
+		if property.Items == nil {
+			return errors.New("array options require items")
+		}
+		if err := property.Items.validate(); err != nil {
+			return fmt.Errorf("items: %w", err)
+		}
 	}
 	return nil
 }
@@ -405,6 +461,13 @@ func (property OptionPropertySchema) validateValue(raw json.RawMessage) error {
 		if len([]rune(value)) > 4096 {
 			return errors.New("exceeds 4096 characters")
 		}
+		length := len([]rune(value))
+		if property.MinLength != nil && length < *property.MinLength {
+			return fmt.Errorf("must contain at least %d characters", *property.MinLength)
+		}
+		if property.MaxLength != nil && length > *property.MaxLength {
+			return fmt.Errorf("must contain at most %d characters", *property.MaxLength)
+		}
 		if len(property.Enum) > 0 && !containsString(property.Enum, value) {
 			return fmt.Errorf("must be one of %v", property.Enum)
 		}
@@ -423,6 +486,41 @@ func (property OptionPropertySchema) validateValue(raw json.RawMessage) error {
 		}
 		if err := property.validateNumber(value); err != nil {
 			return err
+		}
+	case OptionObject:
+		var value map[string]json.RawMessage
+		if err := decodeOptionValue(raw, &value); err != nil || value == nil {
+			return errors.New("must be an object")
+		}
+		for _, required := range property.Required {
+			if _, exists := value[required]; !exists {
+				return fmt.Errorf("required option %q is missing", required)
+			}
+		}
+		for name, nestedValue := range value {
+			nested, exists := property.Properties[name]
+			if !exists {
+				return fmt.Errorf("unknown option %q", name)
+			}
+			if err := nested.validateValue(nestedValue); err != nil {
+				return fmt.Errorf("option %q: %w", name, err)
+			}
+		}
+	case OptionArray:
+		var value []json.RawMessage
+		if err := decodeOptionValue(raw, &value); err != nil || value == nil {
+			return errors.New("must be an array")
+		}
+		if property.MinItems != nil && len(value) < *property.MinItems {
+			return fmt.Errorf("must contain at least %d items", *property.MinItems)
+		}
+		if property.MaxItems != nil && len(value) > *property.MaxItems {
+			return fmt.Errorf("must contain at most %d items", *property.MaxItems)
+		}
+		for index, item := range value {
+			if err := property.Items.validateValue(item); err != nil {
+				return fmt.Errorf("item %d: %w", index, err)
+			}
 		}
 	default:
 		return errors.New("has an invalid schema type")

@@ -48,6 +48,9 @@ func TestBuildSectionSummaryRequestUsesEverySubsectionAndExcludesItsOwnSummary(t
 	if len(result.Subsections) != 2 || result.Subsections[0].ID != firstBlockID || result.Subsections[1].ID != secondBlockID {
 		t.Fatalf("unexpected subsections: %#v", result.Subsections)
 	}
+	if result.Subsections[0].Weight != 50 || result.Subsections[1].Weight != 50 || result.AnalysisApproach.HowToAnalyze == "" {
+		t.Fatalf("unexpected default angle configuration: %#v", result)
+	}
 	first := result.Subsections[0].Components[0]
 	if first.Role != "EVIDENCE" || first.Dimensions[0] != "订单日期" || first.Measures[0] != "收入（SUM）" ||
 		first.Filters[0] != "全局 渠道范围 → sales_channel" || first.Filters[1] != "channel EQUALS online" {
@@ -55,6 +58,34 @@ func TestBuildSectionSummaryRequestUsesEverySubsectionAndExcludesItsOwnSummary(t
 	}
 	if result.Subsections[1].Components[0].Narrative == "" {
 		t.Fatal("existing subsection narrative must be available to the summary model")
+	}
+}
+
+func TestBuildSectionSummaryRequestUsesOnlyConfiguredSubsectionsAndWeights(t *testing.T) {
+	sectionID := askdata.ID("20000000-0000-4000-8000-000000000001")
+	firstID := askdata.ID("20000000-0000-4000-8000-000000000002")
+	secondID := askdata.ID("20000000-0000-4000-8000-000000000003")
+	definition := report.ReportDefinition{Pages: []report.Page{{Sections: []report.Section{{
+		ID: sectionID, Name: "经营质量", Blocks: []report.Block{
+			{ID: firstID, Title: "收入", CardKind: "LAYOUT_SUBSECTION_CONCLUSION_TOP"},
+			{ID: secondID, Title: "风险", CardKind: "LAYOUT_SUBSECTION_CONCLUSION_LEFT"},
+		},
+	}}}}}
+	config := report.AngleInsightConfig{
+		AnalysisApproach: report.AngleInsightApproach{
+			HowToAnalyze: "优先识别风险", AnalyzeWhat: "风险证据", DoNotAnalyze: "收入趋势", OutputExample: "风险：……",
+		},
+		AnalysisItems: []report.AngleInsightItem{{SubsectionID: secondID, Weight: 100}},
+	}
+	result, err := BuildSectionSummaryRequestWithConfig(definition, sectionID, &config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Subsections) != 1 || result.Subsections[0].ID != secondID || result.Subsections[0].Weight != 100 {
+		t.Fatalf("unexpected selected subsections: %#v", result.Subsections)
+	}
+	if result.AnalysisApproach.AnalyzeWhat != "风险证据" {
+		t.Fatalf("unexpected analysis approach: %#v", result.AnalysisApproach)
 	}
 }
 

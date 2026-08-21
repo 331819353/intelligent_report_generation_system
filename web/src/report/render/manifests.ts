@@ -10,11 +10,19 @@ export type ManifestRenderer = 'ECHARTS' | 'REACT' | 'TEXT' | 'IMAGE' | 'CONTROL
 export type ManifestCategory = 'CHART' | 'TABLE' | 'CONTENT' | 'CONTROL'
 
 export type OptionPropertySchema = {
-  type: 'boolean' | 'string' | 'integer' | 'number'
+  type: 'boolean' | 'string' | 'integer' | 'number' | 'object' | 'array'
   description?: string
   enum?: string[]
   minimum?: number
   maximum?: number
+  minLength?: number
+  maxLength?: number
+  minItems?: number
+  maxItems?: number
+  additionalProperties?: false
+  required?: string[]
+  properties?: Record<string, OptionPropertySchema>
+  items?: OptionPropertySchema
 }
 
 export type EditorBindingKind = 'DIMENSION' | 'MEASURE'

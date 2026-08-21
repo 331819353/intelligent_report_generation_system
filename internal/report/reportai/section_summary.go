@@ -31,14 +31,16 @@ type SectionSummarySubsection struct {
 	ID         askdata.ID                `json:"id"`
 	Title      string                    `json:"title"`
 	Layout     string                    `json:"layout"`
+	Weight     int                       `json:"weight"`
 	Components []SectionSummaryComponent `json:"components"`
 }
 
 type SectionSummaryRequest struct {
-	SectionID   askdata.ID                 `json:"sectionId"`
-	SectionName string                     `json:"sectionName"`
-	Question    string                     `json:"question,omitempty"`
-	Subsections []SectionSummarySubsection `json:"subsections"`
+	SectionID        askdata.ID                  `json:"sectionId"`
+	SectionName      string                      `json:"sectionName"`
+	Question         string                      `json:"question,omitempty"`
+	AnalysisApproach report.AngleInsightApproach `json:"analysisApproach"`
+	Subsections      []SectionSummarySubsection  `json:"subsections"`
 }
 
 type SectionSummaryContent struct {
@@ -93,10 +95,17 @@ func summaryFilterValue(value any) string {
 	return boundedSummaryText(string(encoded), 240)
 }
 
-// BuildSectionSummaryRequest projects exactly one analysis angle and all of its
-// subsection composition into a bounded model request. Angle-level summary
-// blocks are deliberately excluded so regeneration cannot summarize itself.
+// BuildSectionSummaryRequest uses the persisted smart-conclusion configuration
+// when present and otherwise selects every subsection with equal weight.
 func BuildSectionSummaryRequest(definition report.ReportDefinition, sectionID askdata.ID) (SectionSummaryRequest, error) {
+	return BuildSectionSummaryRequestWithConfig(definition, sectionID, nil)
+}
+
+// BuildSectionSummaryRequestWithConfig projects only the author-selected
+// subsections into a bounded model request. The optional override supports a
+// single save-and-generate action without persisting half of the edit first.
+// Angle-level summary blocks are deliberately excluded from their own source.
+func BuildSectionSummaryRequestWithConfig(definition report.ReportDefinition, sectionID askdata.ID, override *report.AngleInsightConfig) (SectionSummaryRequest, error) {
 	if sectionID.Validate() != nil {
 		return SectionSummaryRequest{}, errors.New("section id is invalid")
 	}
@@ -113,18 +122,65 @@ func BuildSectionSummaryRequest(definition report.ReportDefinition, sectionID as
 			if section.ID != sectionID {
 				continue
 			}
+			subsectionBlocks := make([]report.Block, 0, len(section.Blocks))
+			for _, block := range section.Blocks {
+				if strings.HasPrefix(block.CardKind, "LAYOUT_SUBSECTION_") {
+					subsectionBlocks = append(subsectionBlocks, block)
+				}
+			}
+			if len(subsectionBlocks) == 0 {
+				return SectionSummaryRequest{}, errors.New("section has no analysis subsections")
+			}
+			config := override
+			if config == nil {
+				for _, block := range section.Blocks {
+					if block.CardKind != "LAYOUT_ANGLE_INSIGHT" {
+						continue
+					}
+					for _, zone := range block.Zones {
+						for _, slot := range zone.Slots {
+							if component, exists := components[slot.ComponentID]; exists && component.Options.AngleInsight != nil {
+								config = component.Options.AngleInsight
+							}
+						}
+					}
+				}
+			}
+			if config == nil {
+				ids := make([]askdata.ID, 0, len(subsectionBlocks))
+				for _, block := range subsectionBlocks {
+					ids = append(ids, block.ID)
+				}
+				fallback := report.DefaultAngleInsightConfig(ids)
+				config = &fallback
+			}
+			if err := config.Validate(); err != nil {
+				return SectionSummaryRequest{}, fmt.Errorf("angle insight configuration is invalid: %w", err)
+			}
+			weights := make(map[askdata.ID]int, len(config.AnalysisItems))
+			available := make(map[askdata.ID]struct{}, len(subsectionBlocks))
+			for _, block := range subsectionBlocks {
+				available[block.ID] = struct{}{}
+			}
+			for _, item := range config.AnalysisItems {
+				if _, exists := available[item.SubsectionID]; !exists {
+					return SectionSummaryRequest{}, fmt.Errorf("configured subsection %q does not exist in this analysis angle", item.SubsectionID)
+				}
+				weights[item.SubsectionID] = item.Weight
+			}
 			result := SectionSummaryRequest{
-				SectionID: section.ID, SectionName: boundedSummaryText(section.Name, 160),
-				Question: boundedSummaryText(section.Question, 500), Subsections: []SectionSummarySubsection{},
+				SectionID: section.ID, SectionName: boundedSummaryText(section.Name, 160), Question: boundedSummaryText(section.Question, 500),
+				AnalysisApproach: config.AnalysisApproach, Subsections: []SectionSummarySubsection{},
 			}
 			componentCount := 0
-			for _, block := range section.Blocks {
-				if !strings.HasPrefix(block.CardKind, "LAYOUT_SUBSECTION_") {
+			for _, block := range subsectionBlocks {
+				weight, selected := weights[block.ID]
+				if !selected {
 					continue
 				}
 				subsection := SectionSummarySubsection{
 					ID: block.ID, Title: boundedSummaryText(block.Title, 160),
-					Layout: strings.TrimPrefix(block.CardKind, "LAYOUT_SUBSECTION_"), Components: []SectionSummaryComponent{},
+					Layout: strings.TrimPrefix(block.CardKind, "LAYOUT_SUBSECTION_"), Weight: weight, Components: []SectionSummaryComponent{},
 				}
 				for _, zone := range block.Zones {
 					for _, slot := range zone.Slots {
@@ -168,9 +224,6 @@ func BuildSectionSummaryRequest(definition report.ReportDefinition, sectionID as
 					}
 				}
 				result.Subsections = append(result.Subsections, subsection)
-			}
-			if len(result.Subsections) == 0 {
-				return SectionSummaryRequest{}, errors.New("section has no analysis subsections")
 			}
 			return result, nil
 		}

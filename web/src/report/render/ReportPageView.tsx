@@ -416,7 +416,7 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
             gridColumn: singleBlock ? '1 / -1' : `${rect.x + 1} / span ${Math.max(rect.w, 1)}`,
             gridRow: `${rect.y - originY + 1} / span ${Math.max(rect.h, 1)}`,
           }}
-          onClick={editing && onSelectComponent && componentIds[0] && block.cardKind !== angleInsightCardKind
+          onClick={editing && onSelectComponent && componentIds[0]
             ? event => { event.stopPropagation(); onSelectComponent(componentIds[0], block.id) }
             : undefined}>
           {editing && block.cardKind && !block.cardKind.startsWith('TEMPLATE_') && <span className="report-block-kind-badge">{block.cardKind}</span>}
@@ -425,7 +425,8 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
               ? <EditableBlockTitle sectionId={section.id} block={block} onChange={editing.onBlockTitleChange} />
               : <h3>{block.title}</h3>}
             {block.cardKind === angleInsightCardKind && <small className="report-angle-insight-source">
-              综合本分析角度全部 {section.blocks.filter(item => item.cardKind?.startsWith('LAYOUT_SUBSECTION_')).length} 个小节内容
+              已配置 {components.get(componentIds[0])?.options.angleInsightConfig?.analysisItems.length
+                ?? section.blocks.filter(item => item.cardKind?.startsWith('LAYOUT_SUBSECTION_')).length} 个分析项
             </small>}
             {section.question && <p>{section.question}</p>}
           </header>}
@@ -437,7 +438,7 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
           {editing && (editing.onDuplicateBlock || editing.onDeleteBlock) && <div className={`report-block-toolbar ${block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? 'is-subsection-toolbar' : ''}`.trim()} role="toolbar"
             aria-label={block.cardKind === angleInsightCardKind ? '智能结论操作' : block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? '分析小节操作' : '画布元素操作'}>
             {block.cardKind === angleInsightCardKind && editing.onRegenerateAngleInsight && <button type="button"
-              className="report-angle-insight-regenerate" title="基于全部小节重新生成" aria-label="重新生成智能结论"
+              className="report-angle-insight-regenerate" title="按当前配置重新生成" aria-label="重新生成智能结论"
               disabled={editing.regeneratingBlockId === block.id}
               onClick={event => { event.stopPropagation(); editing.onRegenerateAngleInsight?.(section.id, block.id) }}>
               <ArrowClockwise className={editing.regeneratingBlockId === block.id ? 'is-spinning' : ''} size={14} />

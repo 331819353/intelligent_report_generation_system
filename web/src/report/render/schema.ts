@@ -87,6 +87,17 @@ export type ComponentOptions = {
   insightRole?: string
   tablePageSize?: number
   cardVariant?: '01' | '02' | '03'
+  angleInsightConfig?: AngleInsightConfig
+}
+
+export type AngleInsightConfig = {
+  analysisApproach: {
+    howToAnalyze: string
+    analyzeWhat: string
+    doNotAnalyze: string
+    outputExample: string
+  }
+  analysisItems: Array<{ subsectionId: string; weight: number }>
 }
 
 export type ReportComponent = {

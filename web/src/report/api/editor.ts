@@ -1,5 +1,5 @@
 import { apiRequest } from '../../lib/api'
-import type { Block, FieldBinding, Page, ReportComponent, ReportDefinition, ReportHeaderStyle, Section } from '../render/schema'
+import type { AngleInsightConfig, Block, FieldBinding, Page, ReportComponent, ReportDefinition, ReportHeaderStyle, Section } from '../render/schema'
 import type { ComponentManifest } from '../render/manifests'
 import type { RuntimeComponentResult } from './runtime'
 
@@ -300,9 +300,9 @@ export const reportEditorAPI = {
       { method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input) },
     )
   },
-  generateSectionSummary(reportId: string, sectionId: string) {
+  generateSectionSummary(reportId: string, sectionId: string, config?: AngleInsightConfig) {
     return apiRequest<AISectionSummaryResponse>(`/v1/reports/${encodeURIComponent(reportId)}/ai/section-summary`, {
-      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ sectionId }),
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ sectionId, ...(config ? { config } : {}) }),
     })
   },
   applyOperations(reportId: string, bundle: EditorOperationBundle) {

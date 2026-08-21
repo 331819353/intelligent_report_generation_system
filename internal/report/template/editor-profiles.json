@@ -664,6 +664,16 @@
       "bindingGroups": []
     },
     {
+      "componentType": "rich-text",
+      "componentVersion": "1.1.0",
+      "example": {
+        "title": "富文本",
+        "description": "无需绑定数据；智能结论可配置分析思路、分析项与权重",
+        "items": []
+      },
+      "bindingGroups": []
+    },
+    {
       "componentType": "scatter",
       "componentVersion": "1.0.0",
       "example": {

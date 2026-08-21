@@ -26,6 +26,8 @@ import {
 import { SlotComponentPicker, type SlotPickerTarget } from '../report/designer/SlotComponentPicker'
 import { ComponentBindingEditor } from '../report/designer/ComponentBindingEditor'
 import { MetricStatusConfiguration } from '../report/designer/MetricStatusConfiguration'
+import { AngleInsightConfigPanel } from '../report/designer/AngleInsightConfigPanel'
+import { defaultAngleInsightConfig, effectiveAngleInsightConfig } from '../report/designer/angle-insight-config'
 import { analysisCardCatalog } from '../report/analysis/catalog'
 import {
   editorBindingGroups, editorBindingsValid, emptyManifestIndex, indexManifests, latestComponentManifests, listComponentManifests, minimumSize,
@@ -33,11 +35,11 @@ import {
 } from '../report/render/manifests'
 import {
   canvasOf, findBlock, findComponentBlock, orderedPages, orderedSections, placedComponentIDs,
-  type Block, type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type GridRect, type Page, type ReportDefinition, type ReportHeaderStyle, type ReportType, type Section,
+  type AngleInsightConfig, type Block, type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type GridRect, type Page, type ReportDefinition, type ReportHeaderStyle, type ReportType, type Section,
 } from '../report/render/schema'
 import {
   addDataContextOperations, bindingForField, bundle, createFilterOperations, createInteractionOperations,
-  angleInsightBlock, createAngleInsightOperations, createSectionOperations, createSubsectionFrameOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, layoutOperations,
+  angleInsightBlock, angleInsightCardKind, createAngleInsightOperations, createSectionOperations, createSubsectionFrameOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, layoutOperations,
   placeComponentInSlotOperations,
   removeBlockOperations, removeComponentOperations, removeDataContextOperations, renameSectionOperations,
   renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateAngleInsightOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations,
@@ -139,11 +141,29 @@ const reportEditorSnapshotManifests: ComponentManifest[] = [...analysisCardCatal
     supportedInteractions: [],
   }
 }), {
-  type: 'rich-text', version: '1.0.0', renderer: 'TEXT', displayName: '富文本', category: 'CONTENT',
+  type: 'rich-text', version: '1.1.0', renderer: 'TEXT', displayName: '富文本', category: 'CONTENT',
   minSize: { w: 2, h: 1 }, recommendedSize: { w: 8, h: 3 },
   dataContract: { dimensions: { min: 0, max: 0 }, measures: { min: 0, max: 0 }, timeField: { required: false }, roles: [] },
   stackingRequiresAdditive: false,
-  optionSchema: { type: 'object', additionalProperties: false, required: ['richText'], properties: { richText: { type: 'string' } } },
+  optionSchema: {
+    type: 'object', additionalProperties: false, required: ['richText'], properties: {
+      richText: { type: 'string' },
+      angleInsightConfig: {
+        type: 'object', additionalProperties: false, required: ['analysisApproach', 'analysisItems'],
+        properties: {
+          analysisApproach: {
+            type: 'object', additionalProperties: false,
+            required: ['howToAnalyze', 'analyzeWhat', 'doNotAnalyze', 'outputExample'],
+            properties: {
+              howToAnalyze: { type: 'string' }, analyzeWhat: { type: 'string' },
+              doNotAnalyze: { type: 'string' }, outputExample: { type: 'string' },
+            },
+          },
+          analysisItems: { type: 'array' },
+        },
+      },
+    },
+  },
   defaultOptions: { richText: '' },
   mobilePolicy: { supported: true, defaultLegendMode: 'HIDDEN', labelDegradation: 'ELLIPSIS' }, supportedInteractions: [],
 }]
@@ -660,7 +680,7 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
 
   // 表现属性直接由清单的 optionSchema 生成，避免面板与渲染器各自维护一份白名单。
   const styleProperties = Object.entries(manifest?.optionSchema.properties ?? {})
-    .filter(([name]) => name !== 'title' && name !== 'subtitle' && name !== 'richText')
+    .filter(([name, schema]) => name !== 'title' && name !== 'subtitle' && name !== 'richText' && schema.type !== 'object' && schema.type !== 'array')
     .sort(([left], [right]) => left.localeCompare(right))
 
   const setOption = (name: string, value: unknown) =>
@@ -910,6 +930,7 @@ export function ReportEditorPage() {
   const [frameworkConfigError, setFrameworkConfigError] = useState('')
   const [frameworkCreating, setFrameworkCreating] = useState(false)
   const [angleInsightBusySectionId, setAngleInsightBusySectionId] = useState('')
+  const [angleInsightConfigError, setAngleInsightConfigError] = useState('')
   const [subsectionBuilderSectionId, setSubsectionBuilderSectionId] = useState('')
   const [slotPickerTarget, setSlotPickerTarget] = useState<SlotPickerTarget | null>(null)
   const [interactionBusy, setInteractionBusy] = useState(false)
@@ -1071,6 +1092,9 @@ export function ReportEditorPage() {
     [page, selectedComponentId],
   )
   const selectedCardId = selectedCard?.block.id ?? ''
+  const selectedAngleInsight = selectedComponent && selectedCard?.block.cardKind === angleInsightCardKind
+    ? { component: selectedComponent, section: selectedCard.section }
+    : undefined
   const currentDataContextId = draft?.definition.dataContexts[0]?.id ?? ''
   // 绑定面板只能使用报告内数据集对应的、服务端已按列权限裁剪的字段。
   const fieldsByContext = useMemo(
@@ -1416,6 +1440,10 @@ export function ReportEditorPage() {
 
   const deleteSelectedComponent = async () => {
     if (!selectedComponent) return
+    if (selectedCard?.block.cardKind === angleInsightCardKind) {
+      await deleteBlock(selectedCard.block.id)
+      return
+    }
     await deleteComponent(selectedComponent.id)
   }
 
@@ -1532,15 +1560,16 @@ export function ReportEditorPage() {
     setFrameworkCreating(false)
   }
 
-  const generateAngleInsightText = async (section: Section) => {
-    const subsections = subsectionBlocks(section)
+  const generateAngleInsightText = async (section: Section, config: AngleInsightConfig) => {
+    const selectedItems = new Map(config.analysisItems.map(item => [item.subsectionId, item.weight]))
+    const subsections = subsectionBlocks(section).filter(block => selectedItems.has(block.id))
     if (designSnapshot) {
       const componentCount = subsections.reduce((count, block) => count + block.zones.reduce((sum, zone) =>
         sum + zone.slots.filter(slot => slot.componentId).length, 0), 0)
-      const titles = subsections.map(block => block.title || '未命名小节').join('、')
-      return `${section.name}当前由 ${subsections.length} 个分析小节共同构成，覆盖${titles || '待补充的小节内容'}。\n核心发现 1：已建立跨小节汇总结论位置，后续生成始终读取当前角度的完整组成信息。\n风险提示 1：当前共有 ${componentCount} 个已配置内容元素，空槽位不会被当作事实依据。\n建议动作 1：补齐各小节的结论与论据后重新生成，以获得更完整的角度级总结。`
+      const titles = subsections.map(block => `${block.title || '未命名小节'}（${selectedItems.get(block.id)}%）`).join('、')
+      return `${section.name}当前选择 ${subsections.length} 个分析项：${titles}。\n核心发现 1：已按照配置权重组织跨小节汇总结论，分析范围仅限已选择的小节。\n风险提示 1：当前共有 ${componentCount} 个已配置内容元素，空槽位和未选择小节不会被当作事实依据。\n建议动作 1：补齐所选小节的结论与论据后重新生成，以获得更完整的角度级总结。`
     }
-    const result = await reportEditorAPI.generateSectionSummary(reportId, section.id)
+    const result = await reportEditorAPI.generateSectionSummary(reportId, section.id, config)
     if (result.baseRevision !== draft?.revisionNo) throw new Error('生成期间草稿已更新，请重新生成智能结论')
     return result.richText
   }
@@ -1548,20 +1577,23 @@ export function ReportEditorPage() {
   const addAngleInsight = async (sectionId: string) => {
     if (!draft || !page || !canEdit || !canAIEdit || angleInsightBusySectionId) return
     const section = sections.find(item => item.id === sectionId)
-    const manifest = manifests.list().find(item => item.type === 'rich-text')
+    const manifest = latestComponentManifests(manifests.list()).find(item => item.type === 'rich-text')
     if (!section || !manifest) { setActionError('智能结论组件尚未注册，请刷新后重试'); return }
     if (subsectionBlocks(section).length === 0) { setActionError('请先添加至少一个分析小节'); return }
-    setAngleInsightBusySectionId(sectionId); setActionError('')
+    setAngleInsightBusySectionId(sectionId); setActionError(''); setAngleInsightConfigError('')
     try {
-      const richText = await generateAngleInsightText(section)
+      const config = defaultAngleInsightConfig(section)
       const result = createAngleInsightOperations({
-        definition: draft.definition, page, sectionId, manifest, richText, newId: () => crypto.randomUUID(),
+        definition: draft.definition, page, sectionId, manifest,
+        richText: '请在右侧完成分析思路、分析项与权重配置，然后生成智能结论。',
+        config, newId: () => crypto.randomUUID(),
       })
       if (result.error) { setActionError(result.error); return }
-      const saved = await commit(result.operations, '已基于全部小节生成智能结论', setActionError)
+      const saved = await commit(result.operations, '智能结论已添加，请完成分析配置', setActionError)
       if (saved) {
         setActiveSectionId(sectionId)
-        setSelectedComponentId('')
+        setSelectedComponentId(result.componentId)
+        revealSidePanel('data')
         window.setTimeout(() => document.querySelector<HTMLElement>(`[data-block-id="${result.blockId}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 0)
       }
     } catch (cause) {
@@ -1578,11 +1610,35 @@ export function ReportEditorPage() {
     if (!section || !block || !component) { setActionError('未找到智能结论，请刷新后重试'); return }
     setAngleInsightBusySectionId(sectionId); setActionError('')
     try {
-      const richText = await generateAngleInsightText(section)
-      const saved = await commit(updateAngleInsightOperations(component, richText), '智能结论已按全部小节重新生成', setActionError)
-      if (saved) setSelectedComponentId('')
+      const config = effectiveAngleInsightConfig(component, section)
+      const richText = await generateAngleInsightText(section, config)
+      const manifest = latestComponentManifests(manifests.list()).find(item => item.type === 'rich-text')
+      await commit(updateAngleInsightOperations(component, richText, config, manifest), '智能结论已按当前配置重新生成', setActionError)
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : '智能结论重新生成失败')
+    } finally { setAngleInsightBusySectionId('') }
+  }
+
+  const saveAngleInsightConfig = async (sectionId: string, componentId: string, config: AngleInsightConfig, generate: boolean) => {
+    if (!draft || !canEdit || angleInsightBusySectionId) return
+    const section = sections.find(item => item.id === sectionId)
+    const component = draft.definition.components.find(item => item.id === componentId)
+    if (!section || !component) { setAngleInsightConfigError('未找到智能结论，请刷新后重试'); return }
+    if (generate && !canAIEdit) { setAngleInsightConfigError('当前账号没有 AI 编辑权限'); return }
+    setAngleInsightBusySectionId(sectionId); setAngleInsightConfigError(''); setActionError('')
+    try {
+      const richText = generate
+        ? await generateAngleInsightText(section, config)
+        : String(component.options.richText ?? '')
+      const manifest = latestComponentManifests(manifests.list()).find(item => item.type === 'rich-text')
+      const saved = await commit(
+        updateAngleInsightOperations(component, richText, config, manifest),
+        generate ? '配置已保存，智能结论已重新生成' : '智能结论配置已保存',
+        setAngleInsightConfigError,
+      )
+      if (saved) setSelectedComponentId(componentId)
+    } catch (cause) {
+      setAngleInsightConfigError(cause instanceof Error ? cause.message : generate ? '智能结论生成失败' : '配置保存失败')
     } finally { setAngleInsightBusySectionId('') }
   }
 
@@ -1958,7 +2014,16 @@ export function ReportEditorPage() {
             <button type="button" role="tab" aria-label="AI 改稿" aria-selected={sidePanel === 'ai'} className={`report-editor-panel-ai ${sidePanel === 'ai' ? 'is-active' : ''}`} onClick={() => setSidePanel('ai')}><Sparkle size={15} weight="fill" /></button>
           </div>
           {(sidePanel === 'data' || sidePanel === 'appearance') && <div className="report-editor-panel-body is-data">
-            {selectedComponent ? <>
+            {selectedAngleInsight && sidePanel === 'data' ? <AngleInsightConfigPanel
+              key={`${selectedAngleInsight.component.id}:${draft.revisionNo}`}
+              section={selectedAngleInsight.section} component={selectedAngleInsight.component}
+              busy={angleInsightBusySectionId === selectedAngleInsight.section.id || !canEdit}
+              error={angleInsightConfigError}
+              onClose={() => { setSelectedComponentId(''); setAngleInsightConfigError('') }}
+              onSave={(config, generate) => void saveAngleInsightConfig(
+                selectedAngleInsight.section.id, selectedAngleInsight.component.id, config, generate,
+              )}
+            /> : selectedComponent ? <>
               <CardInspector
                 key={`${selectedComponent.id}:${sidePanel}`}
                 mode={sidePanel}

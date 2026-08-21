@@ -229,7 +229,7 @@ func (generator *OrchestratedGenerator) GenerateSectionSummary(ctx context.Conte
 		Purpose: aiplatform.PurposeReportGeneration, PromptVersion: "report-section-summary-v1",
 		ResourceType: "REPORT", ResourceID: string(identity.ReportID),
 		Request: structuredRequest(
-			"Write one concise analysis-angle conclusion from every supplied subsection. Use only subsection titles, layouts, component roles, governed field labels, filters and existing narrative. Never claim a data value, trend, cause, comparison or business outcome that is not explicitly present in existing narrative. Explain coverage gaps as risks, keep the language of the supplied content, and return only the required structured fields.",
+			"Write one concise analysis-angle conclusion from only the supplied, author-selected subsections. Follow analysisApproach.howToAnalyze, analyze only analysisApproach.analyzeWhat, obey analysisApproach.doNotAnalyze, and use outputExample only as a style/structure example rather than factual evidence. Treat each subsection weight as relative attention and output priority, never as a metric or business fact. Use only subsection titles, layouts, component roles, governed field labels, filters and existing narrative. Never claim a data value, trend, cause, comparison or business outcome that is not explicitly present in existing narrative. Explain coverage gaps as risks, keep the language of the supplied content, and return only the required structured fields.",
 			payload, "report_section_summary_v1", reportSectionSummarySchema,
 		),
 	})
