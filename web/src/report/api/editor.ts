@@ -1,5 +1,5 @@
 import { apiRequest } from '../../lib/api'
-import type { AngleInsightConfig, Block, FieldBinding, Page, ReportComponent, ReportDefinition, ReportHeaderStyle, Section } from '../render/schema'
+import type { AngleInsightConfig, Block, FieldBinding, Page, ReportComponent, ReportDefinition, ReportHeaderStyle, Section, SubsectionInsightConfig } from '../render/schema'
 import type { ComponentManifest } from '../render/manifests'
 import type { RuntimeComponentResult } from './runtime'
 
@@ -75,6 +75,13 @@ export type AISectionSummaryResponse = {
   content: { summary: string; findings: string[]; risks: string[]; actions: string[] }
   richText: string
   source: { sectionId: string; subsectionCount: number; componentCount: number }
+}
+export type AISubsectionSummaryResponse = {
+  aiRunId: string
+  baseRevision: number
+  content: { summary: string; findings: string[]; risks: string[]; actions: string[] }
+  richText: string
+  source: { sectionId: string; subsectionId: string; componentCount: number }
 }
 export type PublicationIssue = { code: string; path?: string; message: string }
 export type PublicationGate = {
@@ -303,6 +310,11 @@ export const reportEditorAPI = {
   generateSectionSummary(reportId: string, sectionId: string, config?: AngleInsightConfig) {
     return apiRequest<AISectionSummaryResponse>(`/v1/reports/${encodeURIComponent(reportId)}/ai/section-summary`, {
       method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ sectionId, ...(config ? { config } : {}) }),
+    })
+  },
+  generateSubsectionSummary(reportId: string, sectionId: string, subsectionId: string, config?: SubsectionInsightConfig) {
+    return apiRequest<AISubsectionSummaryResponse>(`/v1/reports/${encodeURIComponent(reportId)}/ai/subsection-summary`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ sectionId, subsectionId, ...(config ? { config } : {}) }),
     })
   },
   applyOperations(reportId: string, bundle: EditorOperationBundle) {

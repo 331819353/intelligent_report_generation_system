@@ -4,6 +4,7 @@ import { editorBindingGroups, minimumSize, recommendedSize } from '../render/man
 import {
   canvasOf, findBlock, findComponentBlock, orderedSections,
   type AngleInsightConfig, type BlockType, type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type MetricAggregation,
+  type SubsectionInsightConfig,
   type Block, type GridRect, type Page, type ReportComponent, type ReportDefinition, type Section, type Zone,
 } from '../render/schema.ts'
 import { findFreeRect, resolveLayout, resolveSlotPlacement } from './placement.ts'
@@ -1186,6 +1187,64 @@ export function updateAngleInsightOperations(component: ReportComponent, richTex
     op: 'COMPONENT_UPDATE', targetId: component.id,
     payload: { options },
   }]
+}
+
+/**
+ * 小节结论是框架原生能力：点击空结论位直接创建一份无数据绑定富文本，并通过
+ * subsectionInsightConfig 选择本小节中的论据、明细与附录，不再经过组件卡片库。
+ */
+export function createSubsectionInsightOperations(input: {
+  page: Page
+  blockId: string
+  zoneId: string
+  slotId: string
+  manifest: ComponentManifest
+  richText: string
+  config: SubsectionInsightConfig
+  newId: () => string
+}): { operations: EditorOperation[]; componentId: string; error?: string } {
+  const located = findBlock(input.page, input.blockId)
+  const zone = located?.block.zones.find(item => item.id === input.zoneId)
+  const slot = zone?.slots.find(item => item.id === input.slotId)
+  if (!located || !zone || !slot || !located.block.cardKind?.startsWith('LAYOUT_SUBSECTION_') || frameSlotRole(slot.cardKind) !== 'CONCLUSION') {
+    return { operations: [], componentId: '', error: '小节智能结论槽位不存在' }
+  }
+  if (slot.componentId) return { operations: [], componentId: '', error: '这个小节已经有智能结论' }
+  if (input.manifest.type !== 'rich-text' || !input.richText.trim()) {
+    return { operations: [], componentId: '', error: '智能结论组件尚未注册' }
+  }
+  const componentId = input.newId()
+  const component: ReportComponent = {
+    id: componentId,
+    templateRef: { type: input.manifest.type, version: input.manifest.version },
+    options: { richText: input.richText.trim(), subsectionInsightConfig: input.config },
+  }
+  return {
+    componentId,
+    operations: [
+      { op: 'COMPONENT_CREATE', targetId: componentId, payload: { component } },
+      { op: 'SLOT_UPDATE', targetId: slot.id, payload: { grid: slot.grid, componentId } },
+    ],
+  }
+}
+
+/** Legacy long-form conclusion cards are replaced by the native rich-text
+ * conclusion contract on first save/generation. Their direct data binding and
+ * card-specific options are intentionally removed; selected sibling content is
+ * the only evidence source after migration. */
+export function updateSubsectionInsightOperations(
+  component: ReportComponent, richText: string, config: SubsectionInsightConfig, manifest: ComponentManifest,
+): EditorOperation[] {
+  const next = richText.trim()
+  if (!next || manifest.type !== 'rich-text') return []
+  const options: ComponentOptions = { richText: next, subsectionInsightConfig: config }
+  if (component.templateRef.type !== manifest.type || component.templateRef.version !== manifest.version || component.dataBinding) {
+    return [{
+      op: 'COMPONENT_REPLACE', targetId: component.id,
+      payload: { component: { id: component.id, templateRef: { type: manifest.type, version: manifest.version }, options } },
+    }]
+  }
+  return [{ op: 'COMPONENT_UPDATE', targetId: component.id, payload: { options } }]
 }
 
 export function renameSectionOperations(sectionId: string, name: string): EditorOperation[] {

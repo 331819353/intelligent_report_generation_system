@@ -499,24 +499,25 @@ type FieldBinding struct {
 // ComponentOptions contains only renderer-independent V1 options. The
 // component manifest further narrows this set for each type and version.
 type ComponentOptions struct {
-	Title            string              `json:"title,omitempty"`
-	Subtitle         string              `json:"subtitle,omitempty"`
-	ShowLegend       *bool               `json:"showLegend,omitempty"`
-	ShowLabel        *bool               `json:"showLabel,omitempty"`
-	Smooth           *bool               `json:"smooth,omitempty"`
-	Orientation      Orientation         `json:"orientation,omitempty"`
-	TopN             *int                `json:"topN,omitempty"`
-	ColorPaletteRef  string              `json:"colorPaletteRef,omitempty"`
-	NumberFormat     string              `json:"numberFormat,omitempty"`
-	NullPolicy       NullPolicy          `json:"nullPolicy,omitempty"`
-	Animation        *bool               `json:"animation,omitempty"`
-	MobileLegendMode MobileLegendMode    `json:"mobileLegendMode,omitempty"`
-	RichText         string              `json:"richText,omitempty"`
-	ImageAssetID     *askdata.ID         `json:"imageAssetId,omitempty"`
-	InsightRole      string              `json:"insightRole,omitempty"`
-	TablePageSize    *int                `json:"tablePageSize,omitempty"`
-	CardVariant      string              `json:"cardVariant,omitempty"`
-	AngleInsight     *AngleInsightConfig `json:"angleInsightConfig,omitempty"`
+	Title             string                   `json:"title,omitempty"`
+	Subtitle          string                   `json:"subtitle,omitempty"`
+	ShowLegend        *bool                    `json:"showLegend,omitempty"`
+	ShowLabel         *bool                    `json:"showLabel,omitempty"`
+	Smooth            *bool                    `json:"smooth,omitempty"`
+	Orientation       Orientation              `json:"orientation,omitempty"`
+	TopN              *int                     `json:"topN,omitempty"`
+	ColorPaletteRef   string                   `json:"colorPaletteRef,omitempty"`
+	NumberFormat      string                   `json:"numberFormat,omitempty"`
+	NullPolicy        NullPolicy               `json:"nullPolicy,omitempty"`
+	Animation         *bool                    `json:"animation,omitempty"`
+	MobileLegendMode  MobileLegendMode         `json:"mobileLegendMode,omitempty"`
+	RichText          string                   `json:"richText,omitempty"`
+	ImageAssetID      *askdata.ID              `json:"imageAssetId,omitempty"`
+	InsightRole       string                   `json:"insightRole,omitempty"`
+	TablePageSize     *int                     `json:"tablePageSize,omitempty"`
+	CardVariant       string                   `json:"cardVariant,omitempty"`
+	AngleInsight      *AngleInsightConfig      `json:"angleInsightConfig,omitempty"`
+	SubsectionInsight *SubsectionInsightConfig `json:"subsectionInsightConfig,omitempty"`
 }
 
 // AngleInsightConfig is the author-owned analysis contract for an angle-level
@@ -589,6 +590,73 @@ func (config AngleInsightConfig) Validate() error {
 			return fmt.Errorf("analysisItems[%d].subsectionId is duplicated", index)
 		}
 		seen[item.SubsectionID] = struct{}{}
+		if item.Weight < 1 || item.Weight > 100 {
+			return fmt.Errorf("analysisItems[%d].weight must be between 1 and 100", index)
+		}
+		total += item.Weight
+	}
+	if total != 100 {
+		return fmt.Errorf("analysisItems weights must total 100, got %d", total)
+	}
+	return nil
+}
+
+// SubsectionInsightConfig is the author-owned analysis contract for the native
+// conclusion slot of one subsection. AnalysisItems refer to components in that
+// subsection; Weight controls model attention and is never treated as data.
+type SubsectionInsightConfig struct {
+	AnalysisApproach AngleInsightApproach    `json:"analysisApproach"`
+	AnalysisItems    []SubsectionInsightItem `json:"analysisItems"`
+}
+
+type SubsectionInsightItem struct {
+	ComponentID askdata.ID `json:"componentId"`
+	Weight      int        `json:"weight"`
+}
+
+func DefaultSubsectionInsightConfig(componentIDs []askdata.ID) SubsectionInsightConfig {
+	items := make([]SubsectionInsightItem, 0, len(componentIDs))
+	if len(componentIDs) > 0 {
+		base, remainder := 100/len(componentIDs), 100%len(componentIDs)
+		for index, id := range componentIDs {
+			weight := base
+			if index < remainder {
+				weight++
+			}
+			items = append(items, SubsectionInsightItem{ComponentID: id, Weight: weight})
+		}
+	}
+	approach := DefaultAngleInsightApproach()
+	approach.HowToAnalyze = "逐项阅读所选论据、图表、明细与附录的标题、指标、维度、过滤条件和已有叙事，识别相互印证、差异与证据缺口；按照权重分配分析篇幅。"
+	approach.AnalyzeWhat = "分析本小节所选内容已经明确表达的核心发现、关系、风险与可执行建议，并形成小节级智能结论。"
+	approach.DoNotAnalyze = "不得补造未提供的指标值、趋势、因果关系、对比结论或业务事实；不得分析未选择的内容；不得把模板占位文案当作真实结论。"
+	return SubsectionInsightConfig{AnalysisApproach: approach, AnalysisItems: items}
+}
+
+func (config SubsectionInsightConfig) Validate() error {
+	for name, value := range map[string]string{
+		"howToAnalyze":  config.AnalysisApproach.HowToAnalyze,
+		"analyzeWhat":   config.AnalysisApproach.AnalyzeWhat,
+		"doNotAnalyze":  config.AnalysisApproach.DoNotAnalyze,
+		"outputExample": config.AnalysisApproach.OutputExample,
+	} {
+		if strings.TrimSpace(value) == "" || len([]rune(value)) > MaxStringLength {
+			return fmt.Errorf("analysisApproach.%s must contain 1..%d characters", name, MaxStringLength)
+		}
+	}
+	if len(config.AnalysisItems) == 0 || len(config.AnalysisItems) > MaxComponents {
+		return fmt.Errorf("analysisItems must contain 1..%d items", MaxComponents)
+	}
+	seen := make(map[askdata.ID]struct{}, len(config.AnalysisItems))
+	total := 0
+	for index, item := range config.AnalysisItems {
+		if err := item.ComponentID.Validate(); err != nil {
+			return fmt.Errorf("analysisItems[%d].componentId: %w", index, err)
+		}
+		if _, duplicate := seen[item.ComponentID]; duplicate {
+			return fmt.Errorf("analysisItems[%d].componentId is duplicated", index)
+		}
+		seen[item.ComponentID] = struct{}{}
 		if item.Weight < 1 || item.Weight > 100 {
 			return fmt.Errorf("analysisItems[%d].weight must be between 1 and 100", index)
 		}
@@ -1408,6 +1476,11 @@ func (options ComponentOptions) validate() error {
 	if options.AngleInsight != nil {
 		if err := options.AngleInsight.Validate(); err != nil {
 			return fmt.Errorf("options.angleInsightConfig: %w", err)
+		}
+	}
+	if options.SubsectionInsight != nil {
+		if err := options.SubsectionInsight.Validate(); err != nil {
+			return fmt.Errorf("options.subsectionInsightConfig: %w", err)
 		}
 	}
 	return nil

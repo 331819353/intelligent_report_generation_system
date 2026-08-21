@@ -1,4 +1,4 @@
-import { ChartLineUp, Check, Lightbulb, MagnifyingGlass, X } from '@phosphor-icons/react'
+import { ChartLineUp, Check, MagnifyingGlass, X } from '@phosphor-icons/react'
 import { useMemo, useState } from 'react'
 
 import {
@@ -12,7 +12,7 @@ export type SlotPickerTarget = {
   blockId: string
   zoneId: string
   slotId: string
-  role: 'CONCLUSION' | 'EVIDENCE'
+  role: 'EVIDENCE'
 }
 
 type PickerCandidate = {
@@ -25,13 +25,7 @@ function cardThumbnail(item: AnalysisCardCatalogItem, variant: AnalysisCardVaria
   return `/analysis-card-gallery/${String(item.id).padStart(2, '0')}-${item.slug}/${variant}.${extension}`
 }
 
-function isConclusionManifest(manifest: ComponentManifest) {
-  // 小节的结论槽位承载完整分析叙事，只允许第 37 类长文本结论。
-  // 洞察摘要、通用富文本与旧智能结论仍可作为普通内容组件使用，不能替代结论版式。
-  return manifest.type === 'analysis-long-form-conclusion'
-}
-
-export function SlotComponentPicker({ target, manifests, busy, error, onClose, onSelect }: {
+export function SlotComponentPicker({ manifests, busy, error, onClose, onSelect }: {
   target: SlotPickerTarget
   manifests: ComponentManifest[]
   busy?: boolean
@@ -39,16 +33,15 @@ export function SlotComponentPicker({ target, manifests, busy, error, onClose, o
   onClose: () => void
   onSelect: (manifest: ComponentManifest, options?: Partial<ComponentOptions>) => void
 }) {
-  const conclusion = target.role === 'CONCLUSION'
   const [query, setQuery] = useState('')
   const [variant, setVariant] = useState<AnalysisCardVariant>('01')
   const candidates = useMemo<PickerCandidate[]>(() => {
     const catalogByType = new Map(analysisCardCatalog.map(item => [item.type, item]))
     return manifests
-      .filter(manifest => conclusion ? isConclusionManifest(manifest) : manifest.category === 'CHART')
+      .filter(manifest => manifest.category === 'CHART')
       .map(manifest => ({ manifest, catalog: catalogByType.get(manifest.type) }))
       .sort((left, right) => (left.catalog?.id ?? 999) - (right.catalog?.id ?? 999) || left.manifest.displayName.localeCompare(right.manifest.displayName))
-  }, [conclusion, manifests])
+  }, [manifests])
   const [selectedRef, setSelectedRef] = useState(() => candidates[0] ? `${candidates[0].manifest.type}@${candidates[0].manifest.version}` : '')
   const normalized = query.trim().toLocaleLowerCase()
   const visible = candidates.filter(candidate => !normalized || [
@@ -58,23 +51,23 @@ export function SlotComponentPicker({ target, manifests, busy, error, onClose, o
     ...(candidate.catalog?.subtypes ?? []),
   ].some(value => value.toLocaleLowerCase().includes(normalized)))
   const selected = candidates.find(candidate => `${candidate.manifest.type}@${candidate.manifest.version}` === selectedRef) ?? visible[0]
-  const Icon = conclusion ? Lightbulb : ChartLineUp
+  const Icon = ChartLineUp
 
   return <div className="report-modal-backdrop" role="presentation" onMouseDown={onClose}>
     <section className="report-modal report-slot-picker" role="dialog" aria-modal="true" aria-labelledby="slot-picker-title"
       onMouseDown={event => event.stopPropagation()}>
       <header>
         <div className="report-slot-picker-heading"><span><Icon size={19} weight="duotone" /></span><div>
-          <small>{conclusion ? '结论槽位' : '论据图表槽位'}</small>
-          <h2 id="slot-picker-title">{conclusion ? '选择结论样式' : '选择图表组件'}</h2>
+          <small>论据图表槽位</small>
+          <h2 id="slot-picker-title">选择图表组件</h2>
         </div></div>
         <button type="button" aria-label="关闭选择弹窗" onClick={onClose}><X size={18} /></button>
       </header>
       <div className="report-slot-picker-body">
-        <section className="report-slot-picker-catalog" aria-label={conclusion ? '结论类型' : '图表类型'}>
+        <section className="report-slot-picker-catalog" aria-label="图表类型">
           <div className="report-slot-picker-search"><MagnifyingGlass size={16} />
             <input value={query} onChange={event => setQuery(event.target.value)}
-              placeholder={conclusion ? '搜索结论类型' : '搜索图表、问题或场景'} aria-label={conclusion ? '搜索结论类型' : '搜索图表类型'} />
+              placeholder="搜索图表、问题或场景" aria-label="搜索图表类型" />
           </div>
           <div className="report-slot-picker-grid">
             {visible.map(candidate => {
@@ -109,7 +102,7 @@ export function SlotComponentPicker({ target, manifests, busy, error, onClose, o
       <footer><button type="button" className="quiet-button" disabled={busy} onClick={onClose}>取消</button>
         <button type="button" className="primary-button" disabled={busy || !selected}
           onClick={() => selected && onSelect(selected.manifest, selected.catalog ? analysisCardOption(variant) : undefined)}>
-          {busy ? '正在插入…' : conclusion ? '插入结论' : '插入图表'}
+          {busy ? '正在插入…' : '插入图表'}
         </button>
       </footer>
     </section>

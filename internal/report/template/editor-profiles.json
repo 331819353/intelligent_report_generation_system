@@ -674,6 +674,16 @@
       "bindingGroups": []
     },
     {
+      "componentType": "rich-text",
+      "componentVersion": "1.2.0",
+      "example": {
+        "title": "富文本",
+        "description": "无需绑定数据；支持分析角度与小节原生智能结论配置",
+        "items": []
+      },
+      "bindingGroups": []
+    },
+    {
       "componentType": "scatter",
       "componentVersion": "1.0.0",
       "example": {

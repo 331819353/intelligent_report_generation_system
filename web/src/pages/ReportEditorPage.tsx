@@ -28,6 +28,8 @@ import { ComponentBindingEditor } from '../report/designer/ComponentBindingEdito
 import { MetricStatusConfiguration } from '../report/designer/MetricStatusConfiguration'
 import { AngleInsightConfigPanel } from '../report/designer/AngleInsightConfigPanel'
 import { defaultAngleInsightConfig, effectiveAngleInsightConfig } from '../report/designer/angle-insight-config'
+import { SubsectionInsightConfigPanel } from '../report/designer/SubsectionInsightConfigPanel'
+import { defaultSubsectionInsightConfig, subsectionInsightCandidates } from '../report/designer/subsection-insight-config'
 import { analysisCardCatalog } from '../report/analysis/catalog'
 import {
   editorBindingGroups, editorBindingsValid, emptyManifestIndex, indexManifests, latestComponentManifests, listComponentManifests, minimumSize,
@@ -35,14 +37,14 @@ import {
 } from '../report/render/manifests'
 import {
   canvasOf, findBlock, findComponentBlock, orderedPages, orderedSections, placedComponentIDs,
-  type AngleInsightConfig, type Block, type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type GridRect, type Page, type ReportDefinition, type ReportHeaderStyle, type ReportType, type Section,
+  type AngleInsightConfig, type Block, type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type GridRect, type Page, type ReportDefinition, type ReportHeaderStyle, type ReportType, type Section, type SubsectionInsightConfig,
 } from '../report/render/schema'
 import {
   addDataContextOperations, bindingForField, bundle, createFilterOperations, createInteractionOperations,
-  angleInsightBlock, angleInsightCardKind, createAngleInsightOperations, createSectionOperations, createSubsectionFrameOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, layoutOperations,
+  angleInsightBlock, angleInsightCardKind, createAngleInsightOperations, createSectionOperations, createSubsectionFrameOperations, createSubsectionInsightOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, frameSlotRole, layoutOperations,
   placeComponentInSlotOperations,
   removeBlockOperations, removeComponentOperations, removeDataContextOperations, renameSectionOperations,
-  renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateAngleInsightOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations,
+  renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateAngleInsightOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations, updateSubsectionInsightOperations,
   decodePalettePayload, encodePalettePayload, zoneReorderOperations,
   type FilterDraft, type InteractionDraft,
 } from '../report/designer/operations'
@@ -931,6 +933,8 @@ export function ReportEditorPage() {
   const [frameworkCreating, setFrameworkCreating] = useState(false)
   const [angleInsightBusySectionId, setAngleInsightBusySectionId] = useState('')
   const [angleInsightConfigError, setAngleInsightConfigError] = useState('')
+  const [subsectionInsightBusyId, setSubsectionInsightBusyId] = useState('')
+  const [subsectionInsightConfigError, setSubsectionInsightConfigError] = useState('')
   const [subsectionBuilderSectionId, setSubsectionBuilderSectionId] = useState('')
   const [slotPickerTarget, setSlotPickerTarget] = useState<SlotPickerTarget | null>(null)
   const [interactionBusy, setInteractionBusy] = useState(false)
@@ -1094,6 +1098,10 @@ export function ReportEditorPage() {
   const selectedCardId = selectedCard?.block.id ?? ''
   const selectedAngleInsight = selectedComponent && selectedCard?.block.cardKind === angleInsightCardKind
     ? { component: selectedComponent, section: selectedCard.section }
+    : undefined
+  const selectedSubsectionInsight = selectedComponent && selectedCard?.block.cardKind?.startsWith('LAYOUT_SUBSECTION_') &&
+    selectedCard.block.zones.some(zone => zone.slots.some(slot => slot.componentId === selectedComponent.id && frameSlotRole(slot.cardKind) === 'CONCLUSION'))
+    ? { component: selectedComponent, section: selectedCard.section, block: selectedCard.block }
     : undefined
   const currentDataContextId = draft?.definition.dataContexts[0]?.id ?? ''
   // 绑定面板只能使用报告内数据集对应的、服务端已按列权限裁剪的字段。
@@ -1642,6 +1650,75 @@ export function ReportEditorPage() {
     } finally { setAngleInsightBusySectionId('') }
   }
 
+  const addSubsectionInsight = async (target: { blockId: string; zoneId: string; slotId: string }) => {
+    if (!draft || !page || !canEdit || subsectionInsightBusyId) return
+    const located = findBlock(page, target.blockId)
+    const manifest = latestComponentManifests(manifests.list()).find(item => item.type === 'rich-text')
+    if (!located || !located.block.cardKind?.startsWith('LAYOUT_SUBSECTION_')) {
+      setActionError('未找到当前分析小节，请刷新后重试')
+      return
+    }
+    if (!manifest) { setActionError('智能结论能力尚未注册，请刷新后重试'); return }
+    const candidates = subsectionInsightCandidates(located.block, draft.definition.components)
+    if (candidates.length === 0) { setActionError('请先在本小节添加至少一个论据、明细或附录内容'); return }
+    setSubsectionInsightBusyId(located.block.id); setSubsectionInsightConfigError(''); setActionError('')
+    try {
+      const result = createSubsectionInsightOperations({
+        page, ...target, manifest,
+        richText: '请在右侧完成分析思路、分析项与权重配置，然后生成小节智能结论。',
+        config: defaultSubsectionInsightConfig(candidates), newId: () => crypto.randomUUID(),
+      })
+      if (result.error) { setActionError(result.error); return }
+      const saved = await commit(result.operations, '小节智能结论已添加，请完成分析配置', setActionError)
+      if (saved) {
+        setActiveSectionId(located.section.id)
+        setSelectedComponentId(result.componentId)
+        revealSidePanel('data')
+      }
+    } finally { setSubsectionInsightBusyId('') }
+  }
+
+  const generateSubsectionInsightText = async (section: Section, block: Block, config: SubsectionInsightConfig) => {
+    const candidates = subsectionInsightCandidates(block, draft?.definition.components ?? [])
+    const selectedItems = new Map(config.analysisItems.map(item => [item.componentId, item.weight]))
+    const selected = candidates.filter(item => selectedItems.has(item.componentId))
+    if (designSnapshot) {
+      const titles = selected.map(item => `${item.title}（${selectedItems.get(item.componentId)}%）`).join('、')
+      return `${block.title || '当前小节'}选择了 ${selected.length} 个分析项：${titles}。\n核心发现 1：已按照配置权重组织小节结论，范围仅限所选内容。\n风险提示 1：空槽位、未选择内容和模板占位不会被当作事实依据。\n建议动作 1：补齐所选内容的数据与叙事后重新生成。`
+    }
+    const result = await reportEditorAPI.generateSubsectionSummary(reportId, section.id, block.id, config)
+    if (result.baseRevision !== draft?.revisionNo) throw new Error('生成期间草稿已更新，请重新生成小节智能结论')
+    return result.richText
+  }
+
+  const saveSubsectionInsightConfig = async (
+    sectionId: string, blockId: string, componentId: string, config: SubsectionInsightConfig, generate: boolean,
+  ) => {
+    if (!draft || !canEdit || subsectionInsightBusyId) return
+    const section = sections.find(item => item.id === sectionId)
+    const block = section?.blocks.find(item => item.id === blockId)
+    const component = draft.definition.components.find(item => item.id === componentId)
+    if (!section || !block || !component) { setSubsectionInsightConfigError('未找到小节智能结论，请刷新后重试'); return }
+    if (generate && !canAIEdit) { setSubsectionInsightConfigError('当前账号没有 AI 编辑权限'); return }
+    const manifest = latestComponentManifests(manifests.list()).find(item => item.type === 'rich-text')
+    if (!manifest) { setSubsectionInsightConfigError('智能结论能力尚未注册，请刷新后重试'); return }
+    setSubsectionInsightBusyId(componentId); setSubsectionInsightConfigError(''); setActionError('')
+    try {
+      const existingText = String(component.options.richText ?? '').trim()
+      const richText = generate
+        ? await generateSubsectionInsightText(section, block, config)
+        : existingText || '配置已保存，请点击“应用配置并生成”生成小节智能结论。'
+      const saved = await commit(
+        updateSubsectionInsightOperations(component, richText, config, manifest),
+        generate ? '配置已保存，小节智能结论已重新生成' : '小节智能结论配置已保存',
+        setSubsectionInsightConfigError,
+      )
+      if (saved) setSelectedComponentId(componentId)
+    } catch (cause) {
+      setSubsectionInsightConfigError(cause instanceof Error ? cause.message : generate ? '小节智能结论生成失败' : '配置保存失败')
+    } finally { setSubsectionInsightBusyId('') }
+  }
+
   const renameBlock = async (sectionId: string, blockId: string, title: string) => {
     if (!draft || !page || !canEdit) return
     const block = page.sections.find(section => section.id === sectionId)?.blocks.find(item => item.id === blockId)
@@ -1977,7 +2054,11 @@ export function ReportEditorPage() {
                   onLayoutChange: (sectionId, blockId, rect) => void changeLayout(sectionId, blockId, rect),
                   onSlotLayoutChange: (blockId, zoneId, slotId, rect) => void changeSlotLayout(blockId, zoneId, slotId, rect),
                   onZoneReorder: (blockId, zoneId, direction) => void reorderZone(blockId, zoneId, direction),
-                  onEmptySlotSelect: target => { setComponentError(''); setSlotPickerTarget(target) },
+                  onEmptySlotSelect: target => {
+                    setComponentError('')
+                    if (target.role === 'CONCLUSION') void addSubsectionInsight(target)
+                    else setSlotPickerTarget({ ...target, role: 'EVIDENCE' })
+                  },
                   onRemoveComponent: componentId => void deleteComponent(componentId),
                   onBlockTitleChange: (sectionId, blockId, title) => void renameBlock(sectionId, blockId, title),
                   onDuplicateBlock: (_sectionId, blockId) => void duplicateBlock(blockId),
@@ -2022,6 +2103,17 @@ export function ReportEditorPage() {
               onClose={() => { setSelectedComponentId(''); setAngleInsightConfigError('') }}
               onSave={(config, generate) => void saveAngleInsightConfig(
                 selectedAngleInsight.section.id, selectedAngleInsight.component.id, config, generate,
+              )}
+            /> : selectedSubsectionInsight && sidePanel === 'data' ? <SubsectionInsightConfigPanel
+              key={`${selectedSubsectionInsight.component.id}:${draft.revisionNo}`}
+              block={selectedSubsectionInsight.block} component={selectedSubsectionInsight.component}
+              components={draft.definition.components}
+              busy={subsectionInsightBusyId === selectedSubsectionInsight.component.id || !canEdit}
+              error={subsectionInsightConfigError}
+              onClose={() => { setSelectedComponentId(''); setSubsectionInsightConfigError('') }}
+              onSave={(config, generate) => void saveSubsectionInsightConfig(
+                selectedSubsectionInsight.section.id, selectedSubsectionInsight.block.id,
+                selectedSubsectionInsight.component.id, config, generate,
               )}
             /> : selectedComponent ? <>
               <CardInspector

@@ -243,6 +243,36 @@ func (generator *OrchestratedGenerator) GenerateSectionSummary(ctx context.Conte
 	return ValidateSectionSummaryContent(content)
 }
 
+// GenerateSubsectionSummary writes the native conclusion of one subsection
+// from only the author-selected content already placed in that subsection.
+func (generator *OrchestratedGenerator) GenerateSubsectionSummary(ctx context.Context, request SubsectionSummaryRequest) (SectionSummaryContent, error) {
+	identity, err := invocationIdentity(ctx)
+	if err != nil || generator == nil || generator.AI == nil || request.SectionID.Validate() != nil || request.SubsectionID.Validate() != nil || len(request.Items) == 0 {
+		return SectionSummaryContent{}, errors.New("report subsection summary generator is unavailable")
+	}
+	payload, err := json.Marshal(request)
+	if err != nil || len(payload) > 256<<10 {
+		return SectionSummaryContent{}, errors.New("report subsection summary request exceeds safe bounds")
+	}
+	result, err := generator.AI.Invoke(ctx, aiplatform.Invocation{
+		TenantID: string(identity.TenantID), ActorID: string(identity.ActorID),
+		Purpose: aiplatform.PurposeReportGeneration, PromptVersion: "report-subsection-summary-v1",
+		ResourceType: "REPORT", ResourceID: string(identity.ReportID),
+		Request: structuredRequest(
+			"Write one concise subsection conclusion from only the supplied, author-selected items. Follow analysisApproach.howToAnalyze, analyze only analysisApproach.analyzeWhat, obey analysisApproach.doNotAnalyze, and use outputExample only as a style/structure example rather than factual evidence. Treat each item weight as relative attention and output priority, never as a metric or business fact. Use only component roles, governed field labels, filters and existing narrative. Never claim a data value, trend, cause, comparison or business outcome that is not explicitly present in existing narrative. Explain evidence gaps as risks, keep the language of the supplied content, and return only the required structured fields.",
+			payload, "report_subsection_summary_v1", reportSectionSummarySchema,
+		),
+	})
+	if err != nil {
+		return SectionSummaryContent{}, err
+	}
+	var content SectionSummaryContent
+	if err := json.Unmarshal(result.ProviderResult.Content, &content); err != nil {
+		return SectionSummaryContent{}, fmt.Errorf("decode report subsection summary: %w", err)
+	}
+	return ValidateSectionSummaryContent(content)
+}
+
 func (generator *OrchestratedGenerator) ReviewPublication(ctx context.Context, request PublishReviewRequest) (PublishReview, error) {
 	identity, err := invocationIdentity(ctx)
 	if err != nil || generator == nil || generator.AI == nil {
@@ -343,5 +373,6 @@ var _ PlanGenerator = (*OrchestratedGenerator)(nil)
 var _ blueprint.Generator = (*OrchestratedGenerator)(nil)
 var _ ScopedEditGenerator = (*OrchestratedGenerator)(nil)
 var _ SectionSummaryGenerator = (*OrchestratedGenerator)(nil)
+var _ SubsectionSummaryGenerator = (*OrchestratedGenerator)(nil)
 var _ DataContextSelector = (*OrchestratedGenerator)(nil)
 var _ PublishReviewGenerator = (*OrchestratedGenerator)(nil)

@@ -240,13 +240,14 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
       const dragging = slotDrag.drag?.id === slot.id
       const acceptsPick = Boolean(editing?.onEmptySlotSelect && !slot.componentId && (frameRole === 'CONCLUSION' || frameRole === 'EVIDENCE'))
       const authoring = Boolean(editing || props.templatePreview)
-      const emptyLabel = frameRole ? `插入${frameSlotLabels[frameRole]}`
+      const emptyLabel = frameRole === 'CONCLUSION' ? '添加智能结论' : frameRole ? `插入${frameSlotLabels[frameRole]}`
         : block.type === 'TABLE' ? '拖入数据表格'
         : block.type === 'CHART' ? '拖入图表组件'
           : zone.type === 'INSIGHT' ? '拖入智能结论或富文本'
             : zone.type === 'CONTENT' ? '拖入图表、指标或表格' : '拖入内容组件'
       const authoringHint = editing
-        ? acceptsPick ? '点击选择卡片样式' : '请从小节布局中的添加入口配置'
+        ? frameRole === 'CONCLUSION' ? '点击创建并在右侧完成分析配置'
+          : acceptsPick ? '点击选择卡片样式' : '请从小节布局中的添加入口配置'
         : '创建后可从小节空位选择内容'
       const EmptyIcon = frameRole === 'EVIDENCE' ? ChartLineUp
         : frameRole === 'DETAIL' ? Table
@@ -265,7 +266,7 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
           : undefined}
         >
         {editing && slot.cardKind && !slot.cardKind.startsWith('TEMPLATE_') && <span className="report-slot-kind-badge">{frameRole ? frameSlotLabels[frameRole] : slot.cardKind}</span>}
-        {component && editing?.onRemoveComponent && <button type="button" className="report-slot-remove" title="移除卡片" aria-label={`移除卡片 ${component.options.title || component.templateRef.type}`}
+        {component && editing?.onRemoveComponent && <button type="button" className="report-slot-remove" title={frameRole === 'CONCLUSION' ? '移除智能结论' : '移除卡片'} aria-label={`移除${frameRole === 'CONCLUSION' ? '智能结论' : '卡片'} ${component.options.title || component.templateRef.type}`}
           onClick={event => { event.stopPropagation(); editing.onRemoveComponent?.(component.id) }}><Trash size={14} /></button>}
         {component
           ? <ReportComponentBoundary fallback={<ComponentStateView state="ERROR" onAction={() => onRetryBlock?.(block.id)} />}>

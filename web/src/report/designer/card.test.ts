@@ -2,9 +2,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  addToCardOperations, angleInsightBlock, createAngleInsightOperations, createLayoutFrameOperations, createSectionOperations, createStructuredBlockOperations, createSubsectionFrameOperations, decodePalettePayload, encodePalettePayload,
+  addToCardOperations, angleInsightBlock, createAngleInsightOperations, createLayoutFrameOperations, createSectionOperations, createStructuredBlockOperations, createSubsectionFrameOperations, createSubsectionInsightOperations, decodePalettePayload, encodePalettePayload,
   frameSlotRole,
-  findCompatibleTemplateSlot, placeComponentInSlotOperations, removeComponentOperations, renameBlockOperations, renameSectionOperations, updateAngleInsightOperations,
+  findCompatibleTemplateSlot, placeComponentInSlotOperations, removeComponentOperations, renameBlockOperations, renameSectionOperations, updateAngleInsightOperations, updateSubsectionInsightOperations,
 } from './operations.ts'
 import type { Block, Page, ReportDefinition, ZoneType } from '../render/schema.ts'
 import type { ComponentManifest } from '../render/manifests.ts'
@@ -262,6 +262,45 @@ test('an angle insight is inserted before every subsection and carries one data-
   assert.deepEqual(updateAngleInsightOperations(createdComponent, '重新生成的结论。'), [{
     op: 'COMPONENT_UPDATE', targetId: result.componentId, payload: { options: { richText: '重新生成的结论。' } },
   }])
+})
+
+test('a subsection conclusion is created directly in its native slot and legacy cards migrate without bindings', () => {
+  const definition = { canvas: { desktop: { columns: 24 } } } as ReportDefinition
+  const frame = createSubsectionFrameOperations({
+    definition, page: pageWith([]), sectionId: 'section-1', layout: 'CONCLUSION_TOP', chartCount: 2,
+    includeDetail: false, includeAppendix: false, sectionName: '分析角度 1', newId,
+  })
+  const block = (frame.operations[0].payload as { block: Block }).block
+  const conclusionSlot = block.zones[0].slots[0]
+  const richTextManifest: ComponentManifest = {
+    ...manifest, type: 'rich-text', version: '1.2.0', renderer: 'TEXT', displayName: '富文本',
+    minSize: { w: 2, h: 1 }, recommendedSize: { w: 8, h: 3 }, defaultOptions: { richText: '' },
+  }
+  const config = {
+    analysisApproach: { howToAnalyze: '如何', analyzeWhat: '分析什么', doNotAnalyze: '不分析什么', outputExample: '示例' },
+    analysisItems: [{ componentId: 'chart-1', weight: 100 }],
+  }
+  const created = createSubsectionInsightOperations({
+    page: pageWith([block]), blockId: block.id, zoneId: block.zones[0].id, slotId: conclusionSlot.id,
+    manifest: richTextManifest, richText: '等待生成', config, newId,
+  })
+  assert.equal(created.error, undefined)
+  assert.deepEqual(created.operations.map(item => item.op), ['COMPONENT_CREATE', 'SLOT_UPDATE'])
+  const component = (created.operations[0].payload as { component: ReportDefinition['components'][number] }).component
+  assert.equal(component.dataBinding, undefined)
+  assert.deepEqual(component.options.subsectionInsightConfig, config)
+
+  const legacy = {
+    id: created.componentId,
+    templateRef: { type: 'analysis-long-form-conclusion', version: '1.0.0' },
+    dataBinding: { bindingMode: 'DATASET_FIELD', dataContextId: 'ctx', dimensions: [], measures: [] },
+    options: { title: '旧结论卡', cardVariant: '01' as const },
+  } as ReportDefinition['components'][number]
+  const migrated = updateSubsectionInsightOperations(legacy, '原生小节结论', config, richTextManifest)
+  assert.equal(migrated[0].op, 'COMPONENT_REPLACE')
+  const replacement = (migrated[0].payload as { component: ReportDefinition['components'][number] }).component
+  assert.equal(replacement.dataBinding, undefined)
+  assert.deepEqual(replacement.options, { richText: '原生小节结论', subsectionInsightConfig: config })
 })
 
 test('a left-conclusion subsection adapts two or four charts on the right', () => {

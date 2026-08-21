@@ -54,6 +54,25 @@ type SectionSummaryGenerator interface {
 	GenerateSectionSummary(context.Context, SectionSummaryRequest) (SectionSummaryContent, error)
 }
 
+type SubsectionSummaryItem struct {
+	ComponentID askdata.ID              `json:"componentId"`
+	Weight      int                     `json:"weight"`
+	Component   SectionSummaryComponent `json:"component"`
+}
+
+type SubsectionSummaryRequest struct {
+	SectionID        askdata.ID                  `json:"sectionId"`
+	SubsectionID     askdata.ID                  `json:"subsectionId"`
+	SectionName      string                      `json:"sectionName"`
+	SubsectionTitle  string                      `json:"subsectionTitle"`
+	AnalysisApproach report.AngleInsightApproach `json:"analysisApproach"`
+	Items            []SubsectionSummaryItem     `json:"items"`
+}
+
+type SubsectionSummaryGenerator interface {
+	GenerateSubsectionSummary(context.Context, SubsectionSummaryRequest) (SectionSummaryContent, error)
+}
+
 func boundedSummaryText(value string, maximum int) string {
 	value = strings.TrimSpace(value)
 	if utf8.RuneCountInString(value) <= maximum {
@@ -229,6 +248,121 @@ func BuildSectionSummaryRequestWithConfig(definition report.ReportDefinition, se
 		}
 	}
 	return SectionSummaryRequest{}, errors.New("section does not exist")
+}
+
+// BuildSubsectionSummaryRequestWithConfig projects the author-selected content
+// of one subsection. The native conclusion slot is always excluded from its own
+// evidence, including legacy conclusion cards that are awaiting migration.
+func BuildSubsectionSummaryRequestWithConfig(definition report.ReportDefinition, sectionID, subsectionID askdata.ID, override *report.SubsectionInsightConfig) (SubsectionSummaryRequest, error) {
+	if sectionID.Validate() != nil || subsectionID.Validate() != nil {
+		return SubsectionSummaryRequest{}, errors.New("section or subsection id is invalid")
+	}
+	components := make(map[askdata.ID]report.Component, len(definition.Components))
+	for _, component := range definition.Components {
+		components[component.ID] = component
+	}
+	globalFilters := make(map[askdata.ID]report.GlobalFilter, len(definition.GlobalFilters))
+	for _, filter := range definition.GlobalFilters {
+		globalFilters[filter.ID] = filter
+	}
+	for _, page := range definition.Pages {
+		for _, section := range page.Sections {
+			if section.ID != sectionID {
+				continue
+			}
+			for _, block := range section.Blocks {
+				if block.ID != subsectionID || !strings.HasPrefix(block.CardKind, "LAYOUT_SUBSECTION_") {
+					continue
+				}
+				type candidate struct {
+					id        askdata.ID
+					component report.Component
+					role      string
+				}
+				candidates := make([]candidate, 0)
+				available := make(map[askdata.ID]candidate)
+				config := override
+				for _, zone := range block.Zones {
+					for _, slot := range zone.Slots {
+						component, exists := components[slot.ComponentID]
+						if !exists {
+							continue
+						}
+						if summarySlotRole(slot.CardKind) == "CONCLUSION" {
+							if config == nil && component.Options.SubsectionInsight != nil {
+								config = component.Options.SubsectionInsight
+							}
+							continue
+						}
+						item := candidate{id: component.ID, component: component, role: summarySlotRole(slot.CardKind)}
+						if _, duplicate := available[component.ID]; duplicate {
+							continue
+						}
+						available[component.ID] = item
+						candidates = append(candidates, item)
+					}
+				}
+				if len(candidates) == 0 {
+					return SubsectionSummaryRequest{}, errors.New("subsection has no evidence, detail or appendix content")
+				}
+				if config == nil {
+					ids := make([]askdata.ID, 0, len(candidates))
+					for _, item := range candidates {
+						ids = append(ids, item.id)
+					}
+					fallback := report.DefaultSubsectionInsightConfig(ids)
+					config = &fallback
+				}
+				if err := config.Validate(); err != nil {
+					return SubsectionSummaryRequest{}, fmt.Errorf("subsection insight configuration is invalid: %w", err)
+				}
+				result := SubsectionSummaryRequest{
+					SectionID: section.ID, SubsectionID: block.ID,
+					SectionName: boundedSummaryText(section.Name, 160), SubsectionTitle: boundedSummaryText(block.Title, 160),
+					AnalysisApproach: config.AnalysisApproach, Items: []SubsectionSummaryItem{},
+				}
+				for _, configured := range config.AnalysisItems {
+					candidate, exists := available[configured.ComponentID]
+					if !exists {
+						return SubsectionSummaryRequest{}, fmt.Errorf("configured component %q does not exist in this subsection", configured.ComponentID)
+					}
+					component := candidate.component
+					projected := SectionSummaryComponent{
+						Role: candidate.role, Type: boundedSummaryText(component.TemplateRef.Type, 120),
+						Title: boundedSummaryText(component.Options.Title, 200), Subtitle: boundedSummaryText(component.Options.Subtitle, 300),
+						Narrative:  boundedSummaryText(component.Options.RichText, 2_000),
+						Dimensions: []string{}, Measures: []string{}, Filters: []string{},
+					}
+					if component.DataBinding != nil {
+						for _, binding := range component.DataBinding.Dimensions {
+							projected.Dimensions = append(projected.Dimensions, summaryBindingLabel(binding))
+						}
+						for _, binding := range component.DataBinding.Measures {
+							projected.Measures = append(projected.Measures, summaryBindingLabel(binding))
+						}
+						if component.DataBinding.FilterPolicy != nil {
+							for _, mapping := range component.DataBinding.FilterPolicy.GlobalMappings {
+								filter := globalFilters[mapping.FilterID]
+								label := strings.TrimSpace(filter.Label)
+								if label == "" {
+									label = strings.TrimSpace(filter.FieldRef.Field)
+								}
+								projected.Filters = append(projected.Filters, boundedSummaryText("全局 "+label+" → "+mapping.Field, 240))
+							}
+							for _, filter := range component.DataBinding.FilterPolicy.LocalFilters {
+								predicate := strings.TrimSpace(filter.Field + " " + filter.Operator + " " + summaryFilterValue(filter.Value))
+								projected.Filters = append(projected.Filters, boundedSummaryText(predicate, 320))
+							}
+						}
+					}
+					result.Items = append(result.Items, SubsectionSummaryItem{ComponentID: component.ID, Weight: configured.Weight, Component: projected})
+				}
+				return result, nil
+			}
+			return SubsectionSummaryRequest{}, errors.New("subsection does not exist in this analysis angle")
+		}
+	}
+	return SubsectionSummaryRequest{}, errors.New("section does not exist")
 }
 
 func ValidateSectionSummaryContent(content SectionSummaryContent) (SectionSummaryContent, error) {

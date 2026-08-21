@@ -88,6 +88,7 @@ export type ComponentOptions = {
   tablePageSize?: number
   cardVariant?: '01' | '02' | '03'
   angleInsightConfig?: AngleInsightConfig
+  subsectionInsightConfig?: SubsectionInsightConfig
 }
 
 export type AngleInsightConfig = {
@@ -98,6 +99,11 @@ export type AngleInsightConfig = {
     outputExample: string
   }
   analysisItems: Array<{ subsectionId: string; weight: number }>
+}
+
+export type SubsectionInsightConfig = {
+  analysisApproach: AngleInsightConfig['analysisApproach']
+  analysisItems: Array<{ componentId: string; weight: number }>
 }
 
 export type ReportComponent = {

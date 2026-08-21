@@ -89,6 +89,53 @@ func TestBuildSectionSummaryRequestUsesOnlyConfiguredSubsectionsAndWeights(t *te
 	}
 }
 
+func TestBuildSubsectionSummaryRequestUsesSelectedContentAndExcludesConclusion(t *testing.T) {
+	sectionID := askdata.ID("30000000-0000-4000-8000-000000000001")
+	subsectionID := askdata.ID("30000000-0000-4000-8000-000000000002")
+	conclusionID := askdata.ID("30000000-0000-4000-8000-000000000003")
+	chartID := askdata.ID("30000000-0000-4000-8000-000000000004")
+	detailID := askdata.ID("30000000-0000-4000-8000-000000000005")
+	contextID := askdata.ID("30000000-0000-4000-8000-000000000006")
+	config := report.SubsectionInsightConfig{
+		AnalysisApproach: report.DefaultSubsectionInsightConfig([]askdata.ID{detailID}).AnalysisApproach,
+		AnalysisItems:    []report.SubsectionInsightItem{{ComponentID: detailID, Weight: 100}},
+	}
+	definition := report.ReportDefinition{
+		Pages: []report.Page{{Sections: []report.Section{{
+			ID: sectionID, Name: "收入增长", Blocks: []report.Block{{
+				ID: subsectionID, Title: "渠道贡献", CardKind: "LAYOUT_SUBSECTION_CONCLUSION_TOP",
+				Zones: []report.Zone{{Slots: []report.Slot{
+					{CardKind: "FRAME_CONCLUSION", ComponentID: conclusionID},
+					{CardKind: "FRAME_EVIDENCE", ComponentID: chartID},
+					{CardKind: "FRAME_DETAIL", ComponentID: detailID},
+				}}},
+			}},
+		}}}},
+		Components: []report.Component{
+			{ID: conclusionID, TemplateRef: report.ComponentTemplateReference{Type: "rich-text", Version: "1.2.0"}, Options: report.ComponentOptions{RichText: "不能成为自己的证据", SubsectionInsight: &config}},
+			{ID: chartID, TemplateRef: report.ComponentTemplateReference{Type: "line-trend", Version: "1.0.0"}, Options: report.ComponentOptions{Title: "收入趋势"}},
+			{ID: detailID, TemplateRef: report.ComponentTemplateReference{Type: "analysis-detail-query", Version: "1.0.0"},
+				DataBinding: &report.DataBinding{BindingMode: report.BindingDatasetField, DataContextID: &contextID,
+					Measures: []report.FieldBinding{{Role: report.RoleValue, Field: "revenue", Label: "收入", Aggregation: "SUM"}}},
+				Options: report.ComponentOptions{Title: "订单明细"}},
+		},
+	}
+
+	result, err := BuildSubsectionSummaryRequestWithConfig(definition, sectionID, subsectionID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Items) != 1 || result.Items[0].ComponentID != detailID || result.Items[0].Weight != 100 {
+		t.Fatalf("unexpected subsection items: %#v", result.Items)
+	}
+	if result.Items[0].Component.Role != "DETAIL" || result.Items[0].Component.Measures[0] != "收入（SUM）" {
+		t.Fatalf("unexpected projected detail: %#v", result.Items[0].Component)
+	}
+	if result.AnalysisApproach.AnalyzeWhat == "" {
+		t.Fatal("subsection analysis approach was not preserved")
+	}
+}
+
 func TestSectionSummaryContentProducesReadableRichText(t *testing.T) {
 	content, err := ValidateSectionSummaryContent(SectionSummaryContent{
 		Summary: "综合结论", Findings: []string{"发现"}, Risks: []string{"风险"}, Actions: []string{"行动"},
