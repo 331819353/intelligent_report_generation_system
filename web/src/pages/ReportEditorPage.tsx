@@ -1952,15 +1952,20 @@ export function ReportEditorPage() {
         <div className="report-editor-main">
           <nav className="report-editor-outline report-editor-sidebar" aria-label="报告结构">
             <details className="report-editor-structure-panel is-standalone" open>
-              <summary><span>报告结构</span><em>{sections.length} / {subsectionTotal}</em><CaretRight size={14} /></summary>
-              <header><strong>{sectionNoun}</strong><span>{canEdit && <>
-                <button type="button" className="report-outline-add" title={`新建${sectionNoun}`} onClick={() => void addSection()}><Plus size={13} />新建</button>
+              <summary>
+                <span><small>文档导航</small><strong>报告结构</strong></span>
+                <em>{sections.length} {sectionNoun} · {subsectionTotal} 小节</em>
+                <CaretRight size={14} />
+              </summary>
+              <header><span><small>分析内容</small><strong>{sectionNoun}</strong></span><span>{canEdit && <>
+                <button type="button" className="report-outline-add" aria-label={`新建${sectionNoun}`} title={`新建${sectionNoun}`} onClick={() => void addSection()}><Plus size={14} /></button>
               </>}</span></header>
               <ul className="report-outline-list">
               {sections.map((section, index) => {
                 const subsections = subsectionBlocks(section)
-                return <li key={section.id} className="report-outline-angle-group">
+                return <li key={section.id} className={`report-outline-angle-group ${section.id === activeSectionId ? 'is-active' : ''}`.trim()}>
                   <div className={`report-outline-item ${section.id === activeSectionId ? 'is-active' : ''}`.trim()}>
+                    <span className="report-outline-index" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
                     {renamingSectionId === section.id
                       ? <input autoFocus defaultValue={section.name} maxLength={60} aria-label={`${sectionNoun}名称`}
                         onBlur={event => void renameSection(section.id, event.target.value)}
@@ -1970,10 +1975,10 @@ export function ReportEditorPage() {
                           setActiveSectionId(section.id)
                           document.getElementById(`report-section-${section.id}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
                         }}>
-                        <span>{section.name}</span><em>{subsections.length} 小节</em>
+                        <span>{section.name}</span><em>{subsections.length} 个小节</em>
                       </button>}
                     {canEdit && renamingSectionId !== section.id && <button type="button" className="report-outline-config" aria-label={`配置分析角度 ${section.name}`} title="配置分析角度"
-                      onClick={() => openFrameworkConfig({ kind: 'ANGLE', sectionId: section.id, title: section.name })}><GearSix size={13} />配置</button>}
+                      onClick={() => openFrameworkConfig({ kind: 'ANGLE', sectionId: section.id, title: section.name })}><GearSix size={14} /></button>}
                     {canEdit && renamingSectionId !== section.id && <span className="report-outline-actions">
                       <button type="button" aria-label="上移" title="上移" disabled={index === 0} onClick={() => { setActiveSectionId(section.id); void moveSection(-1, section.id) }}><ArrowUp size={12} /></button>
                       <button type="button" aria-label="下移" title="下移" disabled={index === sections.length - 1} onClick={() => { setActiveSectionId(section.id); void moveSection(1, section.id) }}><ArrowDown size={12} /></button>
@@ -1982,14 +1987,15 @@ export function ReportEditorPage() {
                   </div>
                   {subsections.length > 0 && <ul className="report-outline-subsections" aria-label={`${section.name}的小节`}>
                     {subsections.map(block => <li key={block.id}>
+                      <span className="report-outline-subsection-dot" aria-hidden="true" />
                       <button type="button" className="report-outline-subsection-name" title={block.title || '未命名小节'} onClick={() => {
                         setActiveSectionId(section.id)
                         document.querySelector<HTMLElement>(`[data-block-id="${block.id}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
                       }}><span>{block.title || '未命名小节'}</span><em>{subsectionLayoutName(block.cardKind || '')}</em></button>
                       {canEdit && <button type="button" className="report-outline-config" aria-label={`配置小节 ${block.title || '未命名小节'}`} title="配置小节"
-                        onClick={() => openFrameworkConfig({ kind: 'SUBSECTION', sectionId: section.id, blockId: block.id, title: block.title || '未命名小节', layout: subsectionLayoutName(block.cardKind || '') })}><GearSix size={13} />配置</button>}
+                        onClick={() => openFrameworkConfig({ kind: 'SUBSECTION', sectionId: section.id, blockId: block.id, title: block.title || '未命名小节', layout: subsectionLayoutName(block.cardKind || '') })}><GearSix size={13} /></button>}
                       {canEdit && <button type="button" className="report-outline-config is-danger" aria-label={`删除小节 ${block.title || '未命名小节'}`} title="删除小节"
-                        onClick={() => void deleteBlock(block.id)}><Trash size={13} />删除</button>}
+                        onClick={() => void deleteBlock(block.id)}><Trash size={13} /></button>}
                     </li>)}
                   </ul>}
                 </li>

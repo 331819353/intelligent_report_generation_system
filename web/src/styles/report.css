@@ -6015,23 +6015,234 @@ body:has(.report-editor-shell) { height: 100%; overflow: hidden; }
 .report-runtime-frame-zone > .report-runtime-element[data-frame-role="DETAIL"],
 .report-runtime-frame-zone > .report-runtime-element[data-frame-role="APPENDIX"] { grid-column: 1 / -1 !important; }
 
-/* 画布创建入口统一收口到小节槽位；左侧仅保留紧凑的报告结构导航。 */
-.report-editor-workspace .report-editor-main { grid-template-columns: 224px minmax(0, 1fr); }
-.report-editor-sidebar { overflow-y: auto; }
+/* 左侧报告结构：轻量目录，而不是传统树形控件。 */
+.report-editor-workspace .report-editor-main { grid-template-columns: 248px minmax(0, 1fr); }
+.report-editor-sidebar {
+  overflow-y: auto;
+  border-right-color: #edf1f5;
+  padding: 0;
+  background: #fbfcfe;
+  scrollbar-width: thin;
+  scrollbar-color: #dce4ed transparent;
+}
 .report-editor-structure-panel.is-standalone {
   min-height: 100%;
   flex: 1;
   border-top: 0;
-  background: #fff;
+  background: transparent;
 }
-.report-editor-structure-panel.is-standalone > summary { min-height: 48px; }
+.report-editor-structure-panel.is-standalone > summary {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  min-height: 76px;
+  grid-template-columns: minmax(0, 1fr) auto 16px;
+  gap: 8px;
+  border-bottom: 1px solid #edf1f5;
+  padding: 14px 16px 12px;
+  background: rgb(251 252 254 / 94%);
+  backdrop-filter: blur(14px);
+}
+.report-editor-structure-panel.is-standalone > summary > span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.report-editor-structure-panel.is-standalone > summary small {
+  color: #a4afbd;
+  font-size: 8px;
+  font-weight: 720;
+  letter-spacing: .12em;
+}
+.report-editor-structure-panel.is-standalone > summary strong {
+  color: #1f2d40;
+  font-size: 14px;
+  font-weight: 720;
+  letter-spacing: -.015em;
+}
+.report-editor-structure-panel.is-standalone > summary em {
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #8d99a8;
+  font-size: 9px;
+  font-weight: 560;
+  white-space: nowrap;
+}
+.report-editor-structure-panel.is-standalone > summary svg { color: #a4afbd; }
+.report-editor-structure-panel.is-standalone > header {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  padding: 14px 14px 8px;
+}
+.report-editor-structure-panel.is-standalone > header > span:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.report-editor-structure-panel.is-standalone > header small {
+  color: #a1acba;
+  font-size: 9px;
+  font-weight: 560;
+}
+.report-editor-structure-panel.is-standalone > header strong {
+  color: #455469;
+  font-size: 11px;
+  font-weight: 680;
+}
+.report-editor-structure-panel.is-standalone .report-outline-add {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #dfe7ef;
+  border-radius: 9px;
+  padding: 0;
+  background: #fff;
+  color: #1677d2;
+  box-shadow: 0 1px 2px rgb(31 54 82 / 4%);
+  transition: border-color .16s ease, background .16s ease, transform .16s ease;
+}
+.report-editor-structure-panel.is-standalone .report-outline-add:hover {
+  transform: translateY(-1px);
+  border-color: #afd0ec;
+  background: #f3f9ff;
+}
 .report-editor-structure-panel.is-standalone .report-outline-list {
   max-height: none;
-  margin-bottom: 14px;
+  display: grid;
+  gap: 7px;
+  margin: 0 10px 18px;
   overflow: visible;
 }
-.report-outline-config.is-danger { color: #b65752; }
+.report-outline-angle-group {
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 3px;
+  transition: border-color .16s ease, background .16s ease, box-shadow .16s ease;
+}
+.report-outline-angle-group:hover { border-color: #e6edf4; background: #fff; }
+.report-outline-angle-group.is-active {
+  border-color: #d9eafb;
+  background: #f7fbff;
+  box-shadow: 0 3px 12px rgb(39 92 143 / 5%);
+}
+.report-outline-item {
+  min-height: 48px;
+  gap: 5px;
+  border-radius: 9px;
+  padding: 4px 5px;
+}
+.report-outline-item:hover,
+.report-outline-item.is-active { background: transparent; }
+.report-outline-index {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: #eef2f6;
+  color: #8a97a7;
+  font-size: 9px;
+  font-weight: 720;
+  letter-spacing: .02em;
+  transition: background .16s ease, color .16s ease, box-shadow .16s ease;
+}
+.report-outline-item.is-active .report-outline-index {
+  background: #1677d2;
+  color: #fff;
+  box-shadow: 0 4px 10px rgb(22 119 210 / 20%);
+}
+.report-outline-name {
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  padding: 4px 2px;
+}
+.report-outline-name span { color: #334258; font-size: 12px; font-weight: 660; }
+.report-outline-item.is-active .report-outline-name span { color: #176bb6; font-weight: 700; }
+.report-outline-name em { color: #99a5b4; font-size: 9px; font-weight: 520; }
+.report-outline-item input { min-height: 32px; margin: 2px; border-color: #a9cae8; border-radius: 8px; }
+.report-outline-config {
+  width: 26px;
+  min-height: 26px;
+  justify-content: center;
+  border-radius: 8px;
+  padding: 0;
+  color: #8492a4;
+  opacity: 0;
+  transition: opacity .14s ease, background .14s ease, color .14s ease;
+}
+.report-outline-item.is-active > .report-outline-config,
+.report-outline-angle-group:hover > .report-outline-item > .report-outline-config,
+.report-outline-subsections > li:hover > .report-outline-config,
+.report-outline-config:focus-visible { opacity: 1; }
+.report-outline-config:hover { background: #eaf4fe; color: #1677d2; }
+.report-outline-actions {
+  display: inline-flex;
+  max-width: 0;
+  gap: 2px;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-width .16s ease, opacity .14s ease;
+}
+.report-outline-angle-group:hover .report-outline-actions,
+.report-outline-actions:focus-within { max-width: 72px; opacity: 1; }
+.report-outline-actions button {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  color: #8a97a7;
+}
+.report-outline-actions button:hover:not(:disabled) { background: #eaf4fe; color: #1677d2; }
+.report-outline-subsections {
+  position: relative;
+  gap: 1px;
+  margin: 2px 6px 6px 18px;
+  border-left-color: #dce7f1;
+  padding: 2px 0 2px 13px;
+}
+.report-outline-subsections > li {
+  position: relative;
+  min-height: 39px;
+  gap: 2px;
+  border-radius: 9px;
+  padding-right: 3px;
+}
+.report-outline-subsections > li:hover { background: #f0f6fc; }
+.report-outline-subsection-dot {
+  position: absolute;
+  left: -17px;
+  width: 7px;
+  height: 7px;
+  border: 2px solid #f7fbff;
+  border-radius: 50%;
+  background: #a9bdd0;
+  box-sizing: content-box;
+}
+.report-outline-subsection-name {
+  gap: 2px;
+  padding: 6px 5px;
+}
+.report-outline-subsection-name span { color: #526176; font-size: 10px; font-weight: 620; }
+.report-outline-subsection-name em { color: #a2adba; font-size: 8px; }
+.report-outline-subsections > li > .report-outline-config { flex: none; }
+.report-outline-config.is-danger { color: #bc6c68; }
 .report-outline-config.is-danger:hover { background: #fff0ef; color: #c63f38; }
+.report-editor-structure-panel.is-standalone > p {
+  margin: 6px 14px;
+  border: 1px dashed #dbe5ef;
+  border-radius: 10px;
+  padding: 14px 10px;
+  background: transparent;
+  color: #95a1b0;
+  font-size: 10px;
+  line-height: 1.55;
+}
 
 /* 小节和槽位删除都是画布的一等操作，不再依赖隐藏工具条或键盘。 */
 .report-block-toolbar.is-subsection-toolbar { opacity: 1; }
