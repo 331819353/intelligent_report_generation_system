@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ArrowClockwise, Funnel, Plus, SpinnerGap, Trash, WarningCircle } from '@phosphor-icons/react'
 import { reportEditorAPI, type DataContextField } from '../api/editor.ts'
-import type { ComponentFilterPolicy, FieldBinding, GlobalFilter } from '../render/schema.ts'
+import type { ComponentFilterPolicy, FieldBinding, GlobalFilter, MetricAggregation } from '../render/schema.ts'
 import { bindingForField } from './operations.ts'
 
 type Props = {
@@ -24,11 +24,7 @@ function fieldLabel(field?: DataContextField) {
   return field.name && field.name !== field.code ? `${field.name} · ${field.code}` : field.code
 }
 
-function formulaLabel(binding: FieldBinding) {
-  if (!binding.field) return '选择字段后自动确定'
-  if (!binding.aggregation) return `数据集默认（${binding.field}）`
-  return `${formulaLabels[binding.aggregation] ?? binding.aggregation} · ${binding.aggregation}(${binding.field})`
-}
+const formulaOptions = Object.entries(formulaLabels)
 
 function valueFromOption(value: string, field?: DataContextField): string | number | boolean {
   const type = `${field?.canonicalType ?? ''} ${field?.semanticType ?? ''}`.toUpperCase()
@@ -74,6 +70,7 @@ function LocalFilterRow({ dataContextId, fields, filter, onChange, onRemove }: {
   }, [dataContextId, filter.field, reload]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return <article className="report-metric-local-filter">
+    <div className="report-metric-map-head"><strong>局部条件</strong><button className="report-metric-remove" type="button" aria-label="移除局部过滤项" onClick={onRemove}><Trash size={14} /></button></div>
     <div className="report-metric-filter-grid">
       <label>数据集字段
         <select value={filter.field} onChange={event => {
@@ -102,7 +99,6 @@ function LocalFilterRow({ dataContextId, fields, filter, onChange, onRemove }: {
           </button>
         </span>
       </label>
-      <button className="report-metric-remove" type="button" aria-label="移除局部过滤项" onClick={onRemove}><Trash size={14} /></button>
     </div>
     {error && <small className="report-metric-filter-error"><WarningCircle size={12} />{error}</small>}
     {!loading && !error && values.length === 0 && <small className="report-metric-filter-error"><WarningCircle size={12} />该字段当前没有可选值</small>}
@@ -133,6 +129,10 @@ export function MetricStatusConfiguration({
     if (role === 'VALUE' && primary) onMeasuresChange([{ ...primary, label }, ...auxiliaries])
     if (role === 'TOOLTIP') onMeasuresChange([...(primary ? [primary] : []), ...auxiliaries.map((item, index) => index === position ? { ...item, label } : item)])
   }
+  const changeAggregation = (role: 'VALUE' | 'TOOLTIP', position: number, aggregation: MetricAggregation) => {
+    if (role === 'VALUE' && primary) onMeasuresChange([{ ...primary, aggregation }, ...auxiliaries])
+    if (role === 'TOOLTIP') onMeasuresChange([...(primary ? [primary] : []), ...auxiliaries.map((item, index) => index === position ? { ...item, aggregation } : item)])
+  }
   const addAuxiliary = () => {
     const available = measureFields.find(field => !usedMetricFields.has(field.code))
     onMeasuresChange([...(primary ? [primary] : []), ...auxiliaries, bindingForField('TOOLTIP', available)])
@@ -156,7 +156,15 @@ export function MetricStatusConfiguration({
           {available.map(field => <option key={field.code} value={field.code}>{fieldLabel(field)}</option>)}
         </select>
       </label>
-      <div className="report-metric-formula"><span>计算公式</span><strong>{binding ? formulaLabel(binding) : '选择字段后自动确定'}</strong><small>采用数据集已治理口径</small></div>
+      <label className="report-metric-formula">计算公式
+        <select aria-label={`${role === 'VALUE' ? '主指标' : `辅助指标 ${position + 1}`}计算公式`}
+          value={binding?.aggregation ?? ''} disabled={!binding?.field}
+          onChange={event => changeAggregation(role, position, event.target.value as MetricAggregation)}>
+          <option value="" disabled>请选择聚合方式</option>
+          {formulaOptions.map(([value, label]) => <option key={value} value={value}>{label} · {value}({binding?.field || '字段'})</option>)}
+        </select>
+        <small>由查询后端在明细数据上执行聚合</small>
+      </label>
     </article>
   }
 
@@ -197,18 +205,18 @@ export function MetricStatusConfiguration({
         {filterPolicy.globalMappings.map((mapping, index) => {
           const availableControls = reportControls.filter(filter => filter.id === mapping.filterId || !usedControls.has(filter.id))
           return <article className="report-metric-global-map" key={`${mapping.filterId}-${index}`}>
+            <div className="report-metric-map-head"><strong>筛选映射 {index + 1}</strong><button className="report-metric-remove" type="button" aria-label="移除全局筛选映射" onClick={() => onFilterPolicyChange({ ...filterPolicy, globalMappings: filterPolicy.globalMappings.filter((_, position) => position !== index) })}><Trash size={14} /></button></div>
             <label>筛选控件字段
               <select value={mapping.filterId} onChange={event => onFilterPolicyChange({ ...filterPolicy, globalMappings: filterPolicy.globalMappings.map((item, position) => position === index ? { ...item, filterId: event.target.value } : item) })}>
                 {availableControls.map(filter => <option key={filter.id} value={filter.id}>{controlLabel(filter)}</option>)}
               </select>
             </label>
-            <span>→</span>
+            <span className="report-metric-map-direction">映射到</span>
             <label>数据集中字段
               <select value={mapping.field} onChange={event => onFilterPolicyChange({ ...filterPolicy, globalMappings: filterPolicy.globalMappings.map((item, position) => position === index ? { ...item, field: event.target.value } : item) })}>
                 {fields.map(field => <option key={field.code} value={field.code}>{fieldLabel(field)}</option>)}
               </select>
             </label>
-            <button className="report-metric-remove" type="button" aria-label="移除全局筛选映射" onClick={() => onFilterPolicyChange({ ...filterPolicy, globalMappings: filterPolicy.globalMappings.filter((_, position) => position !== index) })}><Trash size={14} /></button>
           </article>
         })}
       </div>

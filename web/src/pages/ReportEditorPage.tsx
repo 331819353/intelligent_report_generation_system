@@ -540,7 +540,6 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
       <header>
         <div className="report-card-inspector-title"><h2 id="manual-editor-title">{mode === 'data' ? '组件配置' : '外观设置'}</h2><span>{manifest?.displayName || component?.options.title || component?.templateRef.type || '画布元素'}</span></div>
         <div className="report-card-inspector-actions">
-          <button className="report-inspector-apply" type="button" disabled={busy || !options.title?.trim() || !bindingValid} onClick={save}>{busy ? '应用中…' : '应用'}</button>
           <button type="button" aria-label="取消选中" onClick={onClose}><X size={18} /></button>
         </div>
       </header>
@@ -596,7 +595,7 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
               dimensions={dimensions} measures={measures} filters={filterFields} />
           </>}
           {!bindingValid && <p className="report-editor-inline-error"><WarningCircle size={15} />请完成该组件要求的核心字段配置</p>}
-          {manifest.editorProfile && <section className="report-profile-result">
+          {!metricStatus && manifest.editorProfile && <section className="report-profile-result">
             <span><Eye size={17} /></span>
             <div><small>配置结果</small><strong>{resultSummary}</strong>
               <p>{manifest.editorProfile.example.description}</p>
@@ -657,6 +656,10 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
         </details>}
         {error && <div className="report-editor-inline-error"><WarningCircle size={15} />{error}</div>}
       </div>
+      <footer className="report-card-inspector-footer">
+        <span>{bindingValid && options.title?.trim() ? '配置完成后统一应用' : '请先完成必填配置'}</span>
+        <button className="primary-button report-inspector-apply" type="button" disabled={busy || !options.title?.trim() || !bindingValid} onClick={save}>{busy ? '应用中…' : '应用配置'}</button>
+      </footer>
     </section>
 }
 

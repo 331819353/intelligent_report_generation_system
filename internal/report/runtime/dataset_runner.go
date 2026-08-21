@@ -60,6 +60,7 @@ func (runner *DatasetVersionRunner) ExecuteDatasetFields(ctx context.Context, re
 	// and rolling up in memory (which still fails closed on truncation).
 	rollup := &queryruntime.VersionRollupRequest{
 		Dimensions: bindingFields(request.Dimensions), Measures: bindingFields(request.Measures),
+		Aggregations: bindingAggregations(request.Measures),
 	}
 	preview, contract, err := runner.service.PreviewVersionQueryWithRollup(
 		ctx, string(identity.TenantID), string(identity.ActorID), string(request.DatasetID),
@@ -83,12 +84,9 @@ func (runner *DatasetVersionRunner) ExecuteDatasetFields(ctx context.Context, re
 	}
 	for _, binding := range request.Measures {
 		formula := strings.ToUpper(strings.TrimSpace(binding.Aggregation))
-		if formula == "" {
-			continue
-		}
 		governed := strings.ToUpper(strings.TrimSpace(contract.Measures[binding.Field].Aggregation))
-		if governed == "" || formula != governed {
-			return QueryResult{}, fmt.Errorf("measure %q formula %q does not match governed dataset aggregation %q", binding.Field, formula, governed)
+		if formula != "" && formula != governed && NeedsRollup(request.Dimensions, contract.GrainKeyFields) && !contract.Applied {
+			return QueryResult{}, fmt.Errorf("measure %q formula %q requires a detail-grain dataset version", binding.Field, formula)
 		}
 	}
 	indexes := make(map[string]int, len(preview.Columns))
@@ -137,6 +135,18 @@ func bindingFields(bindings []report.FieldBinding) []string {
 	result := make([]string, 0, len(bindings))
 	for _, binding := range bindings {
 		result = append(result, strings.TrimSpace(binding.Field))
+	}
+	return result
+}
+
+func bindingAggregations(bindings []report.FieldBinding) map[string]string {
+	result := make(map[string]string, len(bindings))
+	for _, binding := range bindings {
+		field := strings.TrimSpace(binding.Field)
+		aggregation := strings.ToUpper(strings.TrimSpace(binding.Aggregation))
+		if field != "" && aggregation != "" {
+			result[field] = aggregation
+		}
 	}
 	return result
 }

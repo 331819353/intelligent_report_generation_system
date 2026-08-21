@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react'
+import { reportEditorAPI } from '../api/editor.ts'
 import type { GlobalFilter } from './schema.ts'
 
 /**
@@ -31,6 +33,29 @@ export function FilterControl({ filter, value, onChange }: {
 }) {
   const label = filter.label?.trim() || filter.fieldRef.field
   const defaults = filter.defaultValue
+  const configuredOptions = filter.options ?? []
+  const optionKey = `${filter.fieldRef.dataContextId}\u0000${filter.fieldRef.field}\u0000${filter.type}`
+  const selectable = filter.type === 'SINGLE_SELECT' || filter.type === 'SELECT' || filter.type === 'MULTI_SELECT' || filter.type === 'SEARCH_SELECT'
+  const [discovered, setDiscovered] = useState<{ key: string; values: string[]; loading: boolean; error: string }>({ key: '', values: [], loading: false, error: '' })
+
+  useEffect(() => {
+    if (!selectable || configuredOptions.length > 0 || !filter.fieldRef.dataContextId || !filter.fieldRef.field) return
+    const controller = new AbortController()
+    queueMicrotask(() => {
+      if (controller.signal.aborted) return
+      setDiscovered({ key: optionKey, values: [], loading: true, error: '' })
+      void reportEditorAPI.listFilterOptions(filter.fieldRef.dataContextId, filter.fieldRef.field, { signal: controller.signal }).then(result => {
+        if (!controller.signal.aborted) setDiscovered({ key: optionKey, values: result.values, loading: false, error: '' })
+      }).catch(cause => {
+        if (!controller.signal.aborted) setDiscovered({ key: optionKey, values: [], loading: false, error: cause instanceof Error ? cause.message : '候选项读取失败' })
+      })
+    })
+    return () => controller.abort()
+  }, [configuredOptions.length, filter.fieldRef.dataContextId, filter.fieldRef.field, optionKey, selectable])
+
+  const options = configuredOptions.length > 0 ? configuredOptions : discovered.key === optionKey ? discovered.values : []
+  const optionsLoading = configuredOptions.length === 0 && discovered.key === optionKey && discovered.loading
+  const optionsError = configuredOptions.length === 0 && discovered.key === optionKey ? discovered.error : ''
 
   switch (filter.type) {
     case 'DATE':
@@ -105,16 +130,10 @@ export function FilterControl({ filter, value, onChange }: {
 
     case 'MULTI_SELECT': {
       const selected = Array.isArray(value) ? value as string[] : []
-      const options = filter.options ?? []
       if (options.length === 0) {
-        return <label className="report-filter-control">
-          <span>{label}</span>
-          <input value={selected.join(', ')} placeholder="多个值用逗号分隔"
-            onChange={event => {
-              const items = event.target.value.split(',').map(item => item.trim()).filter(Boolean)
-              onChange(items.length ? items : undefined)
-            }} />
-        </label>
+        return <div className="report-filter-control is-options-empty">
+          <span>{label}</span><button type="button" disabled>{optionsLoading ? '正在读取候选项…' : optionsError ? '候选项读取失败' : '暂无可选项'}</button>
+        </div>
       }
       return <div className="report-filter-control is-multi">
         <span>{label}</span>
@@ -135,7 +154,6 @@ export function FilterControl({ filter, value, onChange }: {
     }
 
     case 'SEARCH_SELECT': {
-      const options = filter.options ?? []
       const listId = `report-filter-options-${filter.id}`
       return <label className="report-filter-control">
         <span>{label}</span>
@@ -147,21 +165,19 @@ export function FilterControl({ filter, value, onChange }: {
 
     case 'SINGLE_SELECT':
     case 'SELECT': {
-      const options = filter.options ?? []
-      if (options.length === 0) break
       return <label className="report-filter-control">
         <span>{label}</span>
-        <select value={typeof value === 'string' ? value : ''}
+        <select value={typeof value === 'string' ? value : ''} disabled={optionsLoading || options.length === 0}
           onChange={event => onChange(event.target.value || undefined)}>
-          <option value="">全部</option>
+          <option value="">{optionsLoading ? '正在读取候选项…' : optionsError ? '候选项读取失败' : options.length === 0 ? '暂无可选项' : '全部'}</option>
+          {typeof value === 'string' && value && !options.includes(value) && <option value={value}>{value}</option>}
           {options.map(option => <option key={option} value={option}>{option}</option>)}
         </select>
       </label>
     }
   }
 
-  // PARAMETER_INPUT 以及历史定义中没有候选值的单选：自由输入。
-  // PARAMETER_INPUT 保留数字语义，其余按字符串提交。
+  // 只有参数输入允许自由填写；选择型筛选必须来自数据集字段的去重值。
   return <label className="report-filter-control">
     <span>{label}</span>
     <input value={value === undefined || value === null ? '' : String(value)}

@@ -51,6 +51,10 @@ type VersionQueryInput struct {
 type VersionRollupRequest struct {
 	Dimensions []string
 	Measures   []string
+	// Aggregations optionally overrides the governed default for a requested
+	// measure. The override is executed only by the private detail-grain query
+	// rewrite; persisted dataset semantics are never changed.
+	Aggregations map[string]string
 }
 
 // PreviewVersionQuery executes a logical query derived from one exact
@@ -109,6 +113,9 @@ func (s *Service) PreviewVersionQueryWithRollup(
 			return dataset.PreviewResult{}, VersionRollupContract{}, fmt.Errorf("version query field duplicated: %w", dataset.ErrPreviewInvalid)
 		}
 		seenFields[code] = struct{}{}
+	}
+	if !validVersionRollupRequest(input.Rollup, seenFields) {
+		return dataset.PreviewResult{}, VersionRollupContract{}, fmt.Errorf("version query roll-up invalid: %w", dataset.ErrPreviewInvalid)
 	}
 	for index, predicate := range input.Predicates {
 		field, exists := fields[predicate.FieldCode]
@@ -203,17 +210,21 @@ func runtimeRollupDocument(document dataset.Document, contract VersionRollupCont
 		if !measure.Declared && measure.Aggregation == "" {
 			return dataset.Document{}, false
 		}
-		function := strings.ToUpper(measure.Aggregation)
-		switch strings.ToUpper(measure.Additivity) {
-		case "", "ADDITIVE", "FULLY_ADDITIVE":
-		case "NON_ADDITIVE":
-			// A non-additive measure is defined by its own function over the
-			// rows (AVG, COUNT_DISTINCT); summing it would change its meaning.
-			if function == "SUM" || function == "COUNT" {
+		function := strings.ToUpper(strings.TrimSpace(request.Aggregations[code]))
+		explicit := function != ""
+		if !explicit {
+			function = strings.ToUpper(measure.Aggregation)
+			switch strings.ToUpper(measure.Additivity) {
+			case "", "ADDITIVE", "FULLY_ADDITIVE":
+			case "NON_ADDITIVE":
+				// A non-additive measure is defined by its own function over the
+				// rows (AVG, COUNT_DISTINCT); summing it would change its meaning.
+				if function == "SUM" || function == "COUNT" {
+					return dataset.Document{}, false
+				}
+			default:
 				return dataset.Document{}, false
 			}
-		default:
-			return dataset.Document{}, false
 		}
 		measures = append(measures, dataset.RuntimeRollupMeasure{Field: code, Function: function})
 	}
@@ -222,6 +233,41 @@ func runtimeRollupDocument(document dataset.Document, contract VersionRollupCont
 		return dataset.Document{}, false
 	}
 	return grouped, true
+}
+
+func validVersionRollupRequest(request *VersionRollupRequest, selected map[string]struct{}) bool {
+	if request == nil {
+		return true
+	}
+	measureSet := make(map[string]struct{}, len(request.Measures))
+	seen := make(map[string]struct{}, len(request.Dimensions)+len(request.Measures))
+	for _, code := range append(append([]string(nil), request.Dimensions...), request.Measures...) {
+		code = strings.TrimSpace(code)
+		if code == "" {
+			return false
+		}
+		if _, exists := selected[code]; !exists {
+			return false
+		}
+		if _, duplicate := seen[code]; duplicate {
+			return false
+		}
+		seen[code] = struct{}{}
+	}
+	for _, code := range request.Measures {
+		measureSet[strings.TrimSpace(code)] = struct{}{}
+	}
+	for code, aggregation := range request.Aggregations {
+		if _, exists := measureSet[strings.TrimSpace(code)]; !exists {
+			return false
+		}
+		switch strings.ToUpper(strings.TrimSpace(aggregation)) {
+		case "SUM", "AVG", "MIN", "MAX", "COUNT", "COUNT_DISTINCT":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // VersionMeasure describes how one logical measure of a dataset version may be
