@@ -28,15 +28,15 @@ import {
   type ComponentManifest, type ManifestIndex,
 } from '../report/render/manifests'
 import {
-  canvasOf, findBlock, findComponentBlock, orderedPages, orderedSections,
+  canvasOf, findBlock, findComponentBlock, orderedPages, orderedSections, placedComponentIDs,
   type Block, type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type Page, type ReportDefinition, type ReportHeaderStyle, type ReportType, type Section,
 } from '../report/render/schema'
 import {
   addDataContextOperations, bindingForField, bundle, createFilterOperations, createInteractionOperations,
-  createSectionOperations, createSubsectionFrameOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, layoutOperations,
+  createSectionOperations, createSubsectionFrameOperations, createThemeOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, deleteThemeOperations, duplicateBlockOperations, layoutOperations,
   findCompatibleTemplateSlot, placeComponentInSlotOperations,
-  removeBlockOperations, removeComponentOperations, removeDataContextOperations, renameSectionOperations,
-  renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations,
+  removeBlockOperations, removeComponentOperations, removeDataContextOperations, renameSectionOperations, renameThemeOperations,
+  renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, themeReorderOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations,
   decodePalettePayload, paletteDragType, zoneKindForManifest, zoneKindLabels, zoneReorderOperations,
   type FilterDraft, type FrameworkRequest, type InteractionDraft,
 } from '../report/designer/operations'
@@ -44,6 +44,36 @@ import {
 const reportTypeLabels: Record<ReportType, { name: string; hint: string }> = {
   REPORT: { name: '报告', hint: '分章节的分析文档：图表 + 结论 + 明细，可导出、可定时分发' },
   DASHBOARD: { name: '报表', hint: '以卡片和筛选器为主的看板：一屏多卡片，交互筛选、联动、钻取' },
+}
+
+const reportEditorSnapshotDraft: ReportDraft = {
+  reportId: 'snapshot-report-editor', tenantId: 'snapshot-tenant', schemaVersion: '1.0', revisionNo: 18,
+  definitionHash: 'snapshot-report-editor-multi-theme', updatedBy: 'snapshot-owner', updatedAt: '2026-08-21T20:36:00+08:00',
+  definition: {
+    schemaVersion: '1.0',
+    metadata: {
+      id: 'snapshot-report-editor', code: 'RP-EDITOR-SNAPSHOT', name: '多主题经营分析报告',
+      description: '围绕增长质量与客户结构组织分析结论。', reportType: 'REPORT', headerStyle: '01',
+    },
+    dataContexts: [], components: [],
+    pages: [
+      { id: 'snapshot-theme-growth', name: '增长质量', order: 1, sections: [{ id: 'snapshot-angle-revenue', name: '收入增长', order: 1, blocks: [] }] },
+      { id: 'snapshot-theme-customer', name: '客户结构', order: 2, sections: [{ id: 'snapshot-angle-retention', name: '留存表现', order: 1, blocks: [] }] },
+    ],
+  },
+}
+
+const reportEditorSnapshotAsset: ReportAsset = {
+  id: 'snapshot-report-editor', code: 'RP-EDITOR-SNAPSHOT', name: '多主题经营分析报告', reportType: 'REPORT',
+  ownerUserId: 'snapshot-owner', ownerName: '程', lifecycle: 'DRAFT_ONLY', draftRevisionNo: 18,
+  unpublishedChanges: 3, updatedAt: '2026-08-21T20:36:00+08:00', visibleCount: 1, editableCount: 1, shared: false,
+  allowedActions: ['VIEW', 'EDIT', 'PUBLISH', 'AI_EDIT'],
+}
+
+const reportEditorSingleThemeSnapshotDraft: ReportDraft = {
+  ...reportEditorSnapshotDraft,
+  definitionHash: 'snapshot-report-editor-single-theme',
+  definition: { ...reportEditorSnapshotDraft.definition, pages: reportEditorSnapshotDraft.definition.pages.slice(0, 1) },
 }
 
 const optionLabels: Record<string, string> = {
@@ -740,15 +770,19 @@ export function ReportEditorPage() {
   const navigate = useNavigate()
   const newMode = location.pathname === '/reports/new'
   const reportId = routeReportId ?? ''
-  const [draft, setDraft] = useState<ReportDraft | null>(null)
-  const [asset, setAsset] = useState<ReportAsset | null>(null)
+  const snapshotMode = new URLSearchParams(location.search).get('snapshot')
+  const designSnapshot = import.meta.env.DEV && (snapshotMode === 'report-editor-multi-theme' || snapshotMode === 'report-editor-single-theme')
+  const [draft, setDraft] = useState<ReportDraft | null>(designSnapshot
+    ? snapshotMode === 'report-editor-single-theme' ? reportEditorSingleThemeSnapshotDraft : reportEditorSnapshotDraft
+    : null)
+  const [asset, setAsset] = useState<ReportAsset | null>(designSnapshot ? reportEditorSnapshotAsset : null)
   const [execution, setExecution] = useState<DraftExecution | null>(null)
   // 与草稿加载一致：执行中的状态由「已结算的数据签名」推导，避免在 effect 内
   // 同步 setState 触发级联渲染。
   const [settledSignature, setSettledSignature] = useState('')
   const [executionError, setExecutionError] = useState('')
   // 加载状态由已结算的报告 ID 推导，避免在 effect 内同步 setState。
-  const [settledReportId, setSettledReportId] = useState('')
+  const [settledReportId, setSettledReportId] = useState(designSnapshot ? reportId : '')
   const [loadFailure, setLoadFailure] = useState<{ reportId: string; message: string } | null>(null)
   const loading = !newMode && settledReportId !== reportId
   const loadError = loadFailure?.reportId === reportId ? loadFailure.message : ''
@@ -767,7 +801,8 @@ export function ReportEditorPage() {
   const [selectedTemplateId, setSelectedTemplateId] = useState('')
   const [newCreating, setNewCreating] = useState<'' | NewReportMode>('')
   const [scopeMode, setScopeMode] = useState<'page' | 'section'>('page')
-  const [activeSectionId, setActiveSectionId] = useState('')
+  const [activePageId, setActivePageId] = useState(designSnapshot ? 'snapshot-theme-growth' : '')
+  const [activeSectionId, setActiveSectionId] = useState(designSnapshot ? 'snapshot-angle-revenue' : '')
   const [selectedComponentId, setSelectedComponentId] = useState('')
   const [selectionInitialized, setSelectionInitialized] = useState(false)
   const [aiPreview, setAIPreview] = useState<AIPreviewResponse | undefined>()
@@ -785,6 +820,7 @@ export function ReportEditorPage() {
   const [componentBusy, setComponentBusy] = useState(false)
   const [componentError, setComponentError] = useState('')
   const [deleteSectionOpen, setDeleteSectionOpen] = useState(false)
+  const [deleteThemeOpen, setDeleteThemeOpen] = useState(false)
   const [interactionBusy, setInteractionBusy] = useState(false)
   const [interactionError, setInteractionError] = useState('')
   const [dataBusy, setDataBusy] = useState(false)
@@ -800,6 +836,7 @@ export function ReportEditorPage() {
   const [previewPageCount, setPreviewPageCount] = useState(1)
   const [lastReceipt, setLastReceipt] = useState<{ from: number; to: number; count: number; source: string } | null>(null)
   const [renamingSectionId, setRenamingSectionId] = useState('')
+  const [renamingThemeId, setRenamingThemeId] = useState('')
   const [renamingTitle, setRenamingTitle] = useState(false)
   const canvasRef = useRef<HTMLElement>(null)
   const paperRef = useRef<HTMLElement>(null)
@@ -807,7 +844,7 @@ export function ReportEditorPage() {
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2600) }
 
   useEffect(() => {
-    if (newMode) return undefined
+    if (newMode || designSnapshot) return undefined
     let cancelled = false
     void Promise.all([reportEditorAPI.getDraft(reportId), reportAssetsAPI.list({ limit: 100 })])
       .then(async ([nextDraft, assets]) => {
@@ -815,6 +852,7 @@ export function ReportEditorPage() {
         setDraft(nextDraft)
         setAsset(assets.items.find(item => item.id === reportId) ?? null)
         const page = orderedPages(nextDraft.definition)[0]
+        setActivePageId(page?.id ?? '')
         setActiveSectionId(page ? orderedSections(page)[0]?.id ?? '' : '')
       })
       .catch(cause => {
@@ -824,17 +862,20 @@ export function ReportEditorPage() {
       })
       .finally(() => { if (!cancelled) setSettledReportId(reportId) })
     return () => { cancelled = true }
-  }, [newMode, reportId])
+  }, [designSnapshot, newMode, reportId])
+
+  const pages = useMemo(() => draft ? orderedPages(draft.definition) : [], [draft])
+  const page = useMemo<Page | undefined>(() => pages.find(candidate => candidate.id === activePageId) ?? pages[0], [activePageId, pages])
 
   // 组件清单同时驱动渲染器、组件库与属性面板，编辑页与运行页读的是同一个注册表。
   useEffect(() => {
-    if (newMode) return undefined
+    if (newMode || designSnapshot) return undefined
     let cancelled = false
     void listComponentManifests()
       .then(result => { if (!cancelled) setManifests(indexManifests(result.items)) })
       .catch(() => { /* 清单不可用时绑定面板降级为只读，不阻塞编辑器加载。 */ })
     return () => { cancelled = true }
-  }, [newMode])
+  }, [designSnapshot, newMode])
 
   /**
    * 草稿的数据签名：组件绑定与报告级筛选。
@@ -842,22 +883,21 @@ export function ReportEditorPage() {
    * 拖拽和改标题会改变定义哈希但不会改变查询，因此用签名而不是哈希来决定是否
    * 重新执行——排版调整保持零查询，改绑定则立刻看到真实数据。
    */
+  const activePageExecutionId = page?.id ?? ''
   const dataSignature = useMemo(() => JSON.stringify({
-    page: draft ? orderedPages(draft.definition)[0]?.id ?? '' : '',
+    page: activePageExecutionId,
     bindings: draft?.definition.components.map(component => [component.id, component.dataBinding]) ?? [],
     filters: draft?.definition.globalFilters ?? [],
     filterValues: designFilterValues,
-  }), [designFilterValues, draft])
+  }), [activePageExecutionId, designFilterValues, draft])
 
-  const executing = Boolean(draft) && settledSignature !== dataSignature
+  const executing = Boolean(draft) && !designSnapshot && settledSignature !== dataSignature
 
   // 按当前草稿执行组件查询。执行按当前用户权限进行，不产生任何版本或制品。
   useEffect(() => {
-    if (newMode || !reportId) return undefined
-    const page = draft ? orderedPages(draft.definition)[0] : undefined
-    if (!page) return undefined
+    if (newMode || designSnapshot || !reportId || !activePageExecutionId) return undefined
     const controller = new AbortController()
-    void reportEditorAPI.executeDraft(reportId, { pageId: page.id, filterValues: designFilterValues }, { signal: controller.signal })
+    void reportEditorAPI.executeDraft(reportId, { pageId: activePageExecutionId, filterValues: designFilterValues }, { signal: controller.signal })
       .then(result => {
         if (controller.signal.aborted) return
         setExecution(result); setExecutionError('')
@@ -870,11 +910,12 @@ export function ReportEditorPage() {
     return () => controller.abort()
     // dataSignature 已经涵盖了 draft 中影响查询的全部内容。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dataSignature, newMode, reportId])
+  }, [activePageExecutionId, dataSignature, designSnapshot, newMode, reportId])
 
   // 受治理数据上下文在两种模式下都需要：新建页用于选择数据来源，
   // 编辑页用于给数据绑定面板提供当前用户有权使用的字段列表。
   useEffect(() => {
+    if (designSnapshot) return undefined
     let cancelled = false
     void reportEditorAPI.listDataContexts()
       .then(result => {
@@ -888,7 +929,7 @@ export function ReportEditorPage() {
       })
       .finally(() => { if (!cancelled) setContextsLoading(false) })
     return () => { cancelled = true }
-  }, [])
+  }, [designSnapshot])
 
   useEffect(() => {
     if (!newMode || blueprintText) return
@@ -910,11 +951,11 @@ export function ReportEditorPage() {
     return () => { cancelled = true }
   }, [newMode])
 
-  const page = useMemo<Page | undefined>(() => draft ? orderedPages(draft.definition)[0] : undefined, [draft])
   const sections = useMemo(() => page ? orderedSections(page) : [], [page])
-  const contentComponents = useMemo(() => draft?.definition.components.filter(component =>
+  const pageComponentIds = useMemo(() => new Set(placedComponentIDs(page)), [page])
+  const contentComponents = useMemo(() => draft?.definition.components.filter(component => pageComponentIds.has(component.id) &&
     component.templateRef.type !== 'filter-control' &&
-    manifests.get(component.templateRef.type, component.templateRef.version)?.renderer !== 'CONTROL') ?? [], [draft, manifests])
+    manifests.get(component.templateRef.type, component.templateRef.version)?.renderer !== 'CONTROL') ?? [], [draft, manifests, pageComponentIds])
   const activeSection = sections.find(section => section.id === activeSectionId) ?? sections[0]
   const selectedComponent = useMemo(
     () => contentComponents.find(component => component.id === selectedComponentId),
@@ -1045,6 +1086,11 @@ export function ReportEditorPage() {
     try {
       const next = await reportEditorAPI.getDraft(reportId)
       setDraft(next); setAIPreview(undefined)
+      const nextPages = orderedPages(next.definition)
+      const nextPage = nextPages.find(candidate => candidate.id === activePageId) ?? nextPages[0]
+      setActivePageId(nextPage?.id ?? '')
+      setActiveSectionId(current => nextPage?.sections.some(section => section.id === current)
+        ? current : orderedSections(nextPage ?? { sections: [] })[0]?.id ?? '')
       notify(`已打开服务端最新修订 r${next.revisionNo}`)
     } catch (cause) { setActionError(cause instanceof Error ? cause.message : '最新修订加载失败') }
   }
@@ -1347,6 +1393,57 @@ export function ReportEditorPage() {
 
   const sectionNoun = draft?.definition.metadata.reportType === 'DASHBOARD' ? '分区' : '分析角度'
 
+  const selectTheme = (themeId: string) => {
+    const target = pages.find(candidate => candidate.id === themeId)
+    if (!target || target.id === page?.id) return
+    setActivePageId(target.id)
+    setActiveSectionId(orderedSections(target)[0]?.id ?? '')
+    setSelectedComponentId('')
+    setAIPreview(undefined)
+    setActionError('')
+  }
+
+  const addTheme = async () => {
+    if (!draft || !canEdit) return
+    const result = createThemeOperations(draft.definition, () => crypto.randomUUID())
+    const saved = await commit(result.operations, '已新建分析主题', setActionError)
+    if (saved) {
+      setActivePageId(result.pageId)
+      setActiveSectionId('')
+      setSelectedComponentId('')
+      setRenamingThemeId(result.pageId)
+    }
+  }
+
+  const renameTheme = async (pageId: string, name: string) => {
+    setRenamingThemeId('')
+    const current = pages.find(candidate => candidate.id === pageId)
+    const trimmed = name.trim()
+    if (!draft || !canEdit || !current || !trimmed || trimmed === current.name) return
+    await commit(renameThemeOperations(pageId, trimmed), '分析主题已重命名', setActionError)
+  }
+
+  const moveTheme = async (direction: -1 | 1, pageId = page?.id) => {
+    if (!draft || !pageId || !canEdit) return
+    await commit(themeReorderOperations(draft.definition, pageId, direction), direction < 0 ? '分析主题已上移' : '分析主题已下移', setActionError)
+  }
+
+  const deleteActiveTheme = async () => {
+    if (!draft || !page || pages.length <= 1 || !canEdit) return
+    const currentIndex = pages.findIndex(candidate => candidate.id === page.id)
+    const fallback = pages[currentIndex + 1] ?? pages[currentIndex - 1]
+    setComponentBusy(true); setComponentError('')
+    const saved = await commit(deleteThemeOperations(draft.definition, page.id), '分析主题及其内容已移除', setComponentError)
+    if (saved) {
+      const savedPage = orderedPages(saved.definition).find(candidate => candidate.id === fallback?.id) ?? orderedPages(saved.definition)[0]
+      setActivePageId(savedPage?.id ?? '')
+      setActiveSectionId(savedPage ? orderedSections(savedPage)[0]?.id ?? '' : '')
+      setSelectedComponentId('')
+      setDeleteThemeOpen(false)
+    }
+    setComponentBusy(false)
+  }
+
   const addSection = async () => {
     if (!draft || !page || !canEdit) return
     const { operations, sectionId } = createSectionOperations(page, `${sectionNoun} ${sections.length + 1}`, () => crypto.randomUUID())
@@ -1355,6 +1452,10 @@ export function ReportEditorPage() {
   }
 
   const addFramework = async (request: FrameworkRequest) => {
+    if (request.kind === 'THEME') {
+      await addTheme()
+      return
+    }
     if (request.kind === 'ANGLE') {
       await addSection()
       return
@@ -1434,7 +1535,8 @@ export function ReportEditorPage() {
     setComponentBusy(true); setComponentError('')
     const saved = await commit(operations, '章节及其组件已移除并生成新修订', setComponentError)
     if (saved) {
-      setActiveSectionId(orderedPages(saved.definition)[0]?.sections[0]?.id ?? '')
+      const savedPage = orderedPages(saved.definition).find(candidate => candidate.id === page.id)
+      setActiveSectionId(savedPage ? orderedSections(savedPage)[0]?.id ?? '' : '')
       setSelectedComponentId(''); setDeleteSectionOpen(false)
     }
     setComponentBusy(false)
@@ -1606,10 +1708,30 @@ export function ReportEditorPage() {
         <div className="report-editor-main">
           <nav className="report-editor-outline report-editor-sidebar" aria-label="组件面板与大纲">
             <ComponentPalette manifests={latestComponentManifests(manifests.list())} disabled={!canEdit}
-              themeName={draft.definition.metadata.name}
+              themes={pages} activeThemeId={page.id} onSelectTheme={selectTheme}
               onPick={pickComponentForSlot} onAddFramework={kind => void addFramework(kind)} />
             <details className="report-editor-structure-panel">
-              <summary><span>页面结构</span><em>{sections.length}</em><CaretRight size={14} /></summary>
+              <summary><span>报告结构</span><em>{pages.length > 1 ? `${pages.length} / ${sections.length}` : sections.length}</em><CaretRight size={14} /></summary>
+              {pages.length > 1 && <section className="report-outline-theme-section" aria-label="分析主题">
+                <header><strong>分析主题</strong><button type="button" className="report-outline-add" disabled={!canEdit} onClick={() => void addTheme()}><Plus size={13} />新建</button></header>
+                <ul className="report-outline-list is-themes">
+                  {pages.map((theme, index) => <li key={theme.id} className={`report-outline-item ${theme.id === page.id ? 'is-active' : ''}`.trim()}>
+                    {renamingThemeId === theme.id
+                      ? <input autoFocus defaultValue={theme.name} maxLength={60} aria-label="分析主题名称"
+                        onBlur={event => void renameTheme(theme.id, event.target.value)}
+                        onKeyDown={event => { if (event.key === 'Enter') (event.target as HTMLInputElement).blur(); if (event.key === 'Escape') setRenamingThemeId('') }} />
+                      : <button type="button" className="report-outline-name" title={theme.name} onClick={() => selectTheme(theme.id)} onDoubleClick={() => canEdit && setRenamingThemeId(theme.id)}>
+                        <span>{theme.name}</span><em>{theme.sections.length}</em>
+                      </button>}
+                    {canEdit && renamingThemeId !== theme.id && <span className="report-outline-actions">
+                      <button type="button" aria-label="重命名分析主题" title="重命名" onClick={() => setRenamingThemeId(theme.id)}><PencilSimple size={12} /></button>
+                      <button type="button" aria-label="上移分析主题" title="上移" disabled={index === 0} onClick={() => { selectTheme(theme.id); void moveTheme(-1, theme.id) }}><ArrowUp size={12} /></button>
+                      <button type="button" aria-label="下移分析主题" title="下移" disabled={index === pages.length - 1} onClick={() => { selectTheme(theme.id); void moveTheme(1, theme.id) }}><ArrowDown size={12} /></button>
+                      <button type="button" className="is-danger" aria-label="删除分析主题" title="删除分析主题" onClick={() => { selectTheme(theme.id); setComponentError(''); setDeleteThemeOpen(true) }}><Trash size={12} /></button>
+                    </span>}
+                  </li>)}
+                </ul>
+              </section>}
               <header><strong>{sectionNoun}</strong><span>{canEdit && <>
                 <button type="button" className="report-outline-add" title={`新建${sectionNoun}`} onClick={() => void addSection()}><Plus size={13} />新建</button>
               </>}</span></header>
@@ -1664,6 +1786,11 @@ export function ReportEditorPage() {
                 onApply={() => notify('筛选条件已应用到报告预览')} applying={executing}
                 onConfigure={editorView === 'edit' ? () => { setSelectedComponentId(''); setSidePanel('data'); setReportInspectorView('filters') } : undefined}
                 onExport={() => notify('发布后可导出报告')} locked={editorView === 'edit'} />
+              {pages.length > 1 && <header className="report-editor-active-theme">
+                <span>分析主题 {pages.findIndex(candidate => candidate.id === page.id) + 1} / {pages.length}</span>
+                <h2>{page.name}</h2>
+                <p>以下分析角度与小节均属于当前主题</p>
+              </header>}
               {/* 空白报告只显示报告头与筛选；首次拖入组件时会自动创建首个分区。 */}
               {page.sections.length > 0 && <ReportPageView definition={draft.definition} page={page} manifests={manifests} results={results}
                 designMode={!execution}
@@ -1806,7 +1933,7 @@ export function ReportEditorPage() {
           阻断问题与证据校验结论由发布评审的确定性门禁给出，这里不预判。 */}
       <footer className="report-editor-statusbar">
         <span><strong>r{draft.revisionNo}</strong> 每次修改即自动保存为新修订，可撤销</span>
-        <span>{sections.length} 个{sectionNoun} · {contentComponents.length} 个内容元素 · {contentComponents.filter(component => component.dataBinding).length} 个已绑定数据 · {(draft.definition.globalFilters ?? []).length} 个报告筛选</span>
+        <span>{pages.length > 1 ? `${pages.length} 个分析主题 · ` : ''}{sections.length} 个{sectionNoun} · {contentComponents.length} 个当前主题内容元素 · {contentComponents.filter(component => component.dataBinding).length} 个已绑定数据 · {(draft.definition.globalFilters ?? []).length} 个报告筛选</span>
         {lastReceipt && <span>上次 AI 应用：r{lastReceipt.from} → r{lastReceipt.to}，{lastReceipt.count} 项</span>}
         <span className="report-editor-statusbar-hint">{selectedComponent ? '已选中组件：Delete 删除 · Esc 取消选中' : '发布前检查在「预览与发布」中进行'}</span>
       </footer>
@@ -1823,6 +1950,13 @@ export function ReportEditorPage() {
         <header><div><span className="eyebrow">结构变更</span><h2 id="delete-section-title">删除“{activeSection.name}”</h2></div><button type="button" aria-label="关闭" onClick={() => setDeleteSectionOpen(false)}><X size={18} /></button></header>
         <div><WarningCircle size={20} /><p>该章节内的 {activeSection.blocks.flatMap(block => block.zones.flatMap(zone => zone.slots.filter(slot => slot.componentId))).length} 个组件将一并移除。系统会生成新修订，仍可通过撤销恢复。</p>{componentError && <span>{componentError}</span>}</div>
         <footer><button className="quiet-button" type="button" disabled={componentBusy} onClick={() => setDeleteSectionOpen(false)}>取消</button><button className="primary-button is-danger" type="button" disabled={componentBusy} onClick={() => void deleteActiveSection()}>{componentBusy ? '正在删除…' : '确认删除'}</button></footer>
+      </section>
+    </div>}
+    {deleteThemeOpen && page && pages.length > 1 && <div className="report-modal-backdrop" role="presentation" onMouseDown={() => setDeleteThemeOpen(false)}>
+      <section className="report-modal report-delete-section-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-theme-title" onMouseDown={event => event.stopPropagation()}>
+        <header><div><span className="eyebrow">结构变更</span><h2 id="delete-theme-title">删除分析主题“{page.name}”</h2></div><button type="button" aria-label="关闭" onClick={() => setDeleteThemeOpen(false)}><X size={18} /></button></header>
+        <div><WarningCircle size={20} /><p>该主题内的 {placedComponentIDs(page).length} 个组件与 {page.sections.length} 个分析角度将一并移除。系统会生成新修订，仍可通过撤销恢复。</p>{componentError && <span>{componentError}</span>}</div>
+        <footer><button className="quiet-button" type="button" disabled={componentBusy} onClick={() => setDeleteThemeOpen(false)}>取消</button><button className="primary-button is-danger" type="button" disabled={componentBusy} onClick={() => void deleteActiveTheme()}>{componentBusy ? '正在删除…' : '确认删除'}</button></footer>
       </section>
     </div>}
     {toast && <div className="report-toast" role="status"><Check size={16} weight="bold" />{toast}</div>}

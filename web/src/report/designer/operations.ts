@@ -2,7 +2,7 @@ import type { DataContextField, EditorOperation, EditorOperationBundle } from '.
 import type { ComponentManifest, ManifestIndex } from '../render/manifests.ts'
 import { editorBindingGroups, minimumSize, recommendedSize } from '../render/manifests.ts'
 import {
-  canvasOf, findBlock, findComponentBlock, orderedSections,
+  canvasOf, findBlock, findComponentBlock, orderedPages, orderedSections, placedComponentIDs,
   type BlockType, type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type MetricAggregation,
   type Block, type GridRect, type Page, type ReportComponent, type ReportDefinition, type Section, type Zone,
 } from '../render/schema.ts'
@@ -153,6 +153,7 @@ export type LayoutFrameKind = 'TOPIC' | 'COLUMNS_2' | 'COLUMNS_3' | 'CONCLUSION'
 export type SubsectionLayout = 'CONCLUSION_TOP' | 'CONCLUSION_LEFT'
 
 export type FrameworkRequest =
+  | { kind: 'THEME' }
   | { kind: 'ANGLE' }
   | {
       kind: 'SUBSECTION'
@@ -1082,6 +1083,76 @@ export function createSectionOperations(page: Page, name: string, newId: () => s
     sectionId,
     operations: [{ op: 'SECTION_CREATE', targetId: page.id, payload: { section: { id: sectionId, name, order, blocks: [] } } }],
   }
+}
+
+const genericInitialThemeNames = new Set(['报告正文', '正文', '第1页', '页面 1', 'Page 1'])
+
+/**
+ * Page 是报告 Definition 中天然的一级容器，在编辑器里对应“分析主题”。
+ * 空白报告预置的“报告正文”只是占位名；第一次扩展为多主题时才把它显式命名，
+ * 因而单主题报告不会被迫展示一层没有信息增量的外框。
+ */
+export function createThemeOperations(
+  definition: ReportDefinition, newId: () => string,
+): { operations: EditorOperation[]; pageId: string } {
+  const pages = orderedPages(definition)
+  const pageId = newId()
+  const order = Math.max(0, ...pages.map(page => page.order)) + 1
+  const operations: EditorOperation[] = []
+  if (pages.length === 1 && genericInitialThemeNames.has(pages[0].name.trim())) {
+    operations.push({ op: 'PAGE_UPDATE', targetId: pages[0].id, payload: { name: '分析主题 1' } })
+  }
+  operations.push({
+    op: 'PAGE_CREATE', targetId: definition.metadata.id,
+    payload: { page: { id: pageId, name: `分析主题 ${pages.length + 1}`, order, sections: [] } },
+  })
+  return { operations, pageId }
+}
+
+export function renameThemeOperations(pageId: string, name: string): EditorOperation[] {
+  return [{ op: 'PAGE_UPDATE', targetId: pageId, payload: { name } }]
+}
+
+export function themeReorderOperations(definition: ReportDefinition, pageId: string, direction: -1 | 1): EditorOperation[] {
+  const pages = orderedPages(definition)
+  const index = pages.findIndex(page => page.id === pageId)
+  const adjacent = pages[index + direction]
+  if (index < 0 || !adjacent) return []
+  return [
+    { op: 'PAGE_REORDER', targetId: pageId, payload: { order: adjacent.order } },
+    { op: 'PAGE_REORDER', targetId: adjacent.id, payload: { order: pages[index].order } },
+  ]
+}
+
+/** 删除分析主题时一并清理其中组件及指向它们的筛选与联动，避免悬挂引用。 */
+export function deleteThemeOperations(definition: ReportDefinition, pageId: string): EditorOperation[] {
+  const pages = orderedPages(definition)
+  const page = pages.find(candidate => candidate.id === pageId)
+  if (!page || pages.length <= 1) return []
+  const componentIds = new Set(placedComponentIDs(page))
+  const structuralIds = new Set<string>([page.id])
+  page.sections.forEach(section => {
+    structuralIds.add(section.id)
+    section.blocks.forEach(block => {
+      structuralIds.add(block.id)
+      block.zones.forEach(zone => {
+        structuralIds.add(zone.id)
+        zone.slots.forEach(slot => structuralIds.add(slot.id))
+      })
+    })
+  })
+  const filterDeletes = (definition.globalFilters ?? [])
+    .filter(filter => filter.scope.type !== 'REPORT' && filter.scope.targetIds.some(id => structuralIds.has(id) || componentIds.has(id)))
+    .map(filter => ({ op: 'FILTER_DELETE' as const, targetId: filter.id, payload: {} }))
+  const interactionDeletes = (definition.interactions ?? [])
+    .filter(interaction => interaction.targetPageId === pageId || componentIds.has(interaction.sourceComponentId) || interaction.targetComponentIds.some(id => componentIds.has(id)))
+    .map(interaction => ({ op: 'INTERACTION_DELETE' as const, targetId: interaction.id, payload: {} }))
+  return [
+    ...filterDeletes,
+    ...interactionDeletes,
+    { op: 'PAGE_DELETE', targetId: pageId, payload: {} },
+    ...[...componentIds].map(id => ({ op: 'COMPONENT_DELETE' as const, targetId: id, payload: {} })),
+  ]
 }
 
 export function renameSectionOperations(sectionId: string, name: string): EditorOperation[] {

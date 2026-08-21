@@ -205,6 +205,7 @@ export function ReportRuntimePage() {
   const [manifests, setManifests] = useState<ManifestIndex>(emptyManifestIndex)
   const [assetMeta, setAssetMeta] = useState<ReportAsset | null>(null)
   const [execution, setExecution] = useState<RuntimeExecution | null>(null)
+  const [activePageId, setActivePageId] = useState('')
   const [versions, setVersions] = useState<ReportVersion[]>([])
   const [versionsLoading, setVersionsLoading] = useState(false)
   const [versionsError, setVersionsError] = useState('')
@@ -260,6 +261,7 @@ export function ReportRuntimePage() {
         setLoaded(runtime); setVersions(versionPage.items)
         const page = orderedPages(runtime.definition)[0]
         if (!page) return
+        setActivePageId(page.id)
         const shared = shareToken ? sessionStorage.getItem(`intelligent-report-share:${shareToken}`) : ''
         let initialFilters: Record<string, unknown> = {}
         if (shared) {
@@ -290,7 +292,8 @@ export function ReportRuntimePage() {
     return () => controller.abort()
   }, [replaceFilterValues, reportId, requestedVersion, requestedVersionId, requestToken, shareToken])
 
-  const page = useMemo(() => loaded ? orderedPages(loaded.definition)[0] : undefined, [loaded])
+  const pages = useMemo(() => loaded ? orderedPages(loaded.definition) : [], [loaded])
+  const page = useMemo(() => pages.find(candidate => candidate.id === activePageId) ?? pages[0], [activePageId, pages])
   const title = loaded?.definition.metadata.name || '报告运行页'
   const versionNo = loaded?.versionNo || requestedVersion || 0
   const currentVersion = versions.find(item => item.versionNo === versionNo)
@@ -309,7 +312,7 @@ export function ReportRuntimePage() {
     [execution],
   )
   const run = async (input: ReportExecutionInput, blockId?: string) => {
-    if (!loaded || !page) return
+    if (!loaded || !input.pageId) return
     abortRef.current?.abort()
     const controller = new AbortController(); abortRef.current = controller
     setRefreshing(true); setFailure(null)
@@ -331,6 +334,14 @@ export function ReportRuntimePage() {
   }
 
   const currentInput = () => runtimeState.executionInput(page?.id ?? '')
+
+  const switchTheme = (pageId: string) => {
+    if (!loaded || pageId === page?.id || !pages.some(candidate => candidate.id === pageId)) return
+    runtimeState.clearSelections()
+    setActivePageId(pageId)
+    setExecution(null)
+    void run({ pageId, filterValues: runtimeState.filterValues, selections: [] })
+  }
 
   const applyFilters = () => {
     setAppliedFilterValues(runtimeState.filterValues)
@@ -378,7 +389,9 @@ export function ReportRuntimePage() {
   }, [execution, loaded, page])
 
   // 关键变化直接取自定义里的洞察组件文本；没有配置就如实说明，不编造摘要。
+  const activeComponentIds = new Set(placedComponentIDs(page))
   const keyChanges = loaded?.definition.components
+    .filter(component => activeComponentIds.has(component.id))
     .filter(component => component.options.insightRole)
     .map(component => component.options.richText?.trim())
     .filter((value): value is string => Boolean(value))
@@ -426,6 +439,14 @@ export function ReportRuntimePage() {
         meta={[`负责人 ${ownerName}`, `更新 ${formatDateTime(assetMeta?.updatedAt || currentVersion?.publishedAt)}`, `数据截至 ${formatDateTime(asOf)}`]}
         filters={filters} values={runtimeState.filterValues} onChange={runtimeState.setFilterValue}
         onApply={applyFilters} applying={refreshing} onExport={() => setExportOpen(true)} />}
+
+      {!loading && loaded && pages.length > 1 && <nav className="runtime-theme-nav" aria-label="分析主题">
+        <span>分析主题</span>
+        <div>{pages.map((theme, index) => <button type="button" key={theme.id} className={theme.id === page?.id ? 'is-active' : ''}
+          aria-current={theme.id === page?.id ? 'page' : undefined} disabled={refreshing} onClick={() => switchTheme(theme.id)}>
+          <em>{String(index + 1).padStart(2, '0')}</em>{theme.name}
+        </button>)}</div>
+      </nav>}
 
       {loading && <div className="runtime-report-feedback"><SpinnerGap className="is-spinning" size={25} /><strong>正在加载不可变发布制品</strong><p>随后会按当前查看者权限执行可见组件。</p></div>}
       {!loading && loadError && !loaded && <div className="runtime-report-feedback is-error"><WarningCircle size={25} /><strong>报告加载失败</strong><p>{loadError}</p><button type="button" onClick={() => window.location.reload()}>重新加载</button></div>}

@@ -94,10 +94,12 @@ function FallbackPalette({ manifests, disabled, onPick }: {
 }
 
 /** 按业务问题组织的分析卡片库；每个语义类型固定提供三种可复用版式。 */
-export function ComponentPalette({ manifests, disabled, themeName, onPick, onAddFramework }: {
+export function ComponentPalette({ manifests, disabled, themes, activeThemeId, onSelectTheme, onPick, onAddFramework }: {
   manifests: ComponentManifest[]
   disabled: boolean
-  themeName: string
+  themes: Array<{ id: string; name: string }>
+  activeThemeId: string
+  onSelectTheme: (themeId: string) => void
   onPick: (manifest: ComponentManifest, options?: Partial<ComponentOptions>) => void
   onAddFramework: (request: FrameworkRequest) => void
 }) {
@@ -108,6 +110,7 @@ export function ComponentPalette({ manifests, disabled, themeName, onPick, onAdd
   const [query, setQuery] = useState('')
   const [filterOpen, setFilterOpen] = useState(false)
   const [group, setGroup] = useState('')
+  const activeTheme = themes.find(theme => theme.id === activeThemeId) ?? themes[0]
   const analysisManifests = useMemo(() => new Map(manifests.filter(isAnalysisCardManifest).map(item => [item.type, item])), [manifests])
   const normalized = query.trim().toLocaleLowerCase()
   const visible = useMemo(() => analysisCardCatalog.filter(item => {
@@ -126,14 +129,23 @@ export function ComponentPalette({ manifests, disabled, themeName, onPick, onAdd
         onClick={() => setMode('data')}>数据组件</button>
     </div>
     {mode === 'framework' ? <>
-      <header className="report-palette-section-title"><strong>报告框架</strong><small>主题 → 分析角度 → 小节 → 内容</small></header>
+      <header className="report-palette-section-title"><strong>报告框架</strong><small>分析主题（按需） → 分析角度 → 小节 → 内容</small></header>
       <section className="report-framework-hierarchy" aria-label="报告结构层级">
-        <div><span className="report-framework-step">1</span><span><strong>主题</strong><small title={themeName}>{themeName}</small></span><em>报告级</em></div>
+        <button type="button" disabled={disabled} onClick={() => onAddFramework({ kind: 'THEME' })}>
+          <span className="report-framework-step">1</span><span><strong>新增分析主题</strong><small>{themes.length > 1 ? `当前：${activeTheme?.name ?? '未命名主题'} · 共 ${themes.length} 个` : '多主题报告从这里开始，单主题可跳过'}</small></span><Plus size={15} />
+        </button>
         <button type="button" disabled={disabled} onClick={() => onAddFramework({ kind: 'ANGLE' })}>
           <span className="report-framework-step">2</span><span><strong>新增分析角度</strong><small>围绕主题建立一条独立分析线</small></span><Plus size={15} />
         </button>
         <div><span className="report-framework-step">3</span><span><strong>小节</strong><small>在当前分析角度中组织结论与证据</small></span><em>下方创建</em></div>
       </section>
+
+      {themes.length > 1 && <label className="report-framework-theme-picker">
+        <span>当前分析主题</span>
+        <select value={activeTheme?.id ?? ''} onChange={event => onSelectTheme(event.target.value)} aria-label="切换分析主题">
+          {themes.map((theme, index) => <option value={theme.id} key={theme.id}>{index + 1}. {theme.name}</option>)}
+        </select>
+      </label>}
 
       <section className="report-subsection-builder" aria-label="小节布局">
         <header><span><strong>小节内容布局</strong><small>结论、论据、明细与附录组合为一个整体</small></span></header>
@@ -165,7 +177,7 @@ export function ComponentPalette({ manifests, disabled, themeName, onPick, onAdd
             onClick={() => setIncludeAppendix(value => !value)}><FileText size={14} />附录</button>
         </div>
       </section>
-      <p className="report-framework-page-note"><Info size={15} />当前报告即主题；分析角度对应画布一级分区，小节可整体拖动。输出按 1920 × 1080 自动分页。</p>
+      <p className="report-framework-page-note"><Info size={15} />单主题可直接创建分析角度；创建第 2 个主题后才显示主题层级与切换。输出按 1920 × 1080 自动分页。</p>
     </> : <>
     <header className="report-palette-section-title"><strong>数据组件</strong><small>37 类业务问题 · 每类 3 种版式</small></header>
     <div className="report-palette-search">

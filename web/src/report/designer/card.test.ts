@@ -2,9 +2,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  addToCardOperations, createLayoutFrameOperations, createStructuredBlockOperations, createSubsectionFrameOperations, decodePalettePayload, encodePalettePayload,
+  addToCardOperations, createLayoutFrameOperations, createStructuredBlockOperations, createSubsectionFrameOperations, createThemeOperations, decodePalettePayload, deleteThemeOperations, encodePalettePayload,
   frameSlotRole,
-  findCompatibleTemplateSlot, placeComponentInSlotOperations, removeComponentOperations,
+  findCompatibleTemplateSlot, placeComponentInSlotOperations, removeComponentOperations, themeReorderOperations,
 } from './operations.ts'
 import type { Block, Page, ReportDefinition, ZoneType } from '../render/schema.ts'
 import type { ComponentManifest } from '../render/manifests.ts'
@@ -45,6 +45,58 @@ function pageWith(blocks: Block[]): Page {
 
 let counter = 0
 const newId = () => `generated-${++counter}`
+
+function definitionWithPages(pages: Page[]): ReportDefinition {
+  return {
+    schemaVersion: '1.0',
+    metadata: { id: 'report-1', code: 'report-1', name: '经营报告', reportType: 'REPORT' },
+    dataContexts: [], pages, components: [],
+  }
+}
+
+test('creating a second analysis theme promotes only the generic initial page name', () => {
+  const definition = definitionWithPages([{ id: 'page-1', name: '报告正文', order: 1, sections: [] }])
+  const result = createThemeOperations(definition, () => 'page-2')
+  assert.deepEqual(result.operations.map(operation => operation.op), ['PAGE_UPDATE', 'PAGE_CREATE'])
+  assert.equal((result.operations[0].payload as { name: string }).name, '分析主题 1')
+  const created = (result.operations[1].payload as { page: Page }).page
+  assert.deepEqual(created, { id: 'page-2', name: '分析主题 2', order: 2, sections: [] })
+
+  const meaningful = createThemeOperations(definitionWithPages([{ id: 'page-1', name: '销售增长', order: 1, sections: [] }]), () => 'page-2')
+  assert.deepEqual(meaningful.operations.map(operation => operation.op), ['PAGE_CREATE'])
+})
+
+test('analysis themes reorder by swapping their stable page orders', () => {
+  const definition = definitionWithPages([
+    { id: 'page-1', name: '销售', order: 1, sections: [] },
+    { id: 'page-2', name: '客户', order: 2, sections: [] },
+  ])
+  const operations = themeReorderOperations(definition, 'page-2', -1)
+  assert.deepEqual(operations.map(operation => [operation.targetId, operation.payload]), [
+    ['page-2', { order: 1 }], ['page-1', { order: 2 }],
+  ])
+})
+
+test('deleting an analysis theme removes its components and dangling scoped references', () => {
+  const removedPage = pageWith([card('block-1', [zone('zone-1', 'CONTENT', ['component-1'])])])
+  const definition = definitionWithPages([
+    removedPage,
+    { id: 'page-2', name: '保留主题', order: 2, sections: [] },
+  ])
+  definition.components = [{ id: 'component-1' } as ReportDefinition['components'][number]]
+  definition.globalFilters = [{
+    id: 'filter-1', type: 'SINGLE_SELECT', fieldRef: { dataContextId: 'ctx', field: 'region' },
+    scope: { type: 'PAGE', targetIds: [removedPage.id] },
+  }]
+  definition.interactions = [{
+    id: 'interaction-1', sourceComponentId: 'component-1', event: 'CLICK', action: 'FILTER',
+    targetComponentIds: [], fieldMappings: [],
+  }]
+  assert.deepEqual(deleteThemeOperations(definition, removedPage.id).map(operation => operation.op), [
+    'FILTER_DELETE', 'INTERACTION_DELETE', 'PAGE_DELETE', 'COMPONENT_DELETE',
+  ])
+  assert.deepEqual(deleteThemeOperations(definitionWithPages([removedPage]), removedPage.id), [])
+})
 
 test('a component added into a card becomes a new zone of that card', () => {
   const page = pageWith([card('block-1', [zone('zone-content', 'CONTENT', ['chart'])])])
