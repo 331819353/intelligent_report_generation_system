@@ -47,6 +47,8 @@ export type EditingHandlers = {
   onZoneReorder(blockId: string, zoneId: string, direction: -1 | 1): void
   /** 从组件面板把组件放入分块预先声明的空槽位。 */
   onComponentDrop?(blockId: string, zoneId: string, slotId: string, manifestRef: string): void
+  /** 点击小节中的结论或论据空位，直接打开对应的样式选择器。 */
+  onEmptySlotSelect?(target: { blockId: string; zoneId: string; slotId: string; role: 'CONCLUSION' | 'EVIDENCE' }): void
   /** 分块标题独立于内部组件标题。 */
   onBlockTitleChange?(sectionId: string, blockId: string, title: string): void
   /** 卡片工具条：复制 / 删除整张卡片。未提供时不显示工具条。 */
@@ -203,13 +205,16 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
       const rect = slotDrag.rectFor(slot.id, slot.grid)
       const dragging = slotDrag.drag?.id === slot.id
       const acceptsDrop = Boolean(editing?.onComponentDrop && !slot.componentId)
+      const acceptsPick = Boolean(editing?.onEmptySlotSelect && !slot.componentId && (frameRole === 'CONCLUSION' || frameRole === 'EVIDENCE'))
       const authoring = Boolean(editing || props.templatePreview)
-      const emptyLabel = frameRole ? `拖入${frameSlotLabels[frameRole]}`
+      const emptyLabel = frameRole ? `插入${frameSlotLabels[frameRole]}`
         : block.type === 'TABLE' ? '拖入数据表格'
         : block.type === 'CHART' ? '拖入图表组件'
           : zone.type === 'INSIGHT' ? '拖入智能结论或富文本'
             : zone.type === 'CONTENT' ? '拖入图表、指标或表格' : '拖入内容组件'
-      const authoringHint = editing ? '从左侧选择或拖拽到这里' : '创建后可选择或拖拽组件填充'
+      const authoringHint = editing
+        ? acceptsPick ? '点击选择样式，也可从组件库拖入' : '从左侧选择或拖拽到这里'
+        : '创建后可选择或拖拽组件填充'
       const EmptyIcon = frameRole === 'EVIDENCE' ? ChartLineUp
         : frameRole === 'DETAIL' ? Table
           : block.type === 'TABLE' ? Table : block.type === 'CHART' ? ChartLineUp : Lightbulb
@@ -252,7 +257,15 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
           </ReportComponentBoundary>
           : slot.componentId
             ? <ComponentStateView state="ERROR" boundTitle="组件在定义中缺失" />
-            : <div className="report-render-empty-slot"><EmptyIcon size={20} weight="duotone" /><strong>{authoring ? emptyLabel : '待配置'}</strong><span>{authoring ? authoringHint : '内容尚未配置'}</span></div>}
+            : acceptsPick
+              ? <button type="button" className="report-render-empty-slot" aria-label={`选择${frameSlotLabels[frameRole!]}`}
+                  onClick={event => {
+                    event.stopPropagation()
+                    editing?.onEmptySlotSelect?.({ blockId: block.id, zoneId: zone.id, slotId: slot.id, role: frameRole as 'CONCLUSION' | 'EVIDENCE' })
+                  }}>
+                  <EmptyIcon size={20} weight="duotone" /><strong>{emptyLabel}</strong><span>{authoringHint}</span>
+                </button>
+              : <div className="report-render-empty-slot"><EmptyIcon size={20} weight="duotone" /><strong>{authoring ? emptyLabel : '待配置'}</strong><span>{authoring ? authoringHint : '内容尚未配置'}</span></div>}
         {slotEditable && editing && <SlotHandles
           slotId={slot.id} rect={slot.grid} columns={columns} rows={rows} minimum={minSizeFor(slot.id)}
           onStart={(event, mode) => slotDrag.start(event, slot.id, slot.grid, mode)}

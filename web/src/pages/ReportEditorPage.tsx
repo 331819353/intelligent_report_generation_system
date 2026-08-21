@@ -24,15 +24,17 @@ import { ComponentPalette } from '../report/designer/ComponentPalette'
 import {
   CanvasQuickAdd, CanvasSubsectionComposer, type SubsectionComposerValue,
 } from '../report/designer/CanvasFrameworkControls'
+import { SlotComponentPicker, type SlotPickerTarget } from '../report/designer/SlotComponentPicker'
 import { ComponentBindingEditor } from '../report/designer/ComponentBindingEditor'
 import { MetricStatusConfiguration } from '../report/designer/MetricStatusConfiguration'
+import { analysisCardCatalog } from '../report/analysis/catalog'
 import {
   editorBindingGroups, editorBindingsValid, emptyManifestIndex, indexManifests, latestComponentManifests, listComponentManifests, minimumSize,
   type ComponentManifest, type ManifestIndex,
 } from '../report/render/manifests'
 import {
   canvasOf, findBlock, findComponentBlock, orderedPages, orderedSections, placedComponentIDs,
-  type Block, type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type Page, type ReportDefinition, type ReportHeaderStyle, type ReportType, type Section,
+  type Block, type ComponentFilterPolicy, type ComponentOptions, type FieldBinding, type GlobalFilter, type GridRect, type Page, type ReportDefinition, type ReportHeaderStyle, type ReportType, type Section,
 } from '../report/render/schema'
 import {
   addDataContextOperations, bindingForField, bundle, createFilterOperations, createInteractionOperations,
@@ -40,7 +42,7 @@ import {
   findCompatibleTemplateSlot, placeComponentInSlotOperations,
   removeBlockOperations, removeComponentOperations, removeDataContextOperations, renameSectionOperations,
   renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations,
-  decodePalettePayload, paletteDragType, zoneKindForManifest, zoneKindLabels, zoneReorderOperations,
+  decodePalettePayload, encodePalettePayload, paletteDragType, zoneKindForManifest, zoneKindLabels, zoneReorderOperations,
   type FilterDraft, type InteractionDraft,
 } from '../report/designer/operations'
 
@@ -108,6 +110,37 @@ const reportEditorSnapshotAsset: ReportAsset = {
   allowedActions: ['VIEW', 'EDIT', 'PUBLISH', 'AI_EDIT'],
 }
 
+const reportEditorSnapshotManifests: ComponentManifest[] = analysisCardCatalog.map(item => {
+  const conclusion = item.type === 'analysis-insight-conclusion'
+  const roles = Array.from(new Set(item.bindingGroups.flatMap(group => group.roles)))
+  return {
+    type: item.type,
+    version: '1.0.0',
+    renderer: 'REACT',
+    displayName: `${item.name}卡`,
+    category: item.category,
+    minSize: { w: 6, h: conclusion ? 3 : 4 },
+    recommendedSize: { w: 12, h: conclusion ? 4 : 6 },
+    dataContract: {
+      dimensions: { min: 0, max: 8 },
+      measures: { min: item.category === 'CHART' ? 1 : 0, max: 9 },
+      timeField: { required: false },
+      roles: roles.length > 0 ? roles : ['VALUE'],
+    },
+    stackingRequiresAdditive: false,
+    optionSchema: {
+      type: 'object', additionalProperties: false, required: ['cardVariant'],
+      properties: {
+        title: { type: 'string' }, subtitle: { type: 'string' },
+        cardVariant: { type: 'string', enum: ['01', '02', '03'], description: '卡片版式' },
+      },
+    },
+    defaultOptions: { cardVariant: '01' },
+    mobilePolicy: { supported: true, defaultLegendMode: 'HIDDEN', labelDegradation: 'ELLIPSIS' },
+    supportedInteractions: [],
+  }
+})
+
 const optionLabels: Record<string, string> = {
   showLegend: '显示图例', showLabel: '显示数值标签', smooth: '平滑曲线', colorPaletteRef: '配色方案', nullPolicy: '空值处理',
   animation: '动画效果', orientation: '方向', topN: '只显示前 N 项', numberFormat: '数字格式', tablePageSize: '每页行数',
@@ -158,6 +191,17 @@ function applySnapshotOperations(draft: ReportDraft, operations: EditorOperation
       const block = next.definition.pages.flatMap(page => page.sections).flatMap(section => section.blocks).find(item => item.id === operation.targetId)
       const title = (operation.payload as { title?: string }).title
       if (block && title) block.title = title
+    } else if (operation.op === 'COMPONENT_CREATE') {
+      const component = (operation.payload as { component?: ReportDefinition['components'][number] }).component
+      if (component) next.definition.components.push(component)
+    } else if (operation.op === 'SLOT_UPDATE') {
+      const slot = next.definition.pages.flatMap(page => page.sections).flatMap(section => section.blocks)
+        .flatMap(block => block.zones).flatMap(zone => zone.slots).find(item => item.id === operation.targetId)
+      const payload = operation.payload as { componentId?: string; grid?: GridRect }
+      if (slot) {
+        if (payload.componentId) slot.componentId = payload.componentId
+        if (payload.grid) slot.grid = payload.grid
+      }
     } else if (operation.op === 'SECTION_DELETE') {
       next.definition.pages.forEach(page => { page.sections = page.sections.filter(section => section.id !== operation.targetId) })
     } else if (operation.op === 'BLOCK_DELETE') {
@@ -889,7 +933,7 @@ export function ReportEditorPage() {
   const [partialDecision, setPartialDecision] = useState<PartialDecision>('retain')
   const [actionError, setActionError] = useState('')
   const [toast, setToast] = useState('')
-  const [manifests, setManifests] = useState<ManifestIndex>(emptyManifestIndex)
+  const [manifests, setManifests] = useState<ManifestIndex>(designSnapshot ? indexManifests(reportEditorSnapshotManifests) : emptyManifestIndex)
   const [manualBusy, setManualBusy] = useState(false)
   const [manualError, setManualError] = useState('')
   const [componentLibraryOpen, setComponentLibraryOpen] = useState(false)
@@ -902,6 +946,7 @@ export function ReportEditorPage() {
   const [frameworkConfigError, setFrameworkConfigError] = useState('')
   const [frameworkCreating, setFrameworkCreating] = useState(false)
   const [subsectionBuilderSectionId, setSubsectionBuilderSectionId] = useState('')
+  const [slotPickerTarget, setSlotPickerTarget] = useState<SlotPickerTarget | null>(null)
   const [interactionBusy, setInteractionBusy] = useState(false)
   const [interactionError, setInteractionError] = useState('')
   const [dataBusy, setDataBusy] = useState(false)
@@ -1417,8 +1462,18 @@ export function ReportEditorPage() {
     })
     if (result.error) { setActionError(result.error); setComponentError(result.error); setComponentBusy(false); return }
     const saved = await commit(result.operations, `${manifest.displayName}已放入现有元素组`, setActionError)
-    if (saved) { setSelectedComponentId(result.componentId); setSidePanel('data'); setComponentLibraryOpen(false) }
+    if (saved) {
+      setSelectedComponentId(result.componentId); setSidePanel('data'); setComponentLibraryOpen(false); setSlotPickerTarget(null)
+    }
     setComponentBusy(false)
+  }
+
+  const pickComponentForExactSlot = (manifest: ComponentManifest, options?: Partial<ComponentOptions>) => {
+    if (!slotPickerTarget) return
+    void placeComponentInSlot(
+      slotPickerTarget.blockId, slotPickerTarget.zoneId, slotPickerTarget.slotId,
+      encodePalettePayload(manifest, options), manifest.displayName, currentDataContextId,
+    )
   }
 
   const pickComponentForSlot = (manifest: ComponentManifest, options?: Partial<ComponentOptions>, title = manifest.displayName, dataContextId = currentDataContextId) => {
@@ -1882,6 +1937,7 @@ export function ReportEditorPage() {
                   onSlotLayoutChange: (blockId, zoneId, slotId, rect) => void changeSlotLayout(blockId, zoneId, slotId, rect),
                   onZoneReorder: (blockId, zoneId, direction) => void reorderZone(blockId, zoneId, direction),
                   onComponentDrop: (blockId, zoneId, slotId, ref) => void placeComponentInSlot(blockId, zoneId, slotId, ref),
+                  onEmptySlotSelect: target => { setComponentError(''); setSlotPickerTarget(target) },
                   onBlockTitleChange: (sectionId, blockId, title) => void renameBlock(sectionId, blockId, title),
                   onDuplicateBlock: (_sectionId, blockId) => void duplicateBlock(blockId),
                   onDeleteBlock: (_sectionId, blockId) => void deleteBlock(blockId),
@@ -2029,6 +2085,9 @@ export function ReportEditorPage() {
       busy={componentBusy} error={componentError}
       onClose={() => setComponentLibraryOpen(false)}
       onAdd={(manifest, title, dataContextId) => pickComponentForSlot(manifest, undefined, title, dataContextId)} />}
+    {slotPickerTarget && <SlotComponentPicker key={slotPickerTarget.slotId} target={slotPickerTarget}
+      manifests={latestComponentManifests(manifests.list())} busy={componentBusy} error={componentError}
+      onClose={() => { if (!componentBusy) setSlotPickerTarget(null) }} onSelect={pickComponentForExactSlot} />}
     {deleteSectionOpen && activeSection && <div className="report-modal-backdrop" role="presentation" onMouseDown={() => setDeleteSectionOpen(false)}>
       <section className="report-modal report-delete-section-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-section-title" onMouseDown={event => event.stopPropagation()}>
         <header><div><span className="eyebrow">结构变更</span><h2 id="delete-section-title">删除“{activeSection.name}”</h2></div><button type="button" aria-label="关闭" onClick={() => setDeleteSectionOpen(false)}><X size={18} /></button></header>
