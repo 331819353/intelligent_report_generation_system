@@ -30,6 +30,9 @@ var reportPublishReviewSchema json.RawMessage
 //go:embed schemas/report-card-binding-v1.schema.json
 var reportCardBindingSchema json.RawMessage
 
+//go:embed schemas/report-section-summary-v1.schema.json
+var reportSectionSummarySchema json.RawMessage
+
 //go:embed schemas/report-blueprint-v1.schema.json
 var reportBlueprintSchema json.RawMessage
 
@@ -43,6 +46,7 @@ func init() {
 	reportOperationSchema = aiFacingSchema(reportOperationSchema)
 	reportPublishReviewSchema = aiFacingSchema(reportPublishReviewSchema)
 	reportCardBindingSchema = aiFacingSchema(reportCardBindingSchema)
+	reportSectionSummarySchema = aiFacingSchema(reportSectionSummarySchema)
 	reportBlueprintSchema = aiFacingSchema(reportBlueprintSchema)
 }
 
@@ -208,6 +212,37 @@ func (generator *OrchestratedGenerator) GenerateScopedOperations(ctx context.Con
 	return bundle, nil
 }
 
+// GenerateSectionSummary synthesizes one analysis-angle conclusion from the
+// complete bounded composition of its subsections. Configuration never becomes
+// observed performance: missing business facts stay missing.
+func (generator *OrchestratedGenerator) GenerateSectionSummary(ctx context.Context, request SectionSummaryRequest) (SectionSummaryContent, error) {
+	identity, err := invocationIdentity(ctx)
+	if err != nil || generator == nil || generator.AI == nil || request.SectionID.Validate() != nil || len(request.Subsections) == 0 {
+		return SectionSummaryContent{}, errors.New("report section summary generator is unavailable")
+	}
+	payload, err := json.Marshal(request)
+	if err != nil || len(payload) > 256<<10 {
+		return SectionSummaryContent{}, errors.New("report section summary request exceeds safe bounds")
+	}
+	result, err := generator.AI.Invoke(ctx, aiplatform.Invocation{
+		TenantID: string(identity.TenantID), ActorID: string(identity.ActorID),
+		Purpose: aiplatform.PurposeReportGeneration, PromptVersion: "report-section-summary-v1",
+		ResourceType: "REPORT", ResourceID: string(identity.ReportID),
+		Request: structuredRequest(
+			"Write one concise analysis-angle conclusion from every supplied subsection. Use only subsection titles, layouts, component roles, governed field labels, filters and existing narrative. Never claim a data value, trend, cause, comparison or business outcome that is not explicitly present in existing narrative. Explain coverage gaps as risks, keep the language of the supplied content, and return only the required structured fields.",
+			payload, "report_section_summary_v1", reportSectionSummarySchema,
+		),
+	})
+	if err != nil {
+		return SectionSummaryContent{}, err
+	}
+	var content SectionSummaryContent
+	if err := json.Unmarshal(result.ProviderResult.Content, &content); err != nil {
+		return SectionSummaryContent{}, fmt.Errorf("decode report section summary: %w", err)
+	}
+	return ValidateSectionSummaryContent(content)
+}
+
 func (generator *OrchestratedGenerator) ReviewPublication(ctx context.Context, request PublishReviewRequest) (PublishReview, error) {
 	identity, err := invocationIdentity(ctx)
 	if err != nil || generator == nil || generator.AI == nil {
@@ -307,5 +342,6 @@ func normalizedStrings(values []string) []string {
 var _ PlanGenerator = (*OrchestratedGenerator)(nil)
 var _ blueprint.Generator = (*OrchestratedGenerator)(nil)
 var _ ScopedEditGenerator = (*OrchestratedGenerator)(nil)
+var _ SectionSummaryGenerator = (*OrchestratedGenerator)(nil)
 var _ DataContextSelector = (*OrchestratedGenerator)(nil)
 var _ PublishReviewGenerator = (*OrchestratedGenerator)(nil)

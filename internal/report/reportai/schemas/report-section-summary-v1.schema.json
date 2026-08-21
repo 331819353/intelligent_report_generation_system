@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.internal/schemas/report-section-summary-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "findings", "risks", "actions"],
+  "properties": {
+    "summary": { "type": "string", "minLength": 1, "maxLength": 1200 },
+    "findings": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+    "risks": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+    "actions": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 500 } }
+  }
+}

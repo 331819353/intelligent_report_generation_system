@@ -69,6 +69,13 @@ export type AIPreview = {
 }
 
 export type AIPreviewResponse = { aiRunId: string; preview: AIPreview }
+export type AISectionSummaryResponse = {
+  aiRunId: string
+  baseRevision: number
+  content: { summary: string; findings: string[]; risks: string[]; actions: string[] }
+  richText: string
+  source: { sectionId: string; subsectionCount: number; componentCount: number }
+}
 export type PublicationIssue = { code: string; path?: string; message: string }
 export type PublicationGate = {
   id: 'SEMANTIC' | 'FRESHNESS' | 'PERMISSION' | 'EXECUTION' | 'RESPONSIVE' | 'FACT'
@@ -292,6 +299,11 @@ export const reportEditorAPI = {
       `/v1/reports/${encodeURIComponent(reportId)}/ai/card-binding`,
       { method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify(input) },
     )
+  },
+  generateSectionSummary(reportId: string, sectionId: string) {
+    return apiRequest<AISectionSummaryResponse>(`/v1/reports/${encodeURIComponent(reportId)}/ai/section-summary`, {
+      method: 'POST', headers: idempotencyHeaders(), body: JSON.stringify({ sectionId }),
+    })
   },
   applyOperations(reportId: string, bundle: EditorOperationBundle) {
     return apiRequest<DraftMutationResponse>(`/v1/reports/${encodeURIComponent(reportId)}/operations`, {

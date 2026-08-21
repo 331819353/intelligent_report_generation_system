@@ -115,6 +115,12 @@ const templateSlotPrefix = 'TEMPLATE_'
 const layoutFramePrefix = 'LAYOUT_'
 const frameSlotPrefix = 'FRAME_'
 
+export const angleInsightCardKind = 'LAYOUT_ANGLE_INSIGHT'
+
+export function angleInsightBlock(section: Section): Block | undefined {
+  return section.blocks.find(block => block.cardKind === angleInsightCardKind)
+}
+
 export type FrameSlotRole = 'CONCLUSION' | 'EVIDENCE' | 'DETAIL' | 'APPENDIX'
 
 export const frameSlotLabels: Record<FrameSlotRole, string> = {
@@ -1108,6 +1114,67 @@ export function createSectionOperations(page: Page, name: string, newId: () => s
     sectionId,
     operations: [{ op: 'SECTION_CREATE', targetId: page.id, payload: { section: { id: sectionId, name, order, blocks: [] } } }],
   }
+}
+
+/**
+ * 分析角度级智能结论位于角度标题与全部小节之间。它使用无数据绑定的富文本组件
+ * 承载服务端生成的汇总；生成依据由专用接口从该角度的全部小节配置构造，这里只
+ * 负责把已经返回的受控文本写入 Definition，并为既有小节整体让位。
+ */
+export function createAngleInsightOperations(input: {
+  definition: ReportDefinition
+  page: Page
+  sectionId: string
+  manifest: ComponentManifest
+  richText: string
+  newId: () => string
+}): { operations: EditorOperation[]; blockId: string; componentId: string; error?: string } {
+  const section = input.page.sections.find(item => item.id === input.sectionId)
+  if (!section) return { operations: [], blockId: '', componentId: '', error: '分析角度不存在' }
+  if (angleInsightBlock(section)) return { operations: [], blockId: '', componentId: '', error: '当前分析角度已经有智能结论' }
+  if (input.manifest.type !== 'rich-text' || !input.richText.trim()) {
+    return { operations: [], blockId: '', componentId: '', error: '智能结论内容无效' }
+  }
+  const columns = canvasOf(input.definition).desktop.columns
+  const componentId = input.newId()
+  const blockId = input.newId()
+  const zoneId = input.newId()
+  const slotId = input.newId()
+  const topY = section.blocks.length > 0 ? Math.min(...section.blocks.map(block => block.layout.desktop.y)) : 0
+  const blockRows = 3
+  const spacingRows = 0
+  const component: ReportComponent = {
+    id: componentId,
+    templateRef: { type: input.manifest.type, version: input.manifest.version },
+    options: { richText: input.richText.trim() },
+  }
+  const block: Block = {
+    id: blockId, type: 'CONTENT', title: '智能结论', cardKind: angleInsightCardKind,
+    layout: {
+      desktop: { x: 0, y: topY, w: columns, h: blockRows },
+      mobile: { order: 1, visible: true, heightMode: 'AUTO', slotMode: 'STACK' },
+    },
+    zones: [{
+      id: zoneId, order: 1, type: 'INSIGHT',
+      layout: zoneLayoutFor('INSIGHT', columns, 2),
+      slots: [{ id: slotId, grid: { x: 0, y: 0, w: columns, h: 2 }, componentId }],
+    }],
+  }
+  const operations: EditorOperation[] = section.blocks.map(existing => ({
+    op: 'BLOCK_MOVE', targetId: existing.id,
+    payload: { x: existing.layout.desktop.x, y: existing.layout.desktop.y + blockRows + spacingRows },
+  }))
+  operations.push(
+    { op: 'COMPONENT_CREATE', targetId: componentId, payload: { component } },
+    { op: 'BLOCK_CREATE', targetId: section.id, payload: { block } },
+  )
+  return { operations, blockId, componentId }
+}
+
+export function updateAngleInsightOperations(component: ReportComponent, richText: string): EditorOperation[] {
+  const next = richText.trim()
+  if (!next) return []
+  return [{ op: 'COMPONENT_UPDATE', targetId: component.id, payload: { options: { ...component.options, richText: next } } }]
 }
 
 export function renameSectionOperations(sectionId: string, name: string): EditorOperation[] {

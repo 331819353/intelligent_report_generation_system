@@ -21,7 +21,7 @@ import { InteractionPanel } from '../report/designer/InteractionPanel'
 import { EvidencePanel } from '../report/designer/EvidencePanel'
 import { DataContextPanel, DefinitionJSONDialog, FilterPanel } from '../report/designer/DataPanels'
 import {
-  CanvasQuickAdd, CanvasSubsectionComposer, type SubsectionComposerValue,
+  CanvasAngleInsightAdd, CanvasQuickAdd, CanvasSubsectionComposer, type SubsectionComposerValue,
 } from '../report/designer/CanvasFrameworkControls'
 import { SlotComponentPicker, type SlotPickerTarget } from '../report/designer/SlotComponentPicker'
 import { ComponentBindingEditor } from '../report/designer/ComponentBindingEditor'
@@ -37,10 +37,10 @@ import {
 } from '../report/render/schema'
 import {
   addDataContextOperations, bindingForField, bundle, createFilterOperations, createInteractionOperations,
-  createSectionOperations, createSubsectionFrameOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, layoutOperations,
+  angleInsightBlock, createAngleInsightOperations, createSectionOperations, createSubsectionFrameOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, layoutOperations,
   placeComponentInSlotOperations,
   removeBlockOperations, removeComponentOperations, removeDataContextOperations, renameSectionOperations,
-  renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations,
+  renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateAngleInsightOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations,
   decodePalettePayload, encodePalettePayload, zoneReorderOperations,
   type FilterDraft, type InteractionDraft,
 } from '../report/designer/operations'
@@ -109,7 +109,7 @@ const reportEditorSnapshotAsset: ReportAsset = {
   allowedActions: ['VIEW', 'EDIT', 'PUBLISH', 'AI_EDIT'],
 }
 
-const reportEditorSnapshotManifests: ComponentManifest[] = analysisCardCatalog.map(item => {
+const reportEditorSnapshotManifests: ComponentManifest[] = [...analysisCardCatalog.map<ComponentManifest>(item => {
   const conclusion = item.type === 'analysis-insight-conclusion'
   const roles = Array.from(new Set(item.bindingGroups.flatMap(group => group.roles)))
   return {
@@ -138,7 +138,15 @@ const reportEditorSnapshotManifests: ComponentManifest[] = analysisCardCatalog.m
     mobilePolicy: { supported: true, defaultLegendMode: 'HIDDEN', labelDegradation: 'ELLIPSIS' },
     supportedInteractions: [],
   }
-})
+}), {
+  type: 'rich-text', version: '1.0.0', renderer: 'TEXT', displayName: '富文本', category: 'CONTENT',
+  minSize: { w: 2, h: 1 }, recommendedSize: { w: 8, h: 3 },
+  dataContract: { dimensions: { min: 0, max: 0 }, measures: { min: 0, max: 0 }, timeField: { required: false }, roles: [] },
+  stackingRequiresAdditive: false,
+  optionSchema: { type: 'object', additionalProperties: false, required: ['richText'], properties: { richText: { type: 'string' } } },
+  defaultOptions: { richText: '' },
+  mobilePolicy: { supported: true, defaultLegendMode: 'HIDDEN', labelDegradation: 'ELLIPSIS' }, supportedInteractions: [],
+}]
 
 const optionLabels: Record<string, string> = {
   showLegend: '显示图例', showLabel: '显示数值标签', smooth: '平滑曲线', colorPaletteRef: '配色方案', nullPolicy: '空值处理',
@@ -193,6 +201,10 @@ function applySnapshotOperations(draft: ReportDraft, operations: EditorOperation
     } else if (operation.op === 'COMPONENT_CREATE') {
       const component = (operation.payload as { component?: ReportDefinition['components'][number] }).component
       if (component) next.definition.components.push(component)
+    } else if (operation.op === 'COMPONENT_UPDATE') {
+      const component = next.definition.components.find(item => item.id === operation.targetId)
+      const options = (operation.payload as { options?: ComponentOptions }).options
+      if (component && options) component.options = options
     } else if (operation.op === 'SLOT_UPDATE') {
       const slot = next.definition.pages.flatMap(page => page.sections).flatMap(section => section.blocks)
         .flatMap(block => block.zones).flatMap(zone => zone.slots).find(item => item.id === operation.targetId)
@@ -897,6 +909,7 @@ export function ReportEditorPage() {
   const [frameworkConfigBusy, setFrameworkConfigBusy] = useState(false)
   const [frameworkConfigError, setFrameworkConfigError] = useState('')
   const [frameworkCreating, setFrameworkCreating] = useState(false)
+  const [angleInsightBusySectionId, setAngleInsightBusySectionId] = useState('')
   const [subsectionBuilderSectionId, setSubsectionBuilderSectionId] = useState('')
   const [slotPickerTarget, setSlotPickerTarget] = useState<SlotPickerTarget | null>(null)
   const [interactionBusy, setInteractionBusy] = useState(false)
@@ -1040,6 +1053,8 @@ export function ReportEditorPage() {
     component.templateRef.type !== 'filter-control' &&
     manifests.get(component.templateRef.type, component.templateRef.version)?.renderer !== 'CONTROL') ?? [], [draft, manifests, pageComponentIds])
   const activeSection = sections.find(section => section.id === activeSectionId) ?? sections[0]
+  const busyAngleInsightSection = sections.find(section => section.id === angleInsightBusySectionId)
+  const regeneratingAngleInsightBlockId = busyAngleInsightSection ? angleInsightBlock(busyAngleInsightSection)?.id ?? '' : ''
   const selectedComponent = useMemo(
     () => contentComponents.find(component => component.id === selectedComponentId),
     [contentComponents, selectedComponentId],
@@ -1517,11 +1532,66 @@ export function ReportEditorPage() {
     setFrameworkCreating(false)
   }
 
+  const generateAngleInsightText = async (section: Section) => {
+    const subsections = subsectionBlocks(section)
+    if (designSnapshot) {
+      const componentCount = subsections.reduce((count, block) => count + block.zones.reduce((sum, zone) =>
+        sum + zone.slots.filter(slot => slot.componentId).length, 0), 0)
+      const titles = subsections.map(block => block.title || '未命名小节').join('、')
+      return `${section.name}当前由 ${subsections.length} 个分析小节共同构成，覆盖${titles || '待补充的小节内容'}。\n核心发现 1：已建立跨小节汇总结论位置，后续生成始终读取当前角度的完整组成信息。\n风险提示 1：当前共有 ${componentCount} 个已配置内容元素，空槽位不会被当作事实依据。\n建议动作 1：补齐各小节的结论与论据后重新生成，以获得更完整的角度级总结。`
+    }
+    const result = await reportEditorAPI.generateSectionSummary(reportId, section.id)
+    if (result.baseRevision !== draft?.revisionNo) throw new Error('生成期间草稿已更新，请重新生成智能结论')
+    return result.richText
+  }
+
+  const addAngleInsight = async (sectionId: string) => {
+    if (!draft || !page || !canEdit || !canAIEdit || angleInsightBusySectionId) return
+    const section = sections.find(item => item.id === sectionId)
+    const manifest = manifests.list().find(item => item.type === 'rich-text')
+    if (!section || !manifest) { setActionError('智能结论组件尚未注册，请刷新后重试'); return }
+    if (subsectionBlocks(section).length === 0) { setActionError('请先添加至少一个分析小节'); return }
+    setAngleInsightBusySectionId(sectionId); setActionError('')
+    try {
+      const richText = await generateAngleInsightText(section)
+      const result = createAngleInsightOperations({
+        definition: draft.definition, page, sectionId, manifest, richText, newId: () => crypto.randomUUID(),
+      })
+      if (result.error) { setActionError(result.error); return }
+      const saved = await commit(result.operations, '已基于全部小节生成智能结论', setActionError)
+      if (saved) {
+        setActiveSectionId(sectionId)
+        setSelectedComponentId('')
+        window.setTimeout(() => document.querySelector<HTMLElement>(`[data-block-id="${result.blockId}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 0)
+      }
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : '智能结论生成失败')
+    } finally { setAngleInsightBusySectionId('') }
+  }
+
+  const regenerateAngleInsight = async (sectionId: string, blockId: string) => {
+    if (!draft || !page || !canEdit || !canAIEdit || angleInsightBusySectionId) return
+    const section = sections.find(item => item.id === sectionId)
+    const block = section?.blocks.find(item => item.id === blockId)
+    const componentId = block?.zones.flatMap(zone => zone.slots).find(slot => slot.componentId)?.componentId
+    const component = componentId ? draft.definition.components.find(item => item.id === componentId) : undefined
+    if (!section || !block || !component) { setActionError('未找到智能结论，请刷新后重试'); return }
+    setAngleInsightBusySectionId(sectionId); setActionError('')
+    try {
+      const richText = await generateAngleInsightText(section)
+      const saved = await commit(updateAngleInsightOperations(component, richText), '智能结论已按全部小节重新生成', setActionError)
+      if (saved) setSelectedComponentId('')
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : '智能结论重新生成失败')
+    } finally { setAngleInsightBusySectionId('') }
+  }
+
   const renameBlock = async (sectionId: string, blockId: string, title: string) => {
     if (!draft || !page || !canEdit) return
     const block = page.sections.find(section => section.id === sectionId)?.blocks.find(item => item.id === blockId)
     if (!block) return
-    await commit(renameBlockOperations(block, title), '元素组标题已更新', setActionError)
+    const subsection = block.cardKind?.startsWith('LAYOUT_SUBSECTION_')
+    await commit(renameBlockOperations(block, title), subsection ? '小节名称已更新' : '元素组标题已更新', setActionError)
   }
 
   const renameSection = async (sectionId: string, name: string) => {
@@ -1857,6 +1927,15 @@ export function ReportEditorPage() {
                   onDuplicateBlock: (_sectionId, blockId) => void duplicateBlock(blockId),
                   onDeleteBlock: (_sectionId, blockId) => void deleteBlock(blockId),
                   onEditSection: section => openFrameworkConfig({ kind: 'ANGLE', sectionId: section.id, title: section.name }),
+                  renderSectionLead: section => {
+                    const count = subsectionBlocks(section).length
+                    return count > 0 && !angleInsightBlock(section)
+                      ? <CanvasAngleInsightAdd subsectionCount={count} busy={angleInsightBusySectionId === section.id}
+                          disabled={!canAIEdit || Boolean(angleInsightBusySectionId)} onClick={() => void addAngleInsight(section.id)} />
+                      : null
+                  },
+                  onRegenerateAngleInsight: (sectionId, blockId) => void regenerateAngleInsight(sectionId, blockId),
+                  regeneratingBlockId: regeneratingAngleInsightBlockId,
                   renderEmptySection: section => subsectionComposer(section, true),
                   renderSectionFooter: section => subsectionBuilderSectionId === section.id
                     ? subsectionComposer(section, false)

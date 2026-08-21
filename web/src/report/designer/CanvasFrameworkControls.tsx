@@ -1,4 +1,4 @@
-import { ChartBar, Check, Minus, Plus, X } from '@phosphor-icons/react'
+import { ChartBar, Check, Lightbulb, Minus, Plus, Sparkle, SpinnerGap, X } from '@phosphor-icons/react'
 import { useState } from 'react'
 
 import type { SubsectionLayout } from './operations.ts'
@@ -51,6 +51,20 @@ export function CanvasQuickAdd({ kind, disabled, onClick }: {
     <span><Plus size={18} weight="bold" /></span>
     <strong>{angle ? '添加分析对象' : '添加小节'}</strong>
     <small>{angle ? '创建新的分析角度并设置首个小节' : '继续补充结论、论据或明细'}</small>
+  </button>
+}
+
+export function CanvasAngleInsightAdd({ subsectionCount, disabled, busy, onClick }: {
+  subsectionCount: number
+  disabled?: boolean
+  busy?: boolean
+  onClick: () => void
+}) {
+  return <button type="button" className="report-angle-insight-add" disabled={disabled || busy}
+    onClick={event => { event.stopPropagation(); onClick() }}>
+    <span className="report-angle-insight-add-icon"><Lightbulb size={18} weight="duotone" /></span>
+    <span><strong>添加智能结论</strong><small>综合当前分析角度全部 {subsectionCount} 个小节的组成信息</small></span>
+    <em>{busy ? <><SpinnerGap className="is-spinning" size={15} />正在生成</> : <><Sparkle size={15} weight="fill" />智能生成</>}</em>
   </button>
 }
 

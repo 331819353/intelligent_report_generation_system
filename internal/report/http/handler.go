@@ -43,14 +43,17 @@ type AIOptions struct {
 	// field catalog of one dataset; optional — without it the editor keeps the
 	// deterministic role-based fill only.
 	BindingSuggester reportai.CardBindingSuggester
-	Reviewer         reportai.PublishReviewGenerator
-	Selector         reportai.DataContextSelector
-	Contexts         reportai.DataContextCatalog
-	Fields           reportai.FieldCatalog
-	Components       *template.Registry
-	Kinds            *cardkind.Registry
-	Methods          *insight.Registry
-	Runtime          runtime.QueryExecutor
+	// SectionSummarizer synthesizes an angle-level conclusion from the complete
+	// bounded composition of every subsection in that angle.
+	SectionSummarizer reportai.SectionSummaryGenerator
+	Reviewer          reportai.PublishReviewGenerator
+	Selector          reportai.DataContextSelector
+	Contexts          reportai.DataContextCatalog
+	Fields            reportai.FieldCatalog
+	Components        *template.Registry
+	Kinds             *cardkind.Registry
+	Methods           *insight.Registry
+	Runtime           runtime.QueryExecutor
 	// FilterOptions reads distinct field values through the governed dataset
 	// runtime. The handler resolves dataset/version identity from Contexts, so
 	// clients can only request fields visible in their current catalog.
@@ -124,6 +127,7 @@ func NewHandler(
 	mux.HandleFunc("POST /api/v1/reports/{id}/ai/plan", handler.aiPlan)
 	mux.HandleFunc("POST /api/v1/reports/{id}/ai/preview", handler.aiPreview)
 	mux.HandleFunc("POST /api/v1/reports/{id}/ai/card-binding", handler.aiCardBinding)
+	mux.HandleFunc("POST /api/v1/reports/{id}/ai/section-summary", handler.sectionSummary)
 	mux.HandleFunc("POST /api/v1/reports/{id}/undo", handler.undo)
 	mux.HandleFunc("POST /api/v1/reports/{id}/redo", handler.redo)
 	mux.HandleFunc("POST /api/v1/reports/{id}/publish", handler.publish)
@@ -1595,6 +1599,74 @@ func (handler *Handler) aiCardBinding(writer http.ResponseWriter, request *http.
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"aiRunId": run.ID, "suggestion": suggestion})
+}
+
+// sectionSummary returns a suggestion only. The editor persists it through the
+// ordinary USER operation channel together with the angle-level summary block,
+// so revision conflicts, undo and collaboration behave like every other edit.
+func (handler *Handler) sectionSummary(writer http.ResponseWriter, request *http.Request) {
+	identity, reportID, ok := handler.subject(writer, request)
+	if !ok {
+		return
+	}
+	if handler == nil || handler.repository == nil || handler.aiAudit == nil || handler.ai.SectionSummarizer == nil {
+		writeError(writer, http.StatusServiceUnavailable, "REPORT_AI_UNAVAILABLE", "report section summary generation is unavailable")
+		return
+	}
+	var body struct {
+		SectionID askdata.ID `json:"sectionId"`
+	}
+	if decodeJSON(request, &body) != nil || body.SectionID.Validate() != nil {
+		writeError(writer, http.StatusBadRequest, "REPORT_AI_REQUEST_INVALID", "report section summary request is invalid")
+		return
+	}
+	draft, err := handler.repository.GetDraft(request.Context(), identity, reportID)
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	summaryRequest, err := reportai.BuildSectionSummaryRequest(draft.Definition, body.SectionID)
+	if err != nil {
+		writeError(writer, http.StatusUnprocessableEntity, "REPORT_AI_SECTION_EMPTY", err.Error())
+		return
+	}
+	selection := []string{string(body.SectionID)}
+	for _, subsection := range summaryRequest.Subsections {
+		selection = append(selection, string(subsection.ID))
+	}
+	scopeJSON, _ := json.Marshal(map[string]any{"sectionId": body.SectionID})
+	run, err := handler.aiAudit.StartRun(request.Context(), identity, reportai.StartRunInput{
+		ReportID: reportID, Kind: reportai.RunInsight, PromptVersion: "report-section-summary-v1",
+		ModelPolicy: "governed-default", Summary: reportai.RequestSummary{
+			Intent: "综合当前分析角度全部小节生成智能结论", SelectionIDs: selection,
+		}, BaseRevision: &draft.RevisionNo, Scope: scopeJSON,
+	})
+	if err != nil {
+		writeReportError(writer, err)
+		return
+	}
+	ctx := reportai.WithInvocationIdentity(request.Context(), reportai.InvocationIdentity{
+		TenantID: identity.TenantID, ActorID: identity.ActorID, ReportID: reportID,
+	})
+	content, err := handler.ai.SectionSummarizer.GenerateSectionSummary(ctx, summaryRequest)
+	if err != nil {
+		handler.finishAIError(writer, request.Context(), identity, run.ID, reportai.RunFailed, "REPORT_AI_GENERATION_FAILED")
+		return
+	}
+	componentCount := 0
+	for _, subsection := range summaryRequest.Subsections {
+		componentCount += len(subsection.Components)
+	}
+	if err := handler.aiAudit.FinishRun(request.Context(), identity, run.ID, reportai.RunSucceeded, map[string]any{
+		"sectionId": body.SectionID, "subsectionCount": len(summaryRequest.Subsections), "componentCount": componentCount,
+	}, ""); err != nil {
+		writeError(writer, http.StatusInternalServerError, "REPORT_AI_AUDIT_FAILED", "report AI audit failed")
+		return
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{
+		"aiRunId": run.ID, "baseRevision": draft.RevisionNo, "content": content, "richText": content.RichText(),
+		"source": map[string]any{"sectionId": body.SectionID, "subsectionCount": len(summaryRequest.Subsections), "componentCount": componentCount},
+	})
 }
 
 func (handler *Handler) reportAIReady(scoped bool) bool {

@@ -2,9 +2,9 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  addToCardOperations, createLayoutFrameOperations, createSectionOperations, createStructuredBlockOperations, createSubsectionFrameOperations, decodePalettePayload, encodePalettePayload,
+  addToCardOperations, angleInsightBlock, createAngleInsightOperations, createLayoutFrameOperations, createSectionOperations, createStructuredBlockOperations, createSubsectionFrameOperations, decodePalettePayload, encodePalettePayload,
   frameSlotRole,
-  findCompatibleTemplateSlot, placeComponentInSlotOperations, removeComponentOperations, renameBlockOperations, renameSectionOperations,
+  findCompatibleTemplateSlot, placeComponentInSlotOperations, removeComponentOperations, renameBlockOperations, renameSectionOperations, updateAngleInsightOperations,
 } from './operations.ts'
 import type { Block, Page, ReportDefinition, ZoneType } from '../render/schema.ts'
 import type { ComponentManifest } from '../render/manifests.ts'
@@ -228,6 +228,40 @@ test('canvas quick add creates an angle before placing its first subsection at p
   assert.equal(block.title, '小节 1')
   assert.equal(block.layout.desktop.y, 0)
   assert.equal(block.layout.mobile.order, 1)
+})
+
+test('an angle insight is inserted before every subsection and carries one data-free summary component', () => {
+  const first = card('subsection-1', [zone('subsection-zone-1', 'CONTENT', ['chart-1'])])
+  first.cardKind = 'LAYOUT_SUBSECTION_CONCLUSION_TOP'
+  first.layout.desktop = { x: 0, y: 0, w: 24, h: 8 }
+  const second = card('subsection-2', [zone('subsection-zone-2', 'CONTENT', ['chart-2'])])
+  second.cardKind = 'LAYOUT_SUBSECTION_CONCLUSION_LEFT'
+  second.layout.desktop = { x: 0, y: 9, w: 24, h: 8 }
+  const richTextManifest: ComponentManifest = {
+    ...manifest, type: 'rich-text', renderer: 'TEXT', displayName: '富文本',
+    minSize: { w: 2, h: 1 }, recommendedSize: { w: 8, h: 3 },
+    dataContract: { dimensions: { min: 0, max: 0 }, measures: { min: 0, max: 0 }, roles: [] },
+    defaultOptions: { richText: '' },
+  }
+  const page = pageWith([first, second])
+  const result = createAngleInsightOperations({
+    definition: { canvas: { desktop: { columns: 24 } } } as ReportDefinition,
+    page, sectionId: 'section-1', manifest: richTextManifest, richText: '综合两个小节形成结论。', newId,
+  })
+
+  assert.equal(result.error, undefined)
+  assert.deepEqual(result.operations.map(item => item.op), ['BLOCK_MOVE', 'BLOCK_MOVE', 'COMPONENT_CREATE', 'BLOCK_CREATE'])
+  assert.deepEqual(result.operations.slice(0, 2).map(item => item.payload), [{ x: 0, y: 3 }, { x: 0, y: 12 }])
+  const block = (result.operations.at(-1)?.payload as { block: Block }).block
+  assert.equal(block.cardKind, 'LAYOUT_ANGLE_INSIGHT')
+  assert.equal(block.zones[0].slots[0].componentId, result.componentId)
+  const createdComponent = (result.operations.at(-2)?.payload as { component: ReportDefinition['components'][number] }).component
+  assert.equal(createdComponent.dataBinding, undefined)
+  assert.deepEqual(createdComponent.options, { richText: '综合两个小节形成结论。' })
+  assert.equal(angleInsightBlock({ id: 'section-1', name: '角度', order: 1, blocks: [block] })?.id, block.id)
+  assert.deepEqual(updateAngleInsightOperations(createdComponent, '重新生成的结论。'), [{
+    op: 'COMPONENT_UPDATE', targetId: result.componentId, payload: { options: { richText: '重新生成的结论。' } },
+  }])
 })
 
 test('a left-conclusion subsection adapts two or four charts on the right', () => {

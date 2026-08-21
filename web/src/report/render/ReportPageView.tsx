@@ -1,5 +1,5 @@
-import { type CSSProperties, type ReactNode, useRef } from 'react'
-import { ChartLineUp, Copy, Lightbulb, PencilSimple, Table, Trash } from '@phosphor-icons/react'
+import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from 'react'
+import { ArrowClockwise, ChartLineUp, Copy, Lightbulb, PencilSimple, Table, Trash } from '@phosphor-icons/react'
 import { ReportBlockBoundary, ReportComponentBoundary, ComponentStateView } from '../runtime/ComponentStateView.tsx'
 import { useMobileViewport } from './use-mobile-viewport.ts'
 import { BlockHandles, SlotHandles } from './BlockInteraction.tsx'
@@ -7,7 +7,7 @@ import { useBlockInteraction, type DragMode } from './use-block-interaction.ts'
 import { useGridInteraction, zoneGridCellSize } from './use-grid-interaction.ts'
 import { ComponentView, type ComponentResult } from './ComponentView.tsx'
 import { minimumSize, type ManifestIndex } from './manifests.ts'
-import { frameSlotLabels, frameSlotRole } from '../designer/operations.ts'
+import { angleInsightCardKind, frameSlotLabels, frameSlotRole } from '../designer/operations.ts'
 import {
   blockComponentIDs, canvasOf, orderedSections,
   type Block, type Canvas, type GlobalFilter, type GridRect, type Page, type ReportComponent, type ReportDefinition, type Section, type Zone,
@@ -56,9 +56,44 @@ export type EditingHandlers = {
   onDeleteBlock?(sectionId: string, blockId: string): void
   /** 分析角度标题与配置入口。 */
   onEditSection?(section: Section): void
+  /** 分析角度标题下方、首个小节之前的智能结论入口。 */
+  renderSectionLead?(section: Section): ReactNode
+  /** 已有角度级智能结论可基于全部小节重新生成。 */
+  onRegenerateAngleInsight?(sectionId: string, blockId: string): void
+  regeneratingBlockId?: string
   /** 编辑器可在空分析角度与现有小节末尾注入画布内的框架创建控件。 */
   renderEmptySection?(section: Section): ReactNode
   renderSectionFooter?(section: Section): ReactNode
+}
+
+function EditableBlockTitle({ sectionId, block, onChange }: {
+  sectionId: string
+  block: Block
+  onChange: NonNullable<EditingHandlers['onBlockTitleChange']>
+}) {
+  const title = block.title || '未命名小节'
+  const titleLabel = block.cardKind === angleInsightCardKind ? '智能结论名称'
+    : block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? '小节名称' : '元素组标题'
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(title)
+  useEffect(() => { if (!editing) setValue(title) }, [editing, title])
+  const finish = (save: boolean) => {
+    const next = value.trim()
+    setEditing(false)
+    if (save && next && next !== title) onChange(sectionId, block.id, next)
+    else setValue(title)
+  }
+  if (editing) return <input autoFocus value={value} maxLength={200} aria-label={titleLabel}
+    onClick={event => event.stopPropagation()} onChange={event => setValue(event.target.value)}
+    onBlur={() => finish(true)} onKeyDown={event => {
+      if (event.key === 'Enter') (event.target as HTMLInputElement).blur()
+      if (event.key === 'Escape') finish(false)
+    }} />
+  return <div className="report-render-block-title-row">
+    <h3>{title}</h3>
+    <button type="button" className="report-render-block-title-edit" aria-label={`编辑${titleLabel} ${title}`}
+      title="编辑名称" onClick={event => { event.stopPropagation(); setEditing(true) }}><PencilSimple size={13} />编辑</button>
+  </div>
 }
 
 export type ReportPageViewProps = {
@@ -339,6 +374,14 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
     ? Math.min(...Array.from(renderedRects.values(), rect => rect.y))
     : 0
 
+  // DOM、键盘焦点和视觉栅格保持同一阅读顺序。智能结论虽然通过操作追加到
+  // Definition，但其 y 坐标位于首个小节之前，因此这里按最终布局排序渲染。
+  const orderedBlocks = [...section.blocks].sort((left, right) => {
+    const leftRect = renderedRects.get(left.id) ?? left.layout.desktop
+    const rightRect = renderedRects.get(right.id) ?? right.layout.desktop
+    return leftRect.y - rightRect.y || leftRect.x - rightRect.x || left.id.localeCompare(right.id)
+  })
+
   const interaction = useBlockInteraction({
     metrics: {
       columns: canvas.desktop.columns, gapX: canvas.desktop.gapX,
@@ -359,7 +402,7 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
     columnGap: `${canvas.desktop.gapX}px`,
     rowGap: `${canvas.desktop.gapY}px`,
   }}>
-    {section.blocks.map(block => {
+    {orderedBlocks.map(block => {
       const baseRect = renderedRects.get(block.id) ?? block.layout.desktop
       const rect = interaction.rectFor(block.id, baseRect)
       const dragging = interaction.drag?.blockId === block.id
@@ -373,20 +416,17 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
             gridColumn: singleBlock ? '1 / -1' : `${rect.x + 1} / span ${Math.max(rect.w, 1)}`,
             gridRow: `${rect.y - originY + 1} / span ${Math.max(rect.h, 1)}`,
           }}
-          onClick={editing && onSelectComponent && componentIds[0]
+          onClick={editing && onSelectComponent && componentIds[0] && block.cardKind !== angleInsightCardKind
             ? event => { event.stopPropagation(); onSelectComponent(componentIds[0], block.id) }
             : undefined}>
           {editing && block.cardKind && !block.cardKind.startsWith('TEMPLATE_') && <span className="report-block-kind-badge">{block.cardKind}</span>}
           {block.title && <header className="report-render-block-head">
             {editing?.onBlockTitleChange
-              ? <input key={block.title} defaultValue={block.title} maxLength={200} aria-label="元素组标题"
-                onClick={event => event.stopPropagation()}
-                onKeyDown={event => {
-                  if (event.key === 'Enter') (event.target as HTMLInputElement).blur()
-                  if (event.key === 'Escape') { (event.target as HTMLInputElement).value = block.title ?? ''; (event.target as HTMLInputElement).blur() }
-                }}
-                onBlur={event => editing.onBlockTitleChange?.(section.id, block.id, event.target.value)} />
+              ? <EditableBlockTitle sectionId={section.id} block={block} onChange={editing.onBlockTitleChange} />
               : <h3>{block.title}</h3>}
+            {block.cardKind === angleInsightCardKind && <small className="report-angle-insight-source">
+              综合本分析角度全部 {section.blocks.filter(item => item.cardKind?.startsWith('LAYOUT_SUBSECTION_')).length} 个小节内容
+            </small>}
             {section.question && <p>{section.question}</p>}
           </header>}
           {content(block)}
@@ -394,10 +434,19 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
             minimum={minSizeFor(block.id)}
             onStart={(event, mode) => interaction.start(event, block.id, baseRect, mode)}
             onNudge={(next, mode) => editing.onLayoutChange(section.id, block.id, next, mode)} />}
-          {editing && (editing.onDuplicateBlock || editing.onDeleteBlock) && <div className={`report-block-toolbar ${block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? 'is-subsection-toolbar' : ''}`.trim()} role="toolbar" aria-label={block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? '分析小节操作' : '画布元素操作'}>
-            {editing.onDuplicateBlock && <button type="button" title="复制元素" aria-label="复制元素"
+          {editing && (editing.onDuplicateBlock || editing.onDeleteBlock) && <div className={`report-block-toolbar ${block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? 'is-subsection-toolbar' : ''}`.trim()} role="toolbar"
+            aria-label={block.cardKind === angleInsightCardKind ? '智能结论操作' : block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? '分析小节操作' : '画布元素操作'}>
+            {block.cardKind === angleInsightCardKind && editing.onRegenerateAngleInsight && <button type="button"
+              className="report-angle-insight-regenerate" title="基于全部小节重新生成" aria-label="重新生成智能结论"
+              disabled={editing.regeneratingBlockId === block.id}
+              onClick={event => { event.stopPropagation(); editing.onRegenerateAngleInsight?.(section.id, block.id) }}>
+              <ArrowClockwise className={editing.regeneratingBlockId === block.id ? 'is-spinning' : ''} size={14} />
+            </button>}
+            {editing.onDuplicateBlock && block.cardKind !== angleInsightCardKind && <button type="button" title="复制元素" aria-label="复制元素"
               onClick={event => { event.stopPropagation(); editing.onDuplicateBlock?.(section.id, block.id) }}><Copy size={14} /></button>}
-            {editing.onDeleteBlock && <button type="button" className="is-danger" title={block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? '删除小节' : '删除元素'} aria-label={block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? `删除小节 ${block.title || ''}` : '删除元素'}
+            {editing.onDeleteBlock && <button type="button" className="is-danger"
+              title={block.cardKind === angleInsightCardKind ? '删除智能结论' : block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? '删除小节' : '删除元素'}
+              aria-label={block.cardKind === angleInsightCardKind ? '删除智能结论' : block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? `删除小节 ${block.title || ''}` : '删除元素'}
               onClick={event => { event.stopPropagation(); editing.onDeleteBlock?.(section.id, block.id) }}><Trash size={14} /></button>}
           </div>}
         </div>
@@ -426,6 +475,7 @@ function DesktopPage(props: ReportPageViewProps) {
           </div>
           {section.question && <p>{section.question}</p>}
         </header>}
+        {editing?.renderSectionLead?.(section)}
         {section.blocks.length === 0 && editing?.renderEmptySection
           ? editing.renderEmptySection(section)
           : <SectionGrid section={section} canvas={canvas} editing={editing} manifests={manifests} components={components}

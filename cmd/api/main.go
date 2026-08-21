@@ -638,9 +638,10 @@ func main() {
 		reportAssetService,
 		reporthttp.AIOptions{
 			PlanGenerator: reportAIGenerator, BlueprintGenerator: reportAIGenerator, EditGenerator: reportAIGenerator,
-			BindingSuggester: reportAIGenerator,
-			Reviewer:         reportAIGenerator,
-			Selector:         reportAIGenerator, Contexts: reportai.NewPostgresFieldCatalog(pool),
+			BindingSuggester:  reportAIGenerator,
+			SectionSummarizer: reportAIGenerator,
+			Reviewer:          reportAIGenerator,
+			Selector:          reportAIGenerator, Contexts: reportai.NewPostgresFieldCatalog(pool),
 			Fields: reportai.NewPostgresFieldCatalog(pool), Components: reportComponentRegistry, Kinds: reportCardKindRegistry,
 			Methods: reportInsightRegistry, Runtime: reportRuntime, FilterOptions: reportDatasetRunner, Measures: queryService,
 			Narrative: reportNarrativeService, Upgrade: reportUpgradeService,
