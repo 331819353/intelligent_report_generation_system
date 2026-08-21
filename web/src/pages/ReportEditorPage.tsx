@@ -201,6 +201,22 @@ function applySnapshotOperations(draft: ReportDraft, operations: EditorOperation
         if (Object.prototype.hasOwnProperty.call(payload, 'componentId')) slot.componentId = payload.componentId || undefined
         if (payload.grid) slot.grid = payload.grid
       }
+    } else if (operation.op === 'ZONE_UPDATE') {
+      const zone = next.definition.pages.flatMap(page => page.sections).flatMap(section => section.blocks)
+        .flatMap(block => block.zones).find(item => item.id === operation.targetId)
+      const payload = operation.payload as {
+        type?: Block['zones'][number]['type']
+        layout?: Block['zones'][number]['layout']
+      }
+      if (zone) {
+        if (payload.type) zone.type = payload.type
+        if (payload.layout) zone.layout = payload.layout
+      }
+    } else if (operation.op === 'BLOCK_RESIZE' || operation.op === 'BLOCK_MOVE') {
+      const block = next.definition.pages.flatMap(page => page.sections).flatMap(section => section.blocks)
+        .find(item => item.id === operation.targetId)
+      const payload = operation.payload as Partial<GridRect>
+      if (block) block.layout.desktop = { ...block.layout.desktop, ...payload }
     } else if (operation.op === 'COMPONENT_DELETE') {
       next.definition.components = next.definition.components.filter(component => component.id !== operation.targetId)
     } else if (operation.op === 'SECTION_DELETE') {

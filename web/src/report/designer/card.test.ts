@@ -150,11 +150,63 @@ test('a top-conclusion subsection creates a full-width conclusion and a configur
   assert.deepEqual(block.zones[0].slots.map(slot => frameSlotRole(slot.cardKind)), [
     'CONCLUSION', 'EVIDENCE', 'EVIDENCE', 'EVIDENCE', 'EVIDENCE',
   ])
-  assert.deepEqual(block.zones[0].slots[0].grid, { x: 0, y: 0, w: 24, h: 3 })
+  assert.deepEqual(block.zones[0].slots[0].grid, { x: 0, y: 0, w: 24, h: 7 })
   assert.deepEqual(block.zones[0].slots.slice(1).map(slot => slot.grid), [
-    { x: 0, y: 3, w: 6, h: 4 }, { x: 6, y: 3, w: 6, h: 4 },
-    { x: 12, y: 3, w: 6, h: 4 }, { x: 18, y: 3, w: 6, h: 4 },
+    { x: 0, y: 7, w: 6, h: 4 }, { x: 6, y: 7, w: 6, h: 4 },
+    { x: 12, y: 7, w: 6, h: 4 }, { x: 18, y: 7, w: 6, h: 4 },
   ])
+})
+
+test('long-form conclusions fit new subsection slots without asking the author to resize', () => {
+  const definition = { canvas: { desktop: { columns: 24 } } } as ReportDefinition
+  const result = createSubsectionFrameOperations({
+    definition, page: pageWith([]), sectionId: 'section-1', layout: 'CONCLUSION_TOP', chartCount: 2,
+    includeDetail: false, includeAppendix: false, sectionName: '分析角度 1', newId,
+  })
+  const block = (result.operations[0].payload as { block: Block }).block
+  const conclusionSlot = block.zones[0].slots[0]
+  const longFormManifest: ComponentManifest = {
+    ...manifest, type: 'analysis-long-form-conclusion', renderer: 'REACT',
+    minSize: { w: 12, h: 7 }, recommendedSize: { w: 24, h: 10 },
+  }
+  const placement = placeComponentInSlotOperations({
+    page: pageWith([block]), blockId: block.id, zoneId: block.zones[0].id, slotId: conclusionSlot.id,
+    manifest: longFormManifest, title: '长文本结论', dataContextId: 'ctx', fields: [], newId,
+  })
+  assert.equal(placement.error, undefined)
+  assert.deepEqual(placement.operations.map(item => item.op), ['COMPONENT_CREATE', 'SLOT_UPDATE'])
+})
+
+test('placing a long-form conclusion upgrades compact subsection slots from older reports', () => {
+  const definition = { canvas: { desktop: { columns: 24 } } } as ReportDefinition
+  const result = createSubsectionFrameOperations({
+    definition, page: pageWith([]), sectionId: 'section-1', layout: 'CONCLUSION_TOP', chartCount: 2,
+    includeDetail: false, includeAppendix: false, sectionName: '分析角度 1', newId,
+  })
+  const block = (result.operations[0].payload as { block: Block }).block
+  const mainZone = block.zones[0]
+  const conclusionSlot = mainZone.slots[0]
+  conclusionSlot.grid.h = 3
+  for (const evidenceSlot of mainZone.slots.slice(1)) evidenceSlot.grid.y -= 4
+  mainZone.layout.rows -= 4
+  block.layout.desktop.h -= 4
+
+  const longFormManifest: ComponentManifest = {
+    ...manifest, type: 'analysis-long-form-conclusion', renderer: 'REACT',
+    minSize: { w: 12, h: 7 }, recommendedSize: { w: 24, h: 10 },
+  }
+  const placement = placeComponentInSlotOperations({
+    page: pageWith([block]), blockId: block.id, zoneId: mainZone.id, slotId: conclusionSlot.id,
+    manifest: longFormManifest, title: '长文本结论', dataContextId: 'ctx', fields: [], newId,
+  })
+
+  assert.equal(placement.error, undefined)
+  assert.equal((placement.operations.find(item => item.op === 'ZONE_UPDATE')?.payload as { layout: { rows: number } }).layout.rows, 11)
+  assert.equal((placement.operations.find(item => item.op === 'BLOCK_RESIZE')?.payload as { h: number }).h, 14)
+  const slotUpdates = placement.operations.filter(item => item.op === 'SLOT_UPDATE')
+  assert.deepEqual(slotUpdates.slice(0, 2).map(item => (item.payload as { grid: { y: number } }).grid.y), [7, 7])
+  assert.deepEqual((slotUpdates.at(-1)?.payload as { grid: { x: number; y: number; w: number; h: number } }).grid,
+    { x: 0, y: 0, w: 24, h: 7 })
 })
 
 test('canvas quick add creates an angle before placing its first subsection at position one', () => {

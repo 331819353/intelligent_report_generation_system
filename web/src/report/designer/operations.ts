@@ -152,6 +152,10 @@ export type LayoutFrameKind = 'TOPIC' | 'COLUMNS_2' | 'COLUMNS_3' | 'CONCLUSION'
 
 export type SubsectionLayout = 'CONCLUSION_TOP' | 'CONCLUSION_LEFT'
 
+// 第 37 类长文本结论的三个版式都需要 7 行才能完整呈现正文和证据指标。
+// 小节框架直接遵守这一合同，作者不需要先手工放大空槽位。
+const subsectionConclusionRows = 7
+
 export const subsectionLayoutLabels: Record<SubsectionLayout, string> = {
   CONCLUSION_TOP: '结论上置',
   CONCLUSION_LEFT: '结论左置',
@@ -249,15 +253,47 @@ export function placeComponentInSlotOperations(input: PlaceComponentInSlotInput)
     return { operations: [], componentId: '', error: `${input.manifest.displayName}不能放入${role ? frameSlotLabels[role] : zoneKindLabels[zone.type]}` }
   }
   const minimum = minimumSize(input.manifest)
-  if (slot.grid.w < minimum.w || slot.grid.h < minimum.h) {
+  const frameRole = frameSlotRole(slot.cardKind)
+  const expandableConclusion = frameRole === 'CONCLUSION'
+    && located.block.cardKind?.startsWith(`${layoutFramePrefix}SUBSECTION_`)
+    && slot.grid.w >= minimum.w
+    && slot.grid.h < minimum.h
+  if (slot.grid.w < minimum.w || (slot.grid.h < minimum.h && !expandableConclusion)) {
     return { operations: [], componentId: '', error: `槽位至少需要 ${minimum.w}×${minimum.h}` }
   }
   const componentId = input.newId()
   const component = buildComponent(componentId, input.manifest, input.title, input.dataContextId, input.fields, input.initialOptions)
-  const operations: EditorOperation[] = [
-    { op: 'COMPONENT_CREATE', targetId: componentId, payload: { component } },
-    { op: 'SLOT_UPDATE', targetId: slot.id, payload: { grid: slot.grid, componentId } },
-  ]
+  const operations: EditorOperation[] = [{ op: 'COMPONENT_CREATE', targetId: componentId, payload: { component } }]
+  let targetGrid = slot.grid
+  if (expandableConclusion) {
+    const addedRows = minimum.h - slot.grid.h
+    targetGrid = { ...slot.grid, h: minimum.h }
+    let requiredRows = Math.max(zone.layout.rows, targetGrid.y + targetGrid.h)
+    if (located.block.cardKind === `${layoutFramePrefix}SUBSECTION_CONCLUSION_TOP`) {
+      const oldConclusionBottom = slot.grid.y + slot.grid.h
+      for (const sibling of zone.slots.filter(item => item.id !== slot.id && item.grid.y >= oldConclusionBottom)) {
+        operations.push({
+          op: 'SLOT_UPDATE', targetId: sibling.id,
+          payload: { grid: { ...sibling.grid, y: sibling.grid.y + addedRows }, componentId: sibling.componentId ?? '' },
+        })
+      }
+      requiredRows = zone.layout.rows + addedRows
+    }
+    const zoneGrowth = requiredRows - zone.layout.rows
+    if (zoneGrowth > 0) {
+      operations.unshift({
+        op: 'ZONE_UPDATE', targetId: zone.id,
+        payload: { type: zone.type, layout: { ...zone.layout, rows: requiredRows } },
+      })
+      operations.push(...layoutOperations(
+        located.section, located.block.id,
+        { ...located.block.layout.desktop, h: located.block.layout.desktop.h + zoneGrowth },
+        24,
+        { w: located.block.layout.desktop.w, h: located.block.layout.desktop.h + zoneGrowth },
+      ))
+    }
+  }
+  operations.push({ op: 'SLOT_UPDATE', targetId: slot.id, payload: { grid: targetGrid, componentId } })
   if (slot.cardKind?.startsWith(templateSlotPrefix) && located.block.layout.desktop.h < minimum.h) {
     operations.push(...layoutOperations(
       located.section, located.block.id,
@@ -374,14 +410,14 @@ function subsectionMainZone(
   let rows: number
   const conclusion = {
     id: newId(),
-    grid: { x: 0, y: 0, w: columns, h: 3 },
+    grid: { x: 0, y: 0, w: columns, h: subsectionConclusionRows },
     cardKind: `${frameSlotPrefix}CONCLUSION`,
   }
 
   if (layout === 'CONCLUSION_TOP') {
     const perRow = Math.min(count, 4)
     const rowCount = Math.ceil(count / perRow)
-    rows = 3 + rowCount * 4
+    rows = subsectionConclusionRows + rowCount * 4
     for (let index = 0; index < count; index += 1) {
       const row = Math.floor(index / perRow)
       const column = index % perRow
@@ -390,7 +426,7 @@ function subsectionMainZone(
       evidenceSlots.push({
         id: newId(), cardKind: `${frameSlotPrefix}EVIDENCE`,
         grid: {
-          x: column * width, y: 3 + row * 4,
+          x: column * width, y: subsectionConclusionRows + row * 4,
           w: column === itemsInRow - 1 ? columns - column * width : width, h: 4,
         },
       })
@@ -398,7 +434,7 @@ function subsectionMainZone(
   } else {
     const evidenceColumns = Math.min(count, 2)
     const rowCount = Math.ceil(count / evidenceColumns)
-    rows = Math.max(rowCount * 4, 4)
+    rows = Math.max(rowCount * 4, subsectionConclusionRows)
     conclusion.grid = { x: 0, y: 0, w: Math.floor(columns / 2), h: rows }
     const rightStart = conclusion.grid.w
     const rightWidth = columns - rightStart
