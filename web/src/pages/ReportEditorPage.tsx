@@ -29,8 +29,9 @@ import { MetricStatusConfiguration } from '../report/designer/MetricStatusConfig
 import { AngleInsightConfigPanel } from '../report/designer/AngleInsightConfigPanel'
 import { effectiveAngleInsightConfig } from '../report/designer/angle-insight-config'
 import { SubsectionInsightConfigPanel } from '../report/designer/SubsectionInsightConfigPanel'
-import { subsectionInsightCandidates } from '../report/designer/subsection-insight-config'
+import { effectiveSubsectionInsightConfig, subsectionInsightCandidates } from '../report/designer/subsection-insight-config'
 import { defaultFactDataContextId } from '../report/designer/default-data-context'
+import { sectionChartsReady, smartInsightIsPending, subsectionChartsReady } from '../report/designer/smart-insight-readiness'
 import { analysisCardCatalog } from '../report/analysis/catalog'
 import {
   editorBindingGroups, editorBindingsValid, emptyManifestIndex, indexManifests, latestComponentManifests, listComponentManifests, minimumSize,
@@ -1203,16 +1204,16 @@ export function ReportEditorPage() {
   }, [draft?.revisionNo, editorView, execution?.asOf, displayedGlobalFilters.length])
 
   /** 所有画布写操作的唯一出口：提交受控 Operation 并换回服务端归一化后的草稿。 */
-  const commit = async (operations: EditorOperation[], message: string, onError: (text: string) => void) => {
-    if (!draft || operations.length === 0) return null
+  const commitForDraft = async (baseDraft: ReportDraft, operations: EditorOperation[], message: string, onError: (text: string) => void) => {
+    if (operations.length === 0) return null
     if (designSnapshot) {
-      const saved = applySnapshotOperations(draft, operations)
+      const saved = applySnapshotOperations(baseDraft, operations)
       setDraft(saved)
       if (message) notify(message)
       return saved
     }
     try {
-      const saved = await reportEditorAPI.applyOperations(reportId, bundle(reportId, draft.revisionNo, operations))
+      const saved = await reportEditorAPI.applyOperations(reportId, bundle(reportId, baseDraft.revisionNo, operations))
       setDraft(saved.draft)
       if (message) notify(message)
       return saved.draft
@@ -1227,6 +1228,8 @@ export function ReportEditorPage() {
       return null
     }
   }
+  const commit = async (operations: EditorOperation[], message: string, onError: (text: string) => void) =>
+    draft ? commitForDraft(draft, operations, message, onError) : null
 
   const reloadDraft = async () => {
     setActionError('')
@@ -1334,7 +1337,10 @@ export function ReportEditorPage() {
       ...(result.replaceWith ? replaceComponentOperations(selectedComponent, result.replaceWith) : []),
       ...updateComponentOperations(selectedComponent, result.options, result.binding, result.dataContextId ?? selectedComponent.dataBinding?.dataContextId ?? currentDataContextId),
     ]
-    await commit(operations, result.replaceWith ? '展示类型、属性与绑定已保存为新修订' : result.binding ? '卡片数据绑定已保存为新修订' : '卡片属性已保存为新修订', setManualError)
+    const saved = await commit(operations, result.replaceWith ? '展示类型、属性与绑定已保存为新修订' : result.binding ? '卡片数据绑定已保存为新修订' : '卡片属性已保存为新修订', setManualError)
+    if (saved && selectedCard?.block.cardKind?.startsWith('LAYOUT_SUBSECTION_')) {
+      await activateReadySmartInsights(saved, selectedCard.section.id, selectedCard.block.id)
+    }
     setManualBusy(false)
   }
 
@@ -1601,6 +1607,7 @@ export function ReportEditorPage() {
       if (saved) {
         setActiveSectionId(sectionId)
         setSelectedComponentId('')
+        await activateReadySmartInsights(saved, sectionId)
         window.setTimeout(() => document.querySelector<HTMLElement>(`[data-block-id="${result.blockId}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }), 0)
       }
     } catch (cause) {
@@ -1670,6 +1677,7 @@ export function ReportEditorPage() {
       if (saved) {
         setActiveSectionId(located.section.id)
         setSelectedComponentId('')
+        await activateReadySmartInsights(saved, located.section.id, located.block.id)
       }
     } finally { setSubsectionInsightBusyId('') }
   }
@@ -1685,6 +1693,57 @@ export function ReportEditorPage() {
     const result = await reportEditorAPI.generateSubsectionSummary(reportId, section.id, block.id, config)
     if (result.baseRevision !== draft?.revisionNo) throw new Error('生成期间草稿已更新，请重新生成小节智能结论')
     return result.richText
+  }
+
+  /**
+   * 默认智能结论只在作者完成最后一张图表配置后触发。先生成当前小节，再在当前
+   * 分析角度的全部小节都就绪时生成角度结论；失败不会回滚已经保存的卡片配置。
+   */
+  const activateReadySmartInsights = async (baseDraft: ReportDraft, sectionId: string, subsectionId?: string) => {
+    if (designSnapshot || !canAIEdit) return baseDraft
+    const richTextManifest = latestComponentManifests(manifests.list()).find(item => item.type === 'rich-text')
+    if (!richTextManifest) return baseDraft
+    let current = baseDraft
+    try {
+      let currentPage = orderedPages(current.definition)[0]
+      let section = currentPage?.sections.find(item => item.id === sectionId)
+      if (!section) return current
+
+      if (subsectionId) {
+        const block = section.blocks.find(item => item.id === subsectionId)
+        const conclusionSlot = block?.zones.flatMap(zone => zone.slots)
+          .find(slot => frameSlotRole(slot.cardKind) === 'CONCLUSION')
+        const conclusion = current.definition.components.find(item => item.id === conclusionSlot?.componentId)
+        if (block && conclusion && subsectionChartsReady(block, current.definition.components) && smartInsightIsPending(conclusion)) {
+          const config = effectiveSubsectionInsightConfig(conclusion, subsectionInsightCandidates(block, current.definition.components))
+          const generated = await reportEditorAPI.generateSubsectionSummary(reportId, section.id, block.id, config)
+          if (generated.baseRevision !== current.revisionNo) throw new Error('生成期间草稿已更新')
+          const saved = await commitForDraft(current,
+            updateSubsectionInsightOperations(conclusion, generated.richText, config, richTextManifest),
+            '全部图表已配置，小节智能结论已自动生成', setActionError)
+          if (!saved) return current
+          current = saved
+        }
+      }
+
+      currentPage = orderedPages(current.definition)[0]
+      section = currentPage?.sections.find(item => item.id === sectionId)
+      if (!section || !sectionChartsReady(section, current.definition.components)) return current
+      const insightBlock = angleInsightBlock(section)
+      const insightId = insightBlock?.zones.flatMap(zone => zone.slots).find(slot => slot.componentId)?.componentId
+      const insight = current.definition.components.find(item => item.id === insightId)
+      if (!insightBlock || !insight || !smartInsightIsPending(insight)) return current
+      const config = effectiveAngleInsightConfig(insight, section)
+      const generated = await reportEditorAPI.generateSectionSummary(reportId, section.id, config)
+      if (generated.baseRevision !== current.revisionNo) throw new Error('生成期间草稿已更新')
+      const saved = await commitForDraft(current,
+        updateAngleInsightOperations(insight, generated.richText, undefined, richTextManifest),
+        '全部小节图表已配置，分析角度智能结论已自动生成', setActionError)
+      return saved ?? current
+    } catch (cause) {
+      setActionError(`当前修改已保存，但智能结论自动生成失败：${cause instanceof Error ? cause.message : '请稍后重试'}`)
+      return current
+    }
   }
 
   const saveSubsectionInsightConfig = async (
