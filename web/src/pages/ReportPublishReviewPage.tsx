@@ -79,12 +79,10 @@ function GateCard({ gate, selected, onSelect }: { gate: PublicationGate; selecte
  * 于是预览到的排版和发布后看到的排版必然不同。现在预览、编辑器画布与运行页
  * 共用同一份 Definition 与同一套渲染，多端模式只改变预览容器的宽度。
  */
-function PublishPreview({ draft, manifests, execution, mode, activePageId, onSelectTheme }: {
+function PublishPreview({ draft, manifests, execution, mode }: {
   draft: ReportDraft; manifests: ManifestIndex; execution: DraftExecution | null; mode: PreviewMode
-  activePageId: string; onSelectTheme: (pageId: string) => void
 }) {
-  const pages = orderedPages(draft.definition)
-  const page = pages.find(candidate => candidate.id === activePageId) ?? pages[0]
+  const page = orderedPages(draft.definition)[0]
   const results = useMemo(
     () => new Map((execution?.components ?? []).map(item => [item.componentId, item])),
     [execution],
@@ -92,11 +90,6 @@ function PublishPreview({ draft, manifests, execution, mode, activePageId, onSel
   return <div className={`publish-preview-document is-${mode}`}>
     <ReportHeader style={draft.definition.metadata.headerStyle || '01'} title={draft.definition.metadata.name}
       description={draft.definition.metadata.description} meta={[`草稿 r${draft.revisionNo}`, '发布预览']} filters={draft.definition.globalFilters ?? []} compact />
-    {pages.length > 1 && <nav className="publish-theme-nav" aria-label="预览分析主题">
-      {pages.map((theme, index) => <button type="button" key={theme.id} className={theme.id === page?.id ? 'is-active' : ''} onClick={() => onSelectTheme(theme.id)}>
-        <em>{String(index + 1).padStart(2, '0')}</em>{theme.name}
-      </button>)}
-    </nav>}
     {page
       ? <ReportPageView definition={draft.definition} page={page} manifests={manifests} results={results} designMode={!execution} />
       : <div className="publish-preview-empty"><Monitor size={24} /><strong>当前草稿没有可预览页面</strong><span>请返回编辑器添加章节与组件。</span></div>}
@@ -115,7 +108,6 @@ export function ReportPublishReviewPage() {
   const [review, setReview] = useState<PublicationReviewResponse | null>(snapshot ? snapshotReview : null)
   const [manifests, setManifests] = useState<ManifestIndex>(emptyManifestIndex)
   const [execution, setExecution] = useState<DraftExecution | null>(null)
-  const [activePageId, setActivePageId] = useState('')
   // 与运行页一致：加载态由已结算的请求令牌推导，避免 effect 内同步 setState。
   const [settledReportId, setSettledReportId] = useState('')
   const [failure, setFailure] = useState<{ reportId: string; message: string } | null>(null)
@@ -159,7 +151,6 @@ export function ReportPublishReviewPage() {
         // 否则发布前看到的数值可能来自和待发布定义完全不同的绑定。
         const page = orderedPages(next.preflight.draft.definition)[0]
         if (!page || controller.signal.aborted) return
-        setActivePageId(page.id)
         try {
           setExecution(await reportEditorAPI.executeDraft(reportId, { pageId: page.id }, { signal: controller.signal }))
         } catch { /* 门禁结论独立于预览执行；执行失败不应阻断发布评审展示。 */ }
@@ -178,16 +169,6 @@ export function ReportPublishReviewPage() {
   const bothPreviewed = previewed.has('desktop') && previewed.has('mobile')
   const readyToPublish = Boolean(review) && confirmed && allAcknowledged && bothPreviewed &&
     choice === 'snapshot' && !publishing && (review?.preflight.blockerCodes.length ?? 0) === 0
-
-  const selectPreviewTheme = (pageId: string) => {
-    if (!review || pageId === activePageId) return
-    setActivePageId(pageId)
-    setExecution(null)
-    if (snapshot) return
-    void reportEditorAPI.executeDraft(reportId, { pageId })
-      .then(setExecution)
-      .catch(() => { /* 主题预览执行失败不改变发布门禁，画布保留无数据预览。 */ })
-  }
 
   const publish = async () => {
     if (!review || !readyToPublish) return
@@ -223,7 +204,7 @@ export function ReportPublishReviewPage() {
       <div className="publish-body">
         <aside className="publish-gates"><header><div><h2>AI 发布检查</h2><Info size={14} /></div><span>LLM 自动门禁</span></header><div>{review.preflight.checks.map(gate => <GateCard key={gate.id} gate={gate} selected={selectedGate === gate.id} onSelect={() => setSelectedGate(gate.id)} />)}</div><footer><strong>检查结论（LLM）</strong><p>{review.preflight.checks.filter(gate => gate.status === 'PASSED').length} 项通过，{review.preflight.warningCodes.length} 项需人工确认后方可进入最终发布。</p></footer></aside>
 
-        <section className="publish-preview"><nav>{([['desktop', Desktop, '桌面'], ['mobile', DeviceMobile, '移动'], ['print', Printer, '打印'], ['viewer', Users, '查看者权限']] as const).map(([value, Icon, label]) => <button className={mode === value ? 'is-active' : ''} type="button" key={value} onClick={() => { setMode(value); setPreviewed(current => new Set(current).add(value)) }}><Icon size={15} />{label}</button>)}</nav><div className="publish-preview-meta"><span>预览身份：业务用户（脱敏）</span><span>数据截至 {snapshot ? '2026-08-09 23:59' : formatCheckedAt(review.checkedAt)}</span></div><div className="publish-preview-canvas"><PublishPreview draft={draft} manifests={manifests} execution={execution} mode={mode} activePageId={activePageId} onSelectTheme={selectPreviewTheme} /></div></section>
+        <section className="publish-preview"><nav>{([['desktop', Desktop, '桌面'], ['mobile', DeviceMobile, '移动'], ['print', Printer, '打印'], ['viewer', Users, '查看者权限']] as const).map(([value, Icon, label]) => <button className={mode === value ? 'is-active' : ''} type="button" key={value} onClick={() => { setMode(value); setPreviewed(current => new Set(current).add(value)) }}><Icon size={15} />{label}</button>)}</nav><div className="publish-preview-meta"><span>预览身份：业务用户（脱敏）</span><span>数据截至 {snapshot ? '2026-08-09 23:59' : formatCheckedAt(review.checkedAt)}</span></div><div className="publish-preview-canvas"><PublishPreview draft={draft} manifests={manifests} execution={execution} mode={mode} /></div></section>
 
         <aside className="publish-review-panel"><header><div><h2>AI 发布评审</h2><span>LLM 认知判断与解释</span></div></header><section className={`publish-ai-verdict ${recommendationClass}`}><strong>AI 结论：{review.review.headline}</strong><p>{review.review.summary}</p></section><section className="publish-pins"><div><CheckCircle size={15} /><span>已固定 Definition</span><strong>{shortRef(review.dependencyRefs.find(ref => ref.startsWith('definition:')) || '', 'v2.1.7')}</strong></div><div><CheckCircle size={15} /><span>已绑定语义资产</span><strong>{shortRef(review.dependencyRefs.find(ref => ref.startsWith('semantic:')) || '', `${draft.definition.dataContexts.length} 项`)}</strong></div><div><CheckCircle size={15} /><span>已锁定 Evidence</span><strong>{shortRef(review.dependencyRefs.find(ref => ref.startsWith('evidence:')) || '', '当前版本')}</strong></div><div><CheckCircle size={15} /><span>依赖版本已固化</span><strong>{shortRef(review.dependencyRefs.find(ref => ref.startsWith('dataset:')) || '', `${review.dependencyRefs.length} 项`)}</strong></div></section><section className="publish-impact"><h3>影响范围</h3><div><span><Users size={17} /><strong>{review.impact.visibleCount}</strong><small>位可见用户</small></span><span><ShieldCheck size={17} /><strong>{review.impact.editableCount}</strong><small>位编辑者</small></span><span><Monitor size={17} /><strong>{review.impact.subscriptionCount}</strong><small>个订阅</small></span><span><FilePdf size={17} /><strong>PDF / XLSX</strong><small>制品产出</small></span></div></section>
           {warningGate && <section className="publish-risk"><h3>AI 风险解释（需人工确认）</h3><p>{review.review.risks[0]?.explanation || warningGate.summary}</p><button type="button" onClick={() => setSelectedGate(warningGate.id)}>查看证据详情</button></section>}
