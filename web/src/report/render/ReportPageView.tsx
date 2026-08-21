@@ -1,5 +1,5 @@
 import { type CSSProperties, type ReactNode, useRef, useState } from 'react'
-import { ChartLineUp, Copy, Lightbulb, Table, Trash } from '@phosphor-icons/react'
+import { ChartLineUp, Copy, Lightbulb, PencilSimple, Table, Trash } from '@phosphor-icons/react'
 import { ReportBlockBoundary, ReportComponentBoundary, ComponentStateView } from '../runtime/ComponentStateView.tsx'
 import { useMobileViewport } from './use-mobile-viewport.ts'
 import { BlockHandles, SlotHandles } from './BlockInteraction.tsx'
@@ -52,6 +52,8 @@ export type EditingHandlers = {
   /** 卡片工具条：复制 / 删除整张卡片。未提供时不显示工具条。 */
   onDuplicateBlock?(sectionId: string, blockId: string): void
   onDeleteBlock?(sectionId: string, blockId: string): void
+  /** 分析角度标题与配置入口。 */
+  onEditSection?(section: Section): void
   /** 编辑器可在空分析角度与现有小节末尾注入画布内的框架创建控件。 */
   renderEmptySection?(section: Section): ReactNode
   renderSectionFooter?(section: Section): ReactNode
@@ -415,7 +417,12 @@ function DesktopPage(props: ReportPageViewProps) {
       return <section className="report-render-section is-framework-section"
         id={`report-section-${section.id}`} data-section-id={section.id} key={section.id}>
         {!titleOwnedByBlock && !displayTemplate && <header className="report-render-section-head">
-          <div><span className="report-render-section-index">{String(sectionIndex + 1).padStart(2, '0')}</span><h2>{section.name}</h2></div>
+          <div><span className="report-render-section-index">{String(sectionIndex + 1).padStart(2, '0')}</span><h2>{section.name}</h2>
+            {editing?.onEditSection && <button type="button" className="report-render-section-edit"
+              aria-label={`编辑分析角度 ${section.name}`} onClick={event => { event.stopPropagation(); editing.onEditSection?.(section) }}>
+              <PencilSimple size={13} />编辑
+            </button>}
+          </div>
           {section.question && <p>{section.question}</p>}
         </header>}
         {section.blocks.length === 0 && editing?.renderEmptySection

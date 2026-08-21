@@ -1,4 +1,4 @@
-import { Check, FileText, Minus, Plus, Table, X } from '@phosphor-icons/react'
+import { ChartBar, Check, Minus, Plus, X } from '@phosphor-icons/react'
 import { useState } from 'react'
 
 import type { SubsectionLayout } from './operations.ts'
@@ -6,29 +6,39 @@ import type { SubsectionLayout } from './operations.ts'
 export type SubsectionComposerValue = {
   layout: SubsectionLayout
   chartCount: number
-  includeDetail: boolean
-  includeAppendix: boolean
 }
 
 const subsectionLayouts: Array<{
   id: SubsectionLayout
   name: string
   description: string
-  preview: string
 }> = [
   {
     id: 'CONCLUSION_TOP',
     name: '结论上置',
     description: '结论通栏，论据图表在下方自适应排列',
-    preview: '/report-framework/layout-conclusion-top.png',
   },
   {
     id: 'CONCLUSION_LEFT',
     name: '结论左置',
     description: '结论占左半区，论据图表在右侧自动成行',
-    preview: '/report-framework/layout-conclusion-left.png',
   },
 ]
+
+function LayoutPreview({ layout, chartCount }: { layout: SubsectionLayout; chartCount: number }) {
+  const chartColumns = layout === 'CONCLUSION_TOP'
+    ? Math.min(chartCount, chartCount > 4 ? 3 : 4)
+    : Math.min(chartCount, chartCount > 4 ? 3 : 2)
+  return <span className={`report-canvas-layout-preview is-${layout === 'CONCLUSION_TOP' ? 'top' : 'left'}`}
+    aria-hidden="true">
+    <span className="report-canvas-layout-conclusion">结论</span>
+    <span className="report-canvas-layout-charts" style={{ gridTemplateColumns: `repeat(${chartColumns}, minmax(0, 1fr))` }}>
+      {Array.from({ length: chartCount }, (_, index) => <span className="report-canvas-layout-chart" key={index}>
+        <ChartBar size={10} weight="duotone" />
+      </span>)}
+    </span>
+  </span>
+}
 
 export function CanvasQuickAdd({ kind, disabled, onClick }: {
   kind: 'ANGLE' | 'SUBSECTION'
@@ -52,8 +62,6 @@ export function CanvasSubsectionComposer({ disabled, required, onCancel, onConfi
 }) {
   const [layout, setLayout] = useState<SubsectionLayout>('CONCLUSION_TOP')
   const [chartCount, setChartCount] = useState(4)
-  const [includeDetail, setIncludeDetail] = useState(false)
-  const [includeAppendix, setIncludeAppendix] = useState(false)
 
   return <section className="report-canvas-subsection-composer" aria-label="添加小节">
     <header>
@@ -73,21 +81,14 @@ export function CanvasSubsectionComposer({ disabled, required, onCancel, onConfi
     <div className="report-canvas-subsection-layouts" role="radiogroup" aria-label="小节内容布局">
       {subsectionLayouts.map(item => <button type="button" role="radio" aria-checked={layout === item.id}
         className={layout === item.id ? 'is-selected' : ''} disabled={disabled} key={item.id} onClick={() => setLayout(item.id)}>
-        <img src={item.preview} alt={`${item.name}布局预览`} />
+        <LayoutPreview layout={item.id} chartCount={chartCount} />
         <span><strong>{item.name}</strong><small>{item.description}</small></span>
         <em>{layout === item.id ? <><Check size={15} weight="bold" />已选择</> : <><Plus size={15} />选择</>}</em>
       </button>)}
     </div>
     <div className="report-canvas-subsection-footer">
-      <div aria-label="附加内容区域">
-        <span><strong>附加区域</strong><small>按需添加，可为空</small></span>
-        <button type="button" aria-pressed={includeDetail} className={includeDetail ? 'is-active' : ''} disabled={disabled}
-          onClick={() => setIncludeDetail(value => !value)}><Table size={16} />明细</button>
-        <button type="button" aria-pressed={includeAppendix} className={includeAppendix ? 'is-active' : ''} disabled={disabled}
-          onClick={() => setIncludeAppendix(value => !value)}><FileText size={16} />附录</button>
-      </div>
       <button type="button" className="primary-button" disabled={disabled}
-        onClick={() => onConfirm({ layout, chartCount, includeDetail, includeAppendix })}>
+        onClick={() => onConfirm({ layout, chartCount })}>
         <Check size={17} weight="bold" />{disabled ? '正在创建…' : '确认添加'}
       </button>
     </div>

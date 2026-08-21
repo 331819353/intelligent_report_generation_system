@@ -1,7 +1,7 @@
 import {
   ArrowDown, ArrowLeft, ArrowUp, ArrowUDownLeft, ArrowUDownRight, BracketsCurly, CaretDown, CaretRight, Check,
   CheckCircle, CirclesFour, Database, DotsThreeVertical, Eye, Funnel, GearSix, Info, MagicWand,
-  NotePencil, PencilSimple, Plus, ShieldCheck, Sparkle, SpinnerGap, Trash, WarningCircle, X,
+  Minus, NotePencil, PencilSimple, Plus, ShieldCheck, Sparkle, SpinnerGap, Trash, WarningCircle, X,
 } from '@phosphor-icons/react'
 import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
@@ -913,7 +913,8 @@ export function ReportEditorPage() {
   const [reportInspectorView, setReportInspectorView] = useState<'overview' | 'datasets' | 'filters'>('overview')
   const [designFilterValues, setDesignFilterValues] = useState<Record<string, unknown>>({})
   const [editorView, setEditorView] = useState<'edit' | 'preview'>('edit')
-  const [editorScale, setEditorScale] = useState(.5)
+  const [canvasFocused, setCanvasFocused] = useState(true)
+  const [editorScale, setEditorScale] = useState(.625)
   const [previewPageCount, setPreviewPageCount] = useState(1)
   const [lastReceipt, setLastReceipt] = useState<{ from: number; to: number; count: number; source: string } | null>(null)
   const [renamingSectionId, setRenamingSectionId] = useState('')
@@ -1099,20 +1100,30 @@ export function ReportEditorPage() {
     [execution],
   )
 
-  // Definition 始终在 1920px 设计宽度上排版；编辑器只改变观看比例，不再让
-  // 纸张宽度随面板挤压而重排。这样编辑态、预览态和最终导出使用同一套坐标。
+  // Definition 始终按 1920px 排版。编辑态默认使用固定高清档位，不再随着侧栏
+  // 宽度被压缩到模糊的小数比例；“适宽”仅在作者主动总览整页时使用。
+  const fitEditorCanvas = () => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    setEditorScale(Math.min(1, Math.max(.25, (canvas.clientWidth - 52) / 1920)))
+  }
+  const changeEditorScale = (direction: -1 | 1) => {
+    const levels = [.5, .625, .75, 1]
+    setEditorScale(current => direction > 0
+      ? levels.find(level => level > current + .001) ?? current
+      : [...levels].reverse().find(level => level < current - .001) ?? current)
+  }
+
+  // 高清档位会比编辑区更宽，初次进入和切换档位时把画布定位到报告中部，
+  // 确保标题、布局选择器等主要编辑内容立即可见。
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas || editorView !== 'edit') return undefined
-    const update = () => {
-      const available = Math.max(canvas.clientWidth - 52, 480)
-      setEditorScale(Math.min(.62, Math.max(.25, available / 1920)))
-    }
-    update()
-    const observer = new ResizeObserver(update)
-    observer.observe(canvas)
-    return () => observer.disconnect()
-  }, [editorView])
+    if (!canvas || editorView !== 'edit' || editorScale <= .62) return undefined
+    const frame = window.requestAnimationFrame(() => {
+      canvas.scrollLeft = Math.max((canvas.scrollWidth - canvas.clientWidth) / 2, 0)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [editorScale, editorView])
 
   // 预览态使用真实 1920×1080 页面，并把内容高度向上补齐到完整页数。
   useEffect(() => {
@@ -1518,8 +1529,8 @@ export function ReportEditorPage() {
       sectionId,
       layout: request.layout,
       chartCount: request.chartCount,
-      includeDetail: request.includeDetail,
-      includeAppendix: request.includeAppendix,
+      includeDetail: false,
+      includeAppendix: false,
       title: `小节 ${subsectionCount + 1}`,
       sectionName: `${sectionNoun} 1`,
       newId: () => crypto.randomUUID(),
@@ -1730,7 +1741,7 @@ export function ReportEditorPage() {
   if (!draft || !page) return <AppShell className="report-editor-shell" lockBusinessDomain defaultSidebarCollapsed><div className="report-editor-loading is-error"><WarningCircle size={28} /><strong>报告编辑器无法打开</strong><p>{loadError || '当前草稿没有可编辑页面。'}</p><button type="button" onClick={() => navigate('/reports')}>返回报告工作台</button></div></AppShell>
 
   return <AppShell className="report-editor-shell" lockBusinessDomain defaultSidebarCollapsed>
-    <div className={`report-editor-workspace is-${editorView}-view`}>
+    <div className={`report-editor-workspace is-${editorView}-view ${canvasFocused && editorView === 'edit' ? 'is-canvas-focus' : ''}`.trim()}>
       <header className="report-editor-header">
         <div className="report-editor-header-leading">
           <img className="report-editor-brand" src="/haier-logo.svg" alt="Haier 海尔" />
@@ -1817,7 +1828,23 @@ export function ReportEditorPage() {
             onDragOver={event => { if (event.dataTransfer.types.includes(paletteDragType)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' } }}
             onDrop={dropFromPalette}>
             <div className="report-editor-canvas-spec" aria-live="polite">
-              <span>{editorView === 'edit' ? `编辑缩放 ${Math.round(editorScale * 100)}%` : '输出预览'}</span>
+              {editorView === 'edit' ? <>
+                <span>清晰编辑</span>
+                <div className="report-editor-canvas-zoom" aria-label="画布缩放">
+                  <button type="button" aria-label="缩小画布" disabled={editorScale <= .25}
+                    onClick={() => changeEditorScale(-1)}><Minus size={12} /></button>
+                  <output>{Math.round(editorScale * 100)}%</output>
+                  <button type="button" aria-label="放大画布" disabled={editorScale >= 1}
+                    onClick={() => changeEditorScale(1)}><Plus size={12} /></button>
+                  <button type="button" className="is-fit" onClick={fitEditorCanvas}>适宽</button>
+                </div>
+                <button type="button" className="report-editor-canvas-focus" aria-pressed={canvasFocused}
+                  onClick={() => {
+                    const next = !canvasFocused
+                    setCanvasFocused(next)
+                    setEditorScale(next ? .625 : .5)
+                  }}>{canvasFocused ? '退出专注' : '专注画布'}</button>
+              </> : <span>输出预览</span>}
               <strong>1920 × 1080</strong><em>{editorView === 'preview' ? `${previewPageCount} 页` : '自动分页'}</em>
             </div>
             <article ref={paperRef} className="report-editor-paper report-editor-live-paper"
@@ -1858,6 +1885,7 @@ export function ReportEditorPage() {
                   onBlockTitleChange: (sectionId, blockId, title) => void renameBlock(sectionId, blockId, title),
                   onDuplicateBlock: (_sectionId, blockId) => void duplicateBlock(blockId),
                   onDeleteBlock: (_sectionId, blockId) => void deleteBlock(blockId),
+                  onEditSection: section => openFrameworkConfig({ kind: 'ANGLE', sectionId: section.id, title: section.name }),
                   renderEmptySection: section => subsectionComposer(section, true),
                   renderSectionFooter: section => subsectionBuilderSectionId === section.id
                     ? subsectionComposer(section, false)
