@@ -6165,6 +6165,7 @@ body:has(.report-editor-shell) { height: 100%; overflow: hidden; }
 .report-new-launch-datasets button.is-selected i { border-color: #1680cf; background: #1680cf; }
 
 .report-new-launch-summary {
+  position: relative;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -6203,6 +6204,152 @@ body:has(.report-editor-shell) { height: 100%; overflow: hidden; }
 .report-new-launch-selected span { max-width: 100%; overflow-wrap: anywhere; border-radius: 999px; padding: 4px 7px; background: #e9f4fd; color: #3976a5; font-size: 8px; }
 .report-new-launch-summary > p { display: flex; align-items: flex-start; gap: 6px; margin: auto 0 0; border-radius: 9px; padding: 9px 10px; background: rgb(232 246 239 / 72%); color: #4f7b69; font-size: 8px; line-height: 1.45; }
 .report-new-launch-summary > p svg { flex: none; color: #3ba67e; }
+
+.report-new-dataset-preview {
+  position: fixed;
+  z-index: 240;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid #cbdce9;
+  border-radius: 15px;
+  background: rgb(255 255 255 / 98%);
+  box-shadow: 0 18px 48px rgb(25 55 84 / 20%);
+  animation: report-new-preview-enter 150ms ease-out both;
+}
+.report-new-dataset-preview::after {
+  position: absolute;
+  bottom: -7px;
+  left: var(--preview-arrow-x);
+  width: 13px;
+  height: 13px;
+  border-right: 1px solid #cbdce9;
+  border-bottom: 1px solid #cbdce9;
+  background: #fbfcfd;
+  content: '';
+  transform: translateX(-50%) rotate(45deg);
+}
+@keyframes report-new-preview-enter {
+  from { opacity: 0; transform: translateY(5px) scale(.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.report-new-dataset-preview > header {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid #e3eaf0;
+  padding: 11px 12px;
+  background: linear-gradient(180deg, #fbfdff, #f6faff);
+}
+.report-new-dataset-preview > header > div { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.report-new-dataset-preview > header > div > span { width: 29px; height: 29px; display: grid; flex: none; place-items: center; border-radius: 8px; background: #e7f3fd; color: #1678c3; }
+.report-new-dataset-preview > header p { min-width: 0; display: grid; gap: 1px; margin: 0; }
+.report-new-dataset-preview > header small { color: #2381ca; font-size: 7px; font-weight: 740; letter-spacing: .04em; }
+.report-new-dataset-preview > header strong { overflow: hidden; color: #2e4258; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.report-new-dataset-preview > header > button {
+  width: 27px;
+  height: 27px;
+  display: grid;
+  flex: none;
+  place-items: center;
+  border: 1px solid #d8e2ea;
+  border-radius: 8px;
+  padding: 0;
+  background: #fff;
+  color: #78899b;
+  cursor: pointer;
+}
+.report-new-dataset-preview > header > button:hover { border-color: #aac9e1; background: #eef7fe; color: #1678c3; }
+.report-new-dataset-preview-hint {
+  min-height: 31px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid #edf1f4;
+  padding: 0 12px;
+  background: #fff;
+  color: #7c8d9f;
+  font-size: 8px;
+}
+.report-new-dataset-preview-hint svg { color: #4386b8; }
+.report-new-dataset-preview-state {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 20px;
+  color: #7b8da0;
+  font-size: 9px;
+  text-align: center;
+}
+.report-new-dataset-preview-state.is-error { color: #a94e48; }
+.report-new-dataset-preview-state > button { border: 1px solid #c9d9e6; border-radius: 7px; padding: 5px 10px; background: #fff; color: #277dbb; font: inherit; cursor: pointer; }
+.report-new-dataset-preview-table {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: #a8bfd1 #edf3f7;
+  scrollbar-width: thin;
+  cursor: grab;
+  touch-action: pan-y;
+}
+.report-new-dataset-preview-table.is-panning { cursor: grabbing; user-select: none; }
+.report-new-dataset-preview-table table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  color: #405269;
+  font-size: 8px;
+  white-space: nowrap;
+}
+.report-new-dataset-preview-table th,
+.report-new-dataset-preview-table td {
+  min-width: 96px;
+  max-width: 180px;
+  overflow: hidden;
+  border-right: 1px solid #edf1f4;
+  border-bottom: 1px solid #edf1f4;
+  padding: 5px 9px;
+  text-align: left;
+  text-overflow: ellipsis;
+}
+.report-new-dataset-preview-table th:first-child { min-width: 32px; width: 32px; max-width: 32px; color: #94a2b0; text-align: center; }
+.report-new-dataset-preview-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #f3f8fc;
+  color: #40566c;
+  font-weight: 700;
+}
+.report-new-dataset-preview-table thead th:first-child { left: 0; z-index: 3; }
+.report-new-dataset-preview-table tbody th { position: sticky; left: 0; z-index: 1; background: #fafcfd; font-weight: 650; }
+.report-new-dataset-preview-table thead strong,
+.report-new-dataset-preview-table thead small { display: block; overflow: hidden; text-overflow: ellipsis; }
+.report-new-dataset-preview-table thead small { margin-top: 2px; color: #8999a9; font-size: 7px; font-weight: 500; }
+.report-new-dataset-preview-table tbody tr:hover td,
+.report-new-dataset-preview-table tbody tr:hover th { background: #f5faff; }
+.report-new-dataset-preview > footer {
+  min-height: 31px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid #e5ebf0;
+  padding: 0 11px;
+  background: #fbfcfd;
+  color: #8a99a8;
+  font-size: 7px;
+}
+.report-new-dataset-preview > footer em { color: #58748c; font-style: normal; font-weight: 650; }
 
 .report-new-launch-error { min-height: 38px; display: flex; align-items: center; gap: 7px; border-top: 1px solid #f0d5d2; padding: 8px 22px; background: #fff7f6; color: #ae4842; font-size: 10px; }
 .report-new-launchpad > .report-new-launch-footer {

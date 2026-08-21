@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
+import { createPortal } from 'react-dom'
 import {
-  Check, CheckCircle, Database, FileText, MagnifyingGlass, RocketLaunch,
+  ArrowsLeftRight, Check, CheckCircle, Database, FileText, MagnifyingGlass, RocketLaunch,
   SpinnerGap, WarningCircle, X,
 } from '@phosphor-icons/react'
 import { useNavigate } from 'react-router-dom'
+import { datasetAPI, type DatasetPreview } from '../../lib/datasets.ts'
 import { reportEditorAPI, type DataContextCandidate } from '../api/editor.ts'
 import { ReportHeaderChooser } from '../render/ReportHeader.tsx'
 import type { ReportHeaderStyle } from '../render/schema.ts'
@@ -18,6 +20,89 @@ const snapshotContexts: DataContextCandidate[] = [
   { dataContext: { id: 'snapshot-inventory', datasetId: 'inventory', datasetVersionId: 'v6' }, name: '库存健康度分析集', description: '库存数量、周转、库龄与风险状态', fields: Array.from({ length: 16 }, (_, index) => `inventory_${index + 1}`) },
 ]
 
+type DatasetPreviewState = { loading: boolean; data?: DatasetPreview; error?: string }
+
+function snapshotPreview(candidate: DataContextCandidate): DatasetPreview {
+  const columns = candidate.fields
+  const names = ['订单编号', '产品名称', '所属区域', '销售渠道', '客户类型', '下单日期', '交付日期', '销售数量', '销售金额', '毛利额']
+  return {
+    queryId: `snapshot-${candidate.dataContext.id}`,
+    columns,
+    columnMetadata: columns.map((code, index) => ({
+      code, name: candidate.fieldDefinitions?.find(field => field.code === code)?.name || names[index] || `业务字段 ${index + 1}`,
+      nullable: true,
+    })),
+    rows: Array.from({ length: 10 }, (_, rowIndex) => columns.map((_, columnIndex) => {
+      const values: unknown[] = [
+        `SO-${20260821001 + rowIndex}`, `产品 ${String.fromCharCode(65 + rowIndex % 6)}`,
+        ['华东', '华南', '华北', '西南'][rowIndex % 4], ['线上', '直营网点', '经销商'][rowIndex % 3],
+        ['企业客户', '个人客户'][rowIndex % 2], `2026-08-${String(10 + rowIndex).padStart(2, '0')}`,
+        `2026-08-${String(12 + rowIndex).padStart(2, '0')}`, 12 + rowIndex * 3,
+        (126800 + rowIndex * 7350).toLocaleString('zh-CN'), (31600 + rowIndex * 1840).toLocaleString('zh-CN'),
+      ]
+      return values[columnIndex] ?? `${rowIndex + 1}-${columnIndex + 1}`
+    })),
+    rowCount: 10,
+    durationMs: 86,
+  }
+}
+
+function DatasetPreviewPopover({ candidate, preview, anchor, onRetry, onClose, onPointerEnter, onPointerLeave }: {
+  candidate: DataContextCandidate
+  preview?: DatasetPreviewState
+  anchor: DOMRect
+  onRetry: () => void
+  onClose: () => void
+  onPointerEnter: () => void
+  onPointerLeave: () => void
+}) {
+  const pan = useRef<{ pointerId: number; x: number; left: number } | undefined>(undefined)
+  const [panning, setPanning] = useState(false)
+  const stopPan = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+    pan.current = undefined
+    setPanning(false)
+  }
+  const data = preview?.data
+  const width = Math.min(760, window.innerWidth - 24)
+  const left = Math.max(12, Math.min(anchor.left + anchor.width / 2 - width / 2, window.innerWidth - width - 12))
+  const maxHeight = Math.min(410, Math.max(300, anchor.top - 20))
+  const top = Math.max(12, anchor.top - maxHeight - 12)
+  const arrowX = Math.max(18, Math.min(width - 18, anchor.left + anchor.width / 2 - left))
+  const placement = { left, top, width, height: maxHeight, '--preview-arrow-x': `${arrowX}px` } as CSSProperties
+
+  return <section className="report-new-dataset-preview" style={placement} aria-label={`${candidate.name}前十条数据预览`}
+    onMouseDown={event => event.stopPropagation()} onPointerEnter={onPointerEnter} onPointerLeave={onPointerLeave}>
+    <header><div><span><Database size={16} weight="duotone" /></span><p><small>数据预览 · 前 10 条</small><strong>{candidate.name}</strong></p></div>
+      <button type="button" aria-label="关闭数据预览" onClick={onClose}><X size={14} /></button></header>
+    <div className="report-new-dataset-preview-hint"><ArrowsLeftRight size={14} />按住表格左右拖动，查看未展示字段</div>
+    {preview?.loading && <div className="report-new-dataset-preview-state"><SpinnerGap className="is-spinning" size={18} />正在读取受权限保护的预览数据…</div>}
+    {preview?.error && <div className="report-new-dataset-preview-state is-error"><WarningCircle size={18} /><span>{preview.error}</span><button type="button" onClick={onRetry}>重试</button></div>}
+    {data && data.columns.length > 0 && data.rows.length > 0 && <div
+      className={`report-new-dataset-preview-table ${panning ? 'is-panning' : ''}`}
+      onPointerDown={event => {
+        if (event.button !== 0) return
+        pan.current = { pointerId: event.pointerId, x: event.clientX, left: event.currentTarget.scrollLeft }
+        event.currentTarget.setPointerCapture(event.pointerId)
+        setPanning(true)
+      }}
+      onPointerMove={event => {
+        if (!pan.current || pan.current.pointerId !== event.pointerId) return
+        event.currentTarget.scrollLeft = pan.current.left - (event.clientX - pan.current.x)
+      }}
+      onPointerUp={stopPan}
+      onPointerCancel={stopPan}
+    ><table><thead><tr><th aria-label="行号">#</th>{data.columns.map((column, index) => {
+      const metadata = data.columnMetadata?.[index]
+      const governedField = candidate.fieldDefinitions?.find(field => field.code === column)
+      const label = metadata?.name?.trim() || governedField?.name?.trim() || column
+      return <th key={`${column}-${index}`} title={metadata?.description || column}><strong>{label}</strong>{label !== column && <small>{column}</small>}</th>
+    })}</tr></thead><tbody>{data.rows.slice(0, 10).map((row, rowIndex) => <tr key={rowIndex}><th>{rowIndex + 1}</th>{data.columns.map((_, columnIndex) => <td key={columnIndex}>{row[columnIndex] == null ? '—' : String(row[columnIndex])}</td>)}</tr>)}</tbody></table></div>}
+    {data && (!data.columns.length || !data.rows.length) && <div className="report-new-dataset-preview-state">该数据集当前没有可预览的数据。</div>}
+    <footer><span>仅展示样例，不会写入报告</span>{data && <em>{Math.min(data.rows.length, 10)} 行 · {data.columns.length} 个字段</em>}</footer>
+  </section>
+}
+
 export function NewReportDialog({ onClose, snapshot = false }: { onClose: () => void; snapshot?: boolean }) {
   const navigate = useNavigate()
   const [headerStyle, setHeaderStyle] = useState<ReportHeaderStyle>()
@@ -27,6 +112,11 @@ export function NewReportDialog({ onClose, snapshot = false }: { onClose: () => 
   const [loadError, setLoadError] = useState('')
   const [selected, setSelected] = useState<string[]>([])
   const [query, setQuery] = useState('')
+  const [previewContextId, setPreviewContextId] = useState('')
+  const [previewAnchor, setPreviewAnchor] = useState<DOMRect>()
+  const [previews, setPreviews] = useState<Record<string, DatasetPreviewState>>({})
+  const previewRequests = useRef(new Set<string>())
+  const previewCloseTimer = useRef<number | undefined>(undefined)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
 
@@ -40,17 +130,66 @@ export function NewReportDialog({ onClose, snapshot = false }: { onClose: () => 
     return () => { cancelled = true }
   }, [snapshot])
 
+  useEffect(() => () => {
+    if (previewCloseTimer.current) window.clearTimeout(previewCloseTimer.current)
+  }, [])
+
   const visible = useMemo(() => {
     const keyword = query.trim().toLocaleLowerCase()
     return contexts.filter(item => !keyword || item.name.toLocaleLowerCase().includes(keyword) || item.description.toLocaleLowerCase().includes(keyword))
   }, [contexts, query])
   const selectedContexts = contexts.filter(item => selected.includes(item.dataContext.id))
+  const previewCandidate = contexts.find(item => item.dataContext.id === previewContextId)
   const ready = Boolean(name.trim() && headerStyle && selected.length > 0 && !loading && !loadError)
 
   const toggleContext = (contextId: string) => {
     setSelected(current => current.includes(contextId)
       ? current.filter(id => id !== contextId)
       : [...current, contextId])
+  }
+
+  const loadPreview = async (candidate: DataContextCandidate, force = false) => {
+    const contextId = candidate.dataContext.id
+    setPreviewContextId(contextId)
+    if (!force && (previews[contextId]?.data || previewRequests.current.has(contextId))) return
+    previewRequests.current.add(contextId)
+    setPreviews(current => ({ ...current, [contextId]: { loading: true } }))
+    try {
+      const data = snapshot
+        ? snapshotPreview(candidate)
+        : await datasetAPI.previewVersion(
+          candidate.dataContext.datasetId, candidate.dataContext.datasetVersionId, crypto.randomUUID(), {}, 10,
+        )
+      setPreviews(current => ({ ...current, [contextId]: { loading: false, data } }))
+    } catch (cause) {
+      setPreviews(current => ({
+        ...current,
+        [contextId]: { loading: false, error: cause instanceof Error ? cause.message : '预览数据读取失败' },
+      }))
+    } finally {
+      previewRequests.current.delete(contextId)
+    }
+  }
+
+  const openPreview = (candidate: DataContextCandidate, element: HTMLElement) => {
+    if (previewCloseTimer.current) window.clearTimeout(previewCloseTimer.current)
+    setPreviewAnchor(element.getBoundingClientRect())
+    void loadPreview(candidate)
+  }
+  const keepPreviewOpen = () => {
+    if (previewCloseTimer.current) window.clearTimeout(previewCloseTimer.current)
+  }
+  const schedulePreviewClose = () => {
+    if (previewCloseTimer.current) window.clearTimeout(previewCloseTimer.current)
+    previewCloseTimer.current = window.setTimeout(() => {
+      setPreviewContextId('')
+      setPreviewAnchor(undefined)
+    }, 140)
+  }
+  const closePreview = () => {
+    if (previewCloseTimer.current) window.clearTimeout(previewCloseTimer.current)
+    setPreviewContextId('')
+    setPreviewAnchor(undefined)
   }
 
   const create = async () => {
@@ -100,7 +239,7 @@ export function NewReportDialog({ onClose, snapshot = false }: { onClose: () => 
           </section>
 
           <section className="report-new-launch-section is-datasets">
-            <header><span>03</span><div><strong>数据集</strong><small>可多选，字段会按照当前用户的数据权限加载</small></div>
+            <header><span>03</span><div><strong>数据集</strong><small>可多选；鼠标移入可预览前 10 条权限内数据</small></div>
               <b>{selected.length > 0 ? `已选 ${selected.length}` : '至少选择 1 个'}</b></header>
             <label className="report-new-launch-search"><MagnifyingGlass size={17} />
               <input value={query} placeholder="搜索已发布数据集" aria-label="搜索已发布数据集" onChange={event => setQuery(event.target.value)} />
@@ -115,7 +254,9 @@ export function NewReportDialog({ onClose, snapshot = false }: { onClose: () => 
                 const checked = selected.includes(item.dataContext.id)
                 return <li key={item.dataContext.id}>
                   <button type="button" className={checked ? 'is-selected' : ''} aria-pressed={checked}
-                    aria-label={`${checked ? '取消选择' : '选择'}数据集 ${item.name}`} onClick={() => toggleContext(item.dataContext.id)}>
+                    aria-label={`${checked ? '取消选择' : '选择'}数据集 ${item.name}`} onClick={() => toggleContext(item.dataContext.id)}
+                    onPointerEnter={event => openPreview(item, event.currentTarget)} onPointerLeave={schedulePreviewClose}
+                    onFocus={event => openPreview(item, event.currentTarget)} onBlur={schedulePreviewClose}>
                     <span className="report-new-launch-dataset-icon"><Database size={17} weight="duotone" /></span>
                     <span><strong>{item.name}</strong><small>{item.description || '已发布数据集版本'}</small></span>
                     <em>{item.fields.length} 字段</em>
@@ -157,5 +298,8 @@ export function NewReportDialog({ onClose, snapshot = false }: { onClose: () => 
           </button></div>
       </footer>
     </section>
+    {previewCandidate && previewAnchor && createPortal(<DatasetPreviewPopover candidate={previewCandidate} anchor={previewAnchor}
+      preview={previews[previewCandidate.dataContext.id]} onRetry={() => void loadPreview(previewCandidate, true)} onClose={closePreview}
+      onPointerEnter={keepPreviewOpen} onPointerLeave={schedulePreviewClose} />, document.body)}
   </div>
 }
