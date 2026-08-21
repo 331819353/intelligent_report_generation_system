@@ -1,4 +1,4 @@
-import { type CSSProperties, type ReactNode, useRef, useState } from 'react'
+import { type CSSProperties, type ReactNode, useRef } from 'react'
 import { ChartLineUp, Copy, Lightbulb, PencilSimple, Table, Trash } from '@phosphor-icons/react'
 import { ReportBlockBoundary, ReportComponentBoundary, ComponentStateView } from '../runtime/ComponentStateView.tsx'
 import { useMobileViewport } from './use-mobile-viewport.ts'
@@ -7,7 +7,7 @@ import { useBlockInteraction, type DragMode } from './use-block-interaction.ts'
 import { useGridInteraction, zoneGridCellSize } from './use-grid-interaction.ts'
 import { ComponentView, type ComponentResult } from './ComponentView.tsx'
 import { minimumSize, type ManifestIndex } from './manifests.ts'
-import { frameSlotLabels, frameSlotRole, paletteDragType } from '../designer/operations.ts'
+import { frameSlotLabels, frameSlotRole } from '../designer/operations.ts'
 import {
   blockComponentIDs, canvasOf, orderedSections,
   type Block, type Canvas, type GlobalFilter, type GridRect, type Page, type ReportComponent, type ReportDefinition, type Section, type Zone,
@@ -45,10 +45,10 @@ export type EditingHandlers = {
   onSlotLayoutChange(blockId: string, zoneId: string, slotId: string, rect: GridRect, mode: DragMode): void
   /** 区域在卡片内上移或下移。 */
   onZoneReorder(blockId: string, zoneId: string, direction: -1 | 1): void
-  /** 从组件面板把组件放入分块预先声明的空槽位。 */
-  onComponentDrop?(blockId: string, zoneId: string, slotId: string, manifestRef: string): void
   /** 点击小节中的结论或论据空位，直接打开对应的样式选择器。 */
   onEmptySlotSelect?(target: { blockId: string; zoneId: string; slotId: string; role: 'CONCLUSION' | 'EVIDENCE' }): void
+  /** 直接移除小节槽位中已经插入的卡片，并保留空槽位供重新选择。 */
+  onRemoveComponent?(componentId: string): void
   /** 分块标题独立于内部组件标题。 */
   onBlockTitleChange?(sectionId: string, blockId: string, title: string): void
   /** 卡片工具条：复制 / 删除整张卡片。未提供时不显示工具条。 */
@@ -165,7 +165,6 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
     onRetryBlock, onSelectComponent, selectedComponentId, interaction, editing,
   } = props
   const gridRef = useRef<HTMLDivElement>(null)
-  const [dropSlotId, setDropSlotId] = useState('')
   const columns = Math.max(zone.layout.columns, 1)
   const rows = Math.max(zone.layout.rows, 1)
 
@@ -204,7 +203,6 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
       const selected = Boolean(component && component.id === selectedComponentId)
       const rect = slotDrag.rectFor(slot.id, slot.grid)
       const dragging = slotDrag.drag?.id === slot.id
-      const acceptsDrop = Boolean(editing?.onComponentDrop && !slot.componentId)
       const acceptsPick = Boolean(editing?.onEmptySlotSelect && !slot.componentId && (frameRole === 'CONCLUSION' || frameRole === 'EVIDENCE'))
       const authoring = Boolean(editing || props.templatePreview)
       const emptyLabel = frameRole ? `插入${frameSlotLabels[frameRole]}`
@@ -213,12 +211,12 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
           : zone.type === 'INSIGHT' ? '拖入智能结论或富文本'
             : zone.type === 'CONTENT' ? '拖入图表、指标或表格' : '拖入内容组件'
       const authoringHint = editing
-        ? acceptsPick ? '点击选择样式，也可从组件库拖入' : '从左侧选择或拖拽到这里'
-        : '创建后可选择或拖拽组件填充'
+        ? acceptsPick ? '点击选择卡片样式' : '请从小节布局中的添加入口配置'
+        : '创建后可从小节空位选择内容'
       const EmptyIcon = frameRole === 'EVIDENCE' ? ChartLineUp
         : frameRole === 'DETAIL' ? Table
           : block.type === 'TABLE' ? Table : block.type === 'CHART' ? ChartLineUp : Lightbulb
-      return <div className={`report-render-slot ${selected ? 'is-selected' : ''} ${dragging ? 'is-dragging' : ''} ${dropSlotId === slot.id ? 'is-drop-target' : ''}`.trim()}
+      return <div className={`report-render-slot ${selected ? 'is-selected' : ''} ${dragging ? 'is-dragging' : ''}`.trim()}
         key={slot.id}
         data-slot-id={slot.id}
         data-frame-role={frameRole}
@@ -230,20 +228,10 @@ function ZoneGrid({ zone, position, total, ...props }: BlockContentProps & {
         onClick={component && onSelectComponent
           ? event => { event.stopPropagation(); onSelectComponent(component.id, block.id) }
           : undefined}
-        onDragOver={acceptsDrop ? event => {
-          if (!event.dataTransfer.types.includes(paletteDragType)) return
-          event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = 'copy'; setDropSlotId(slot.id)
-        } : undefined}
-        onDragLeave={acceptsDrop ? event => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropSlotId('')
-        } : undefined}
-        onDrop={acceptsDrop ? event => {
-          const ref = event.dataTransfer.getData(paletteDragType)
-          if (!ref) return
-          event.preventDefault(); event.stopPropagation(); setDropSlotId('')
-          editing?.onComponentDrop?.(block.id, zone.id, slot.id, ref)
-        } : undefined}>
+        >
         {editing && slot.cardKind && !slot.cardKind.startsWith('TEMPLATE_') && <span className="report-slot-kind-badge">{frameRole ? frameSlotLabels[frameRole] : slot.cardKind}</span>}
+        {component && editing?.onRemoveComponent && <button type="button" className="report-slot-remove" title="移除卡片" aria-label={`移除卡片 ${component.options.title || component.templateRef.type}`}
+          onClick={event => { event.stopPropagation(); editing.onRemoveComponent?.(component.id) }}><Trash size={14} /></button>}
         {component
           ? <ReportComponentBoundary fallback={<ComponentStateView state="ERROR" onAction={() => onRetryBlock?.(block.id)} />}>
             <ComponentView component={component} manifests={manifests} mobile={mobile} designMode={designMode}
@@ -406,10 +394,10 @@ function SectionGrid({ section, canvas, content, editing, manifests, components,
             minimum={minSizeFor(block.id)}
             onStart={(event, mode) => interaction.start(event, block.id, baseRect, mode)}
             onNudge={(next, mode) => editing.onLayoutChange(section.id, block.id, next, mode)} />}
-          {editing && (editing.onDuplicateBlock || editing.onDeleteBlock) && <div className="report-block-toolbar" role="toolbar" aria-label="画布元素操作">
+          {editing && (editing.onDuplicateBlock || editing.onDeleteBlock) && <div className={`report-block-toolbar ${block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? 'is-subsection-toolbar' : ''}`.trim()} role="toolbar" aria-label={block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? '分析小节操作' : '画布元素操作'}>
             {editing.onDuplicateBlock && <button type="button" title="复制元素" aria-label="复制元素"
               onClick={event => { event.stopPropagation(); editing.onDuplicateBlock?.(section.id, block.id) }}><Copy size={14} /></button>}
-            {editing.onDeleteBlock && <button type="button" className="is-danger" title="删除元素" aria-label="删除元素"
+            {editing.onDeleteBlock && <button type="button" className="is-danger" title={block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? '删除小节' : '删除元素'} aria-label={block.cardKind?.startsWith('LAYOUT_SUBSECTION_') ? `删除小节 ${block.title || ''}` : '删除元素'}
               onClick={event => { event.stopPropagation(); editing.onDeleteBlock?.(section.id, block.id) }}><Trash size={14} /></button>}
           </div>}
         </div>

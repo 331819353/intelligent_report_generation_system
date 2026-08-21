@@ -251,7 +251,7 @@ export function FilterPanel({ definition, candidates, fieldsOf, selectedBlockId,
         </button></div>
         {optionsLoading ? <p><SpinnerGap className="spin" size={14} />正在读取当前用户可见的数据值…</p>
           : optionError ? <p className="is-error"><WarningCircle size={14} />{optionError}</p>
-            : loadedOptions.length > 0 ? <><p className="is-values">{loadedOptions.slice(0, 8).map(option => <em key={option}>{option}</em>)}{loadedOptions.length > 8 && <i>+{loadedOptions.length - 8}</i>}</p>
+            : loadedOptions.length > 0 ? <><p className="is-values">{loadedOptions.map(option => <em key={option}>{option}</em>)}</p>
               <small>已从字段读取 {loadedOptions.length} 个去重值{optionState.truncated ? '（高基数字段，仅保留前 100 项）' : ''}。</small></>
               : <p className="is-error"><WarningCircle size={14} />该字段当前没有可用值，不能创建选择型筛选。</p>}
       </div>}

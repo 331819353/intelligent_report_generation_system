@@ -3,7 +3,7 @@ import {
   CheckCircle, CirclesFour, Database, DotsThreeVertical, Eye, Funnel, GearSix, Info, MagicWand,
   Minus, NotePencil, PencilSimple, Plus, ShieldCheck, Sparkle, SpinnerGap, Trash, WarningCircle, X,
 } from '@phosphor-icons/react'
-import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AppShell } from '../components/AppShell'
 import '../styles/report.css'
@@ -20,7 +20,6 @@ import { ReportPageView } from '../report/render/ReportPageView'
 import { InteractionPanel } from '../report/designer/InteractionPanel'
 import { EvidencePanel } from '../report/designer/EvidencePanel'
 import { DataContextPanel, DefinitionJSONDialog, FilterPanel } from '../report/designer/DataPanels'
-import { ComponentPalette } from '../report/designer/ComponentPalette'
 import {
   CanvasQuickAdd, CanvasSubsectionComposer, type SubsectionComposerValue,
 } from '../report/designer/CanvasFrameworkControls'
@@ -39,10 +38,10 @@ import {
 import {
   addDataContextOperations, bindingForField, bundle, createFilterOperations, createInteractionOperations,
   createSectionOperations, createSubsectionFrameOperations, defaultBinding, deleteFilterOperations, deleteInteractionOperations, duplicateBlockOperations, layoutOperations,
-  findCompatibleTemplateSlot, placeComponentInSlotOperations,
+  placeComponentInSlotOperations,
   removeBlockOperations, removeComponentOperations, removeDataContextOperations, renameSectionOperations,
   renameBlockOperations, replaceComponentOperations, sectionReorderOperations, slotLayoutOperations, updateComponentOperations, updateFilterOperations, updateReportSettingsOperations,
-  decodePalettePayload, encodePalettePayload, paletteDragType, zoneKindForManifest, zoneKindLabels, zoneReorderOperations,
+  decodePalettePayload, encodePalettePayload, zoneReorderOperations,
   type FilterDraft, type InteractionDraft,
 } from '../report/designer/operations'
 
@@ -199,9 +198,11 @@ function applySnapshotOperations(draft: ReportDraft, operations: EditorOperation
         .flatMap(block => block.zones).flatMap(zone => zone.slots).find(item => item.id === operation.targetId)
       const payload = operation.payload as { componentId?: string; grid?: GridRect }
       if (slot) {
-        if (payload.componentId) slot.componentId = payload.componentId
+        if (Object.prototype.hasOwnProperty.call(payload, 'componentId')) slot.componentId = payload.componentId || undefined
         if (payload.grid) slot.grid = payload.grid
       }
+    } else if (operation.op === 'COMPONENT_DELETE') {
+      next.definition.components = next.definition.components.filter(component => component.id !== operation.targetId)
     } else if (operation.op === 'SECTION_DELETE') {
       next.definition.pages.forEach(page => { page.sections = page.sections.filter(section => section.id !== operation.targetId) })
     } else if (operation.op === 'BLOCK_DELETE') {
@@ -815,70 +816,6 @@ function CardInspector({ mode, component, manifest: currentManifest, manifests, 
     </section>
 }
 
-function ComponentLibraryDialog({ manifests, reportContexts, contextNameOf, fieldsOf, defaultContextId, sectionName, busy, error, onClose, onAdd }: {
-  manifests: ComponentManifest[]
-  reportContexts: Array<{ id: string; alias?: string }>
-  contextNameOf: (dataContextId: string) => string
-  fieldsOf: (dataContextId: string) => DataContextField[]
-  defaultContextId: string
-  sectionName: string
-  busy: boolean
-  error: string
-  onClose: () => void
-  onAdd: (manifest: ComponentManifest, title: string, dataContextId: string) => void
-}) {
-  const [contextId, setContextId] = useState(defaultContextId)
-  const fields = fieldsOf(contextId)
-  const [selectedRef, setSelectedRef] = useState(() => manifests[0] ? `${manifests[0].type}@${manifests[0].version}` : '')
-  const selected = manifests.find(item => `${item.type}@${item.version}` === selectedRef)
-  const [title, setTitle] = useState(selected?.displayName || '')
-  const needsData = Boolean(selected && (selected.dataContract.dimensions.min > 0 || selected.dataContract.measures.min > 0))
-  const enoughFields = Boolean(selected &&
-    fields.filter(field => field.role !== 'MEASURE').length >= selected.dataContract.dimensions.min &&
-    fields.filter(field => field.role === 'MEASURE').length >= selected.dataContract.measures.min)
-
-  return <div className="report-modal-backdrop" role="presentation" onMouseDown={onClose}>
-    <section className="report-modal report-component-library" role="dialog" aria-modal="true" aria-labelledby="component-library-title" onMouseDown={event => event.stopPropagation()}>
-      <header><div><span className="eyebrow">组件库</span><h2 id="component-library-title">添加报告组件</h2></div><button type="button" aria-label="关闭" onClick={onClose}><X size={18} /></button></header>
-      <div className="report-component-library-body">
-        <div className="report-component-grid">
-          {manifests.map(manifest => {
-            const ref = `${manifest.type}@${manifest.version}`
-            return <button className={ref === selectedRef ? 'is-selected' : ''} type="button" key={ref} onClick={() => { setSelectedRef(ref); setTitle(manifest.displayName) }}>
-              <span><CirclesFour size={18} /></span><strong>{manifest.displayName}</strong><small>{manifest.category} · {manifest.recommendedSize.w}×{manifest.recommendedSize.h}</small>
-            </button>
-          })}
-        </div>
-        <aside className="report-component-config">
-          <h3>组件配置</h3>
-          <label>组件标题<input value={title} maxLength={80} onChange={event => setTitle(event.target.value)} /></label>
-          {needsData && reportContexts.length > 0 && <label>数据集
-            <select aria-label="卡片数据集" value={contextId} onChange={event => setContextId(event.target.value)}>
-              {reportContexts.map(context => <option key={context.id} value={context.id}>{contextNameOf(context.id)}</option>)}
-            </select>
-          </label>}
-          {selected && <dl>
-            <div><dt>模板</dt><dd>{selected.displayName}</dd></div>
-            <div><dt>渲染方式</dt><dd>{selected.renderer}</dd></div>
-            <div><dt>尺寸</dt><dd>{selected.recommendedSize.w} × {selected.recommendedSize.h}</dd></div>
-            <div><dt>数据要求</dt><dd>维度 {selected.dataContract.dimensions.min}～{selected.dataContract.dimensions.max}，度量 {selected.dataContract.measures.min}～{selected.dataContract.measures.max}</dd></div>
-            <div><dt>所在章节</dt><dd>{sectionName || '新建章节'}</dd></div>
-            <div><dt>目标区域</dt><dd>{zoneKindLabels[zoneKindForManifest(selected)]}</dd></div>
-          </dl>}
-          <div className="report-component-placement">
-            <strong>放置方式</strong>
-            <p><Info size={15} />组件会加入当前{sectionName ? `“${sectionName}”` : '章节'}，系统根据类型和推荐尺寸自动寻找画布位置。</p>
-          </div>
-          {needsData && <p className={enoughFields && contextId ? '' : 'is-error'}><Info size={15} />{enoughFields && contextId ? `将按「${contextNameOf(contextId)}」的字段角色预填 ${selected?.dataContract.dimensions.min ?? 0} 个维度、${selected?.dataContract.measures.min ?? 0} 个度量；加入后点击卡片可改数据集、展示类型与绑定，也可让 AI 识别度量与维度。` : '所选数据集的可用字段不足，无法满足此组件合同。'}</p>}
-          {!needsData && <p><Info size={15} />该组件无需数据绑定，可直接加入报告结构。</p>}
-          {error && <p className="is-error"><WarningCircle size={15} />{error}</p>}
-        </aside>
-      </div>
-      <footer><button className="quiet-button" type="button" disabled={busy} onClick={onClose}>取消</button><button className="primary-button" type="button" disabled={busy || !selected || !title.trim() || (needsData && (!enoughFields || !contextId))} onClick={() => selected && onAdd(selected, title.trim(), contextId)}>{busy ? '正在添加…' : '添加到画布'}</button></footer>
-    </section>
-  </div>
-}
-
 /**
  * 报告编辑器。
  *
@@ -936,7 +873,6 @@ export function ReportEditorPage() {
   const [manifests, setManifests] = useState<ManifestIndex>(designSnapshot ? indexManifests(reportEditorSnapshotManifests) : emptyManifestIndex)
   const [manualBusy, setManualBusy] = useState(false)
   const [manualError, setManualError] = useState('')
-  const [componentLibraryOpen, setComponentLibraryOpen] = useState(false)
   const [componentBusy, setComponentBusy] = useState(false)
   const [componentError, setComponentError] = useState('')
   const [deleteSectionOpen, setDeleteSectionOpen] = useState(false)
@@ -1408,48 +1344,6 @@ export function ReportEditorPage() {
     setFilterBusy(false)
   }
 
-  /**
-   * 组件直接落到画布，由 Definition 的布局算法寻找可用位置。内部仍生成最小
-   * block/zone/slot 结构供服务端校验，但作者只需要面对可拖动的独立元素。
-   */
-  const dropFromPalette = (event: DragEvent<HTMLElement>) => {
-    const payload = decodePalettePayload(event.dataTransfer.getData(paletteDragType))
-    if (!payload) return
-    event.preventDefault()
-    const [type, version] = payload.ref.split('@')
-    const manifest = manifests.get(type, version)
-    if (!manifest) { setActionError('组件清单不存在或已经更新'); return }
-    void addCanvasComponent(manifest, manifest.displayName, currentDataContextId, payload.options)
-  }
-
-  const addCanvasComponent = async (
-    manifest: ComponentManifest, title = manifest.displayName, dataContextId = currentDataContextId,
-    initialOptions?: Partial<ComponentOptions>,
-  ) => {
-    if (!draft || !page || !canEdit) return
-    setComponentBusy(true); setComponentError(''); setActionError('')
-    const templateTarget = findCompatibleTemplateSlot(page, activeSection?.id, manifest)
-    if (templateTarget) {
-      const result = placeComponentInSlotOperations({
-        page, ...templateTarget, manifest, title, dataContextId,
-        fields: fieldsOf(dataContextId), initialOptions, newId: () => crypto.randomUUID(),
-      })
-      if (result.error) {
-        setActionError(result.error); setComponentError(result.error); setComponentBusy(false)
-        return
-      }
-      const saved = await commit(result.operations, `${manifest.displayName}已填入展示模板`, setActionError)
-      if (saved) {
-        setActiveSectionId(templateTarget.sectionId); setSelectedComponentId(result.componentId)
-        revealSidePanel('data'); setComponentLibraryOpen(false)
-      }
-      setComponentBusy(false)
-      return
-    }
-    setActionError('请先在画布中添加分析对象并确认小节布局，再选择数据组件')
-    setComponentBusy(false)
-  }
-
   const placeComponentInSlot = async (
     blockId: string, zoneId: string, slotId: string, ref: string,
     configuredTitle?: string, configuredContextId?: string,
@@ -1469,7 +1363,7 @@ export function ReportEditorPage() {
     if (result.error) { setActionError(result.error); setComponentError(result.error); setComponentBusy(false); return }
     const saved = await commit(result.operations, `${manifest.displayName}已放入现有元素组`, setActionError)
     if (saved) {
-      setSelectedComponentId(result.componentId); revealSidePanel('data'); setComponentLibraryOpen(false); setSlotPickerTarget(null)
+      setSelectedComponentId(result.componentId); revealSidePanel('data'); setSlotPickerTarget(null)
     }
     setComponentBusy(false)
   }
@@ -1482,15 +1376,16 @@ export function ReportEditorPage() {
     )
   }
 
-  const pickComponentForSlot = (manifest: ComponentManifest, options?: Partial<ComponentOptions>, title = manifest.displayName, dataContextId = currentDataContextId) => {
-    void addCanvasComponent(manifest, title, dataContextId, options)
+  const deleteComponent = async (componentId: string) => {
+    if (!draft || !page || !componentId || !canEdit) return
+    const operations = removeComponentOperations(page, componentId)
+    const saved = await commit(operations, '组件已移除并生成新修订', setActionError)
+    if (saved && selectedComponentId === componentId) setSelectedComponentId('')
   }
 
   const deleteSelectedComponent = async () => {
-    if (!draft || !page || !selectedComponent || !canEdit) return
-    const operations = removeComponentOperations(page, selectedComponent.id)
-    const saved = await commit(operations, '组件已移除并生成新修订', setActionError)
-    if (saved) setSelectedComponentId('')
+    if (!selectedComponent) return
+    await deleteComponent(selectedComponent.id)
   }
 
   const duplicateBlock = async (blockId: string) => {
@@ -1837,10 +1732,8 @@ export function ReportEditorPage() {
 
       <div className="report-editor-body">
         <div className="report-editor-main">
-          <nav className="report-editor-outline report-editor-sidebar" aria-label="组件面板与大纲">
-            <ComponentPalette manifests={latestComponentManifests(manifests.list())} disabled={!canEdit}
-              onPick={pickComponentForSlot} />
-            <details className="report-editor-structure-panel">
+          <nav className="report-editor-outline report-editor-sidebar" aria-label="报告结构">
+            <details className="report-editor-structure-panel is-standalone" open>
               <summary><span>报告结构</span><em>{sections.length} / {subsectionTotal}</em><CaretRight size={14} /></summary>
               <header><strong>{sectionNoun}</strong><span>{canEdit && <>
                 <button type="button" className="report-outline-add" title={`新建${sectionNoun}`} onClick={() => void addSection()}><Plus size={13} />新建</button>
@@ -1877,6 +1770,8 @@ export function ReportEditorPage() {
                       }}><span>{block.title || '未命名小节'}</span><em>{subsectionLayoutName(block.cardKind || '')}</em></button>
                       {canEdit && <button type="button" className="report-outline-config" aria-label={`配置小节 ${block.title || '未命名小节'}`} title="配置小节"
                         onClick={() => openFrameworkConfig({ kind: 'SUBSECTION', sectionId: section.id, blockId: block.id, title: block.title || '未命名小节', layout: subsectionLayoutName(block.cardKind || '') })}><GearSix size={13} />配置</button>}
+                      {canEdit && <button type="button" className="report-outline-config is-danger" aria-label={`删除小节 ${block.title || '未命名小节'}`} title="删除小节"
+                        onClick={() => void deleteBlock(block.id)}><Trash size={13} />删除</button>}
                     </li>)}
                   </ul>}
                 </li>
@@ -1885,9 +1780,7 @@ export function ReportEditorPage() {
               {sections.length === 0 && <p>添加第一个元素后自动创建{sectionNoun}</p>}
             </details>
           </nav>
-          <main ref={canvasRef} className={`report-editor-canvas ${aiPreview ? 'has-ai-proposal' : ''}`.trim()}
-            onDragOver={event => { if (event.dataTransfer.types.includes(paletteDragType)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' } }}
-            onDrop={dropFromPalette}>
+          <main ref={canvasRef} className={`report-editor-canvas ${aiPreview ? 'has-ai-proposal' : ''}`.trim()}>
             <div className="report-editor-canvas-spec" aria-live="polite">
               {editorView === 'edit' ? <>
                 <span>清晰编辑</span>
@@ -1927,7 +1820,7 @@ export function ReportEditorPage() {
                 onApply={() => notify('筛选条件已应用到报告预览')} applying={executing}
                 onConfigure={editorView === 'edit' ? () => { setSelectedComponentId(''); revealSidePanel('data'); setReportInspectorView('filters') } : undefined}
                 onExport={() => notify('发布后可导出报告')} locked={editorView === 'edit'} />
-              {/* 框架创建发生在画布内；左侧只负责把数据组件填入已确认的小节槽位。 */}
+              {/* 框架与数据卡片都从画布内直接创建，左侧只展示报告结构。 */}
               {page.sections.length > 0 && <ReportPageView definition={draft.definition} page={page} manifests={manifests} results={results}
                 designMode={!execution}
                 selectedComponentId={editorView === 'edit' ? selectedComponentId : ''}
@@ -1942,8 +1835,8 @@ export function ReportEditorPage() {
                   onLayoutChange: (sectionId, blockId, rect) => void changeLayout(sectionId, blockId, rect),
                   onSlotLayoutChange: (blockId, zoneId, slotId, rect) => void changeSlotLayout(blockId, zoneId, slotId, rect),
                   onZoneReorder: (blockId, zoneId, direction) => void reorderZone(blockId, zoneId, direction),
-                  onComponentDrop: (blockId, zoneId, slotId, ref) => void placeComponentInSlot(blockId, zoneId, slotId, ref),
                   onEmptySlotSelect: target => { setComponentError(''); setSlotPickerTarget(target) },
+                  onRemoveComponent: componentId => void deleteComponent(componentId),
                   onBlockTitleChange: (sectionId, blockId, title) => void renameBlock(sectionId, blockId, title),
                   onDuplicateBlock: (_sectionId, blockId) => void duplicateBlock(blockId),
                   onDeleteBlock: (_sectionId, blockId) => void deleteBlock(blockId),
@@ -2085,12 +1978,6 @@ export function ReportEditorPage() {
       </footer>
     </div>
     {jsonOpen && <DefinitionJSONDialog definition={draft.definition} onClose={() => setJsonOpen(false)} />}
-    {componentLibraryOpen && <ComponentLibraryDialog manifests={latestComponentManifests(manifests.list())}
-      reportContexts={reportContexts} contextNameOf={contextNameOf} fieldsOf={fieldsOf} defaultContextId={currentDataContextId}
-      sectionName={activeSection?.name ?? ''}
-      busy={componentBusy} error={componentError}
-      onClose={() => setComponentLibraryOpen(false)}
-      onAdd={(manifest, title, dataContextId) => pickComponentForSlot(manifest, undefined, title, dataContextId)} />}
     {slotPickerTarget && <SlotComponentPicker key={slotPickerTarget.slotId} target={slotPickerTarget}
       manifests={latestComponentManifests(manifests.list())} busy={componentBusy} error={componentError}
       onClose={() => { if (!componentBusy) setSlotPickerTarget(null) }} onSelect={pickComponentForExactSlot} />}

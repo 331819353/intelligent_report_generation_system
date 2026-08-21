@@ -5883,3 +5883,89 @@ body:has(.report-editor-shell) { height: 100%; overflow: hidden; }
 }
 .report-runtime-frame-zone > .report-runtime-element[data-frame-role="DETAIL"],
 .report-runtime-frame-zone > .report-runtime-element[data-frame-role="APPENDIX"] { grid-column: 1 / -1 !important; }
+
+/* 画布创建入口统一收口到小节槽位；左侧仅保留紧凑的报告结构导航。 */
+.report-editor-workspace .report-editor-main { grid-template-columns: 224px minmax(0, 1fr); }
+.report-editor-sidebar { overflow-y: auto; }
+.report-editor-structure-panel.is-standalone {
+  min-height: 100%;
+  flex: 1;
+  border-top: 0;
+  background: #fff;
+}
+.report-editor-structure-panel.is-standalone > summary { min-height: 48px; }
+.report-editor-structure-panel.is-standalone .report-outline-list {
+  max-height: none;
+  margin-bottom: 14px;
+  overflow: visible;
+}
+.report-outline-config.is-danger { color: #b65752; }
+.report-outline-config.is-danger:hover { background: #fff0ef; color: #c63f38; }
+
+/* 小节和槽位删除都是画布的一等操作，不再依赖隐藏工具条或键盘。 */
+.report-block-toolbar.is-subsection-toolbar { opacity: 1; }
+.report-slot-remove {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  z-index: 6;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #d7e2ec;
+  border-radius: 8px;
+  padding: 0;
+  background: rgb(255 255 255 / 94%);
+  color: #74859a;
+  box-shadow: 0 4px 12px rgb(32 61 91 / 9%);
+  cursor: pointer;
+  opacity: .82;
+  transition: opacity 120ms ease, border-color 120ms ease, color 120ms ease, background 120ms ease;
+}
+.report-render-slot:hover .report-slot-remove,
+.report-render-slot.is-selected .report-slot-remove,
+.report-slot-remove:focus-visible { opacity: 1; }
+.report-slot-remove:hover { border-color: #efc5c1; background: #fff3f2; color: #c4423b; }
+.report-slot-remove:focus-visible { outline: 3px solid rgb(8 114 211 / 16%); outline-offset: 2px; }
+
+/* 筛选配置与筛选值完整可达：面板纵向滚动，长值换行，候选项列表独立滚动。 */
+.report-editor-panel-body.is-data > .report-card-inspector .report-editor-manual-form {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.report-metric-contract,
+.report-metric-contract-section,
+.report-metric-filter-subsection,
+.report-metric-global-map,
+.report-metric-local-filter { max-width: 100%; min-width: 0; }
+.report-filter-option-reader .is-values {
+  max-height: 132px;
+  align-content: flex-start;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 3px;
+  scrollbar-width: thin;
+}
+.report-filter-option-editor > p em,
+.report-filter-option-reader .is-values em {
+  max-width: 100%;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+.report-designed-filter-summary b {
+  max-width: 100%;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+@media (max-width: 1180px) {
+  .report-editor-workspace .report-editor-main { grid-template-columns: 208px minmax(0, 1fr); }
+}
