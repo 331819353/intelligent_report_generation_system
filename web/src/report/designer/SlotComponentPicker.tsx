@@ -26,7 +26,9 @@ function cardThumbnail(item: AnalysisCardCatalogItem, variant: AnalysisCardVaria
 }
 
 function isConclusionManifest(manifest: ComponentManifest) {
-  return manifest.type === 'analysis-insight-conclusion' || manifest.type === 'insight-text' || manifest.type === 'rich-text'
+  // 小节的结论槽位承载完整分析叙事，只允许第 37 类长文本结论。
+  // 洞察摘要、通用富文本与旧智能结论仍可作为普通内容组件使用，不能替代结论版式。
+  return manifest.type === 'analysis-long-form-conclusion'
 }
 
 export function SlotComponentPicker({ target, manifests, busy, error, onClose, onSelect }: {
